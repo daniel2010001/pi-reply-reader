@@ -15,14 +15,15 @@ with local text-to-speech after cleaning its Markdown for listening. Nothing pla
 | ID | Specs | Task | Route | Commit |
 |---|---|---|---|---|
 | T1 | S1-S4 | [x] Scaffold: package.json (`pi-package`), TypeScript, vitest, MIT, empty extension that loads | inline | `d1fd422` |
-| T2 | S2 | [ ] `speechText(markdown)`: deterministic cleanup, one test per Markdown construct, run over real replies | test-first | — |
+| T2 | S2 | [x] `speechText(markdown)`: deterministic cleanup, one test per Markdown construct, run over real replies | test-first | `ecbe816` |
 | T3 | S3 | [ ] Pinned voice + runtime download behind a confirm; Spanish Piper voice (choice open) | test-first | — |
 | T4 | S1, S4 | [ ] Synthesis and playback on the default sink, `/read [id]`, a new reading or Esc stops the previous | test-first | — |
 | T5 | S1-S4 | [ ] README (incl. SSH audio forwarding), CHANGELOG, help | inline | — |
 | T6 | S1-S4 | [ ] Live check in gsh and plain Pi, over SSH from the desktop | owner | — |
 
-Open: which Spanish voice; how `/read P12.R1` finds replies (rebuild from the branch here, or reuse `pi-reply-thread`'s IDs); how IDs and code are spoken.
+Open: which Spanish voice; how `/read P12.R1` finds replies (rebuild from the branch here, or reuse `pi-reply-thread`'s IDs); how IDs and code are spoken (T2 default: fenced blocks omitted, inline code spoken verbatim without backticks, `_` as a space; see L2).
 
 ## Log
 
 - L1 (2026-10-26, owner, verbatim): "respecto a lo del lector: me gusta el nombre, usemos ese, crea otro proyecto." → repo `/home/danielblc/projects/pi-reply-reader` (`git init -b main`, repo-local identity as in pi-reply-thread); npm name `pi-reply-reader` free (404). T1: 1/1 test, typecheck clean.
+- L2 (2026-10-26, owner, verbatim): "Retomemos el lector. Leé odd/tasks/reply-reader.md hasta el final del Log y arrancá la T2 (speechText, la limpieza de Markdown para voz), test-first. Corré la limpieza sobre respuestas reales de mis sesiones para ver cómo queda." → `src/speech-text.ts`: 12 RED per construct, then GREEN. Run over 1,044 real assistant replies (`~/.gentle-shell/agent/sessions`, read-only, nothing copied into the repo) found 3 defects, each pinned RED→GREEN: bold around inline code left `**` unpaired (1,012 stray `*` in 329 replies → 0 in prose), a bare URL inside bold swallowed the closing `**`, and snake_case outside backticks kept `_`. 17/17 tests, typecheck clean. What remains is content, not syntax: `/` in paths and branches, `#122` PR numbers, commit hashes, globs (`*.hs.lan`), `<iframe>`. One audible gap: an omitted code block after "abrí gsh con…:" leaves the sentence hanging.
