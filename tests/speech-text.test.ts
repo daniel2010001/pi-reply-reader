@@ -46,9 +46,9 @@ describe("speechText", () => {
 		);
 	});
 
-	it("omits fenced code blocks", () => {
-		expect(speechText("Corré esto:\n\n```bash\npnpm test -- --run\n```\n\nListo.\n\n~~~\nx\n~~~")).toBe(
-			"Corré esto:\n\nListo.",
+	it("announces a fenced code block instead of reading it", () => {
+		expect(speechText("Corré esto:\n\n```bash\npnpm test -- --run\n```\n\nListo.\n\n~~~\nx\n~~~\nY sin cerrar:\n```\ny")).toBe(
+			"Corré esto:\n\nBloque de código.\n\nListo.\n\nBloque de código.\nY sin cerrar:\nBloque de código.",
 		);
 	});
 

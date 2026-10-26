@@ -19,6 +19,7 @@ export function speechText(markdown: string): string {
 		const open = /^\s{0,3}(`{3,}|~{3,})/.exec(raw);
 		if (open) {
 			fence = { char: open[1][0], length: open[1].length };
+			out.push(CODE_BLOCK);
 			continue;
 		}
 
@@ -40,6 +41,8 @@ export function speechText(markdown: string): string {
 		.trim();
 }
 
+/** Said in place of a fenced block, so a sentence like "run this:" does not hang. */
+const CODE_BLOCK = "Bloque de código.";
 const TABLE_SEPARATOR = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 const WORD = String.raw`\p{L}\p{N}_`;
 
