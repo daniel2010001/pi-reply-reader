@@ -1,0 +1,25 @@
+{
+  "name": "pi-reply-reader",
+  "version": "0.0.0",
+  "description": "Read a Pi or Gentle Shell reply aloud on request, with local text-to-speech and Markdown cleaned up for listening.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Daniel Li",
+  "keywords": ["pi-package", "pi-extension", "pi-coding-agent", "gentle-shell", "tts"],
+  "pi": { "extensions": ["./extensions/reply-reader.ts"] },
+  "files": ["extensions", "src", "README.md", "CHANGELOG.md", "LICENSE"],
+  "engines": { "node": ">=22.19.0" },
+  "scripts": { "test": "vitest --run", "typecheck": "tsc --noEmit" },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.2.0 <2",
+    "@earendil-works/pi-tui": ">=1.2.0 <2"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
+    "@types/node": "^26.6.5",
+    "typescript": "^6.0.2",
+    "vitest": "^5.0.5"
+  }
+}
