@@ -21,7 +21,7 @@ with local text-to-speech after cleaning its Markdown for listening. Nothing pla
 | T5 | S1-S4 | [ ] README (incl. SSH audio forwarding), CHANGELOG, help | inline | — |
 | T6 | S1-S4 | [ ] Live check in gsh and plain Pi, over SSH from the desktop | owner | — |
 
-Open: which Spanish voice; how `/read P12.R1` finds replies (rebuild from the branch here, or reuse `pi-reply-thread`'s IDs); how IDs and code are spoken (T2: inline code spoken verbatim without backticks, `_` as a space, see L2; code blocks decided in L3). Later, per L3: richer code-block announcement (context or a summary).
+Open: which Spanish voice (verified in rhasspy/piper-voices `voices.json`, 2026-10-26: es_AR-daniela-high, es_MX-claude-high, es_ES-davefx-medium, es_ES-sharvard-medium, es_MX-ald-medium, plus low/x_low variants); how `/read P12.R1` finds replies (rebuild from the branch here, or reuse `pi-reply-thread`'s IDs); how IDs and code are spoken (T2: inline code spoken verbatim without backticks, `_` as a space, see L2; code blocks decided in L3). Later, per L3: richer code-block announcement (context or a summary).
 
 ## Log
 
