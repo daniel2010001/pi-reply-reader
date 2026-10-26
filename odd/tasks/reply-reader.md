@@ -14,7 +14,7 @@ with local text-to-speech after cleaning its Markdown for listening. Nothing pla
 
 | ID | Specs | Task | Route | Commit |
 |---|---|---|---|---|
-| T1 | S1-S4 | [x] Scaffold: package.json (`pi-package`), TypeScript, vitest, MIT, empty extension that loads | inline | — |
+| T1 | S1-S4 | [x] Scaffold: package.json (`pi-package`), TypeScript, vitest, MIT, empty extension that loads | inline | `d1fd422` |
 | T2 | S2 | [ ] `speechText(markdown)`: deterministic cleanup, one test per Markdown construct, run over real replies | test-first | — |
 | T3 | S3 | [ ] Pinned voice + runtime download behind a confirm; Spanish Piper voice (choice open) | test-first | — |
 | T4 | S1, S4 | [ ] Synthesis and playback on the default sink, `/read [id]`, a new reading or Esc stops the previous | test-first | — |
