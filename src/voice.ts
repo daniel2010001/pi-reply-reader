@@ -149,7 +149,8 @@ function dataHome(env: NodeJS.ProcessEnv): string | undefined {
 	return undefined;
 }
 
-function onPath(name: string, env: NodeJS.ProcessEnv): string | undefined {
+/** An executable `name` in an absolute PATH entry. */
+export function onPath(name: string, env: NodeJS.ProcessEnv): string | undefined {
 	for (const dir of (env.PATH ?? "").split(delimiter)) {
 		if (!isAbsolute(dir)) continue;
 		const candidate = join(dir, name);
