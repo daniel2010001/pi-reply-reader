@@ -80,6 +80,10 @@ describe("speechText", () => {
 		expect(speechText("Un \\*literal\\* y un \\_guion\\_.")).toBe("Un *literal* y un _guion_.");
 	});
 
+	it("collapses runs of spaces and tabs left by removed markers", () => {
+		expect(speechText("Hola  **mundo**\t\ty  `x`   chau")).toBe("Hola mundo y x chau");
+	});
+
 	it("is deterministic and collapses blank runs", () => {
 		const input = "# A\n\n\n\nB\n\n";
 		expect(speechText(input)).toBe("A.\n\nB");

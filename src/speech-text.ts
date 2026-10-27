@@ -37,6 +37,7 @@ export function speechText(markdown: string): string {
 
 	return out
 		.join("\n")
+		.replace(/[ \t]{2,}|\t/g, " ")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
 }
