@@ -1,0 +1,6 @@
+El worker sigue trabajando y no terminó. El aviso que llegó es solo un reporte de avance: ya leyó L35 a L39 y el código, y está escribiendo los tests en rojo de T26, que cubren los dos modos, el flag, la nota del visor y la última línea de la ayuda. Después sigue con T27.
+
+Cuando termine, reviso lo que hizo y lo commiteo, un commit por tarea. Mientras tanto, si probás algo hacelo en otra terminal, porque un reload en esta sesión lo vuelve a cancelar.
+
+Needs your decision.
+1. ¿Me avisás cuando hayas probado Answered, ? e y en una sesión aparte, así hago el merge?

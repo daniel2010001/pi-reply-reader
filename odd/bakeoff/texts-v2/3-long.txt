@@ -1,0 +1,10 @@
+La prueba funcionó: tu prompt citó P 11, R 1, Q 1 a Q5 y las cinco quedaron respondidas. Pending está vacío.
+
+Ya está hecho: creé gentle shell agent AGENTS punto md con la regla de terminar las respuestas en ## Needs your decision, con las preguntas numeradas y cada una terminando en ?. Antes de crearlo comprobé que no existiera. Se aplica en gsh desde la próxima sesión o después de reload. A partir de ahí, ofrecimientos como el del vínculo manual ya no se van a perder sin ?.
+
+Un worker está con T18 a T20, en la rama feat pending central:
+T18, menú de formato: pegar como líneas R: pasa a ser el formato por defecto. En Pending, f cambia al formato de misma línea (a), y los atajos de abajo muestran cuál está activo. La elección se guarda en la sesión. s llena R: Sí. o a Sí. según el formato. Como ninguno de los dos termina con un salto de línea, el cursor queda listo para escribir la respuesta.
+T19, vínculo manual: marcás 2 o más preguntas con space y apretás l, y quedan en una sola cadena. Con menos de 2 marcadas, l sigue usando la sugerencia aproximadamente.
+T20: el título ## Needs your decision deja de contar como pregunta cuando tiene preguntas debajo. Si no tiene ninguna, sigue contando.
+
+Cuando termine el worker: reviso sus commits y corro los tests. También agrego el fragmento de AGENTS.md al README como recomendación (ahora no lo toco porque el README está entre los archivos que edita el worker). Después te paso qué probar con reload.
