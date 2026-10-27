@@ -192,6 +192,29 @@ describe("reply-reader extension", () => {
 		]);
 	});
 
+	it("warns once per session on /read about a broken outputs.json, even when only local is left", async () => {
+		installVoice();
+		mkdirSync(join(root, "config", "pi-reply-reader"), { recursive: true });
+		writeFileSync(join(root, "config", "pi-reply-reader", "outputs.json"), '{ "desktop": "tcp:192.168.1.22:4713", }');
+		const reader = load();
+		await reader.run("read");
+		await reader.settled();
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-1.pid")));
+		expect(reader.notes).toHaveLength(1);
+		expect(reader.notes[0][1]).toBe("warning");
+		expect(reader.notes[0][0]).toMatch(/^Ignored .*outputs\.json: not valid JSON/);
+	});
+
+	it("clears the status and shows the error when paplay dies while piper still writes", async () => {
+		installVoice("cat > /dev/null; exec head -c 2000000 /dev/zero");
+		script("paplay", 'echo "Connection refused" >&2; exit 1');
+		const reader = load();
+		await reader.run("read");
+		await reader.settled();
+		expect(reader.notes).toEqual([['Playback on "local" failed: Connection refused', "error"]]);
+	});
+
 	it("a new /read stops the one playing", async () => {
 		installVoice(`echo $$ > "${log("piper.pid")}"; exec sleep 30`);
 		const reader = load();

@@ -22,6 +22,8 @@ export function createReplyReader(deps: { env?: NodeJS.ProcessEnv; hostname?: st
 		let current: { reading: Reading; ctx: ExtensionContext } | undefined;
 		/** The output chosen in this session, by name; asked on the first reading. */
 		let chosen: string | undefined;
+		/** Whether this session's first reading already reported problems in outputs.json. */
+		let warned = false;
 		let unsubscribe: (() => void) | undefined;
 
 		const stop = (): void => {
@@ -47,11 +49,13 @@ export function createReplyReader(deps: { env?: NodeJS.ProcessEnv; hostname?: st
 		};
 
 		const outputForReading = async (ctx: ExtensionContext): Promise<Output | undefined> => {
-			const quiet = loadOutputs(env, hostname).outputs;
-			const remembered = quiet.find((output) => output.name === chosen);
+			// A typo in outputs.json must not silently send the reading to local; say so once per session.
+			const list = warned ? loadOutputs(env, hostname).outputs : outputs(ctx);
+			warned = true;
+			const remembered = list.find((output) => output.name === chosen);
 			if (remembered) return remembered;
-			if (quiet.length === 1) return quiet[0];
-			return askOutput(ctx, outputs(ctx));
+			if (list.length === 1) return list[0];
+			return askOutput(ctx, list);
 		};
 
 		pi.registerCommand("read", {
@@ -136,6 +140,7 @@ export function createReplyReader(deps: { env?: NodeJS.ProcessEnv; hostname?: st
 
 		pi.on("session_start", (_event, ctx) => {
 			chosen = undefined;
+			warned = false;
 			unsubscribe?.();
 			unsubscribe = ctx.hasUI
 				? ctx.ui.onTerminalInput((data) => {
