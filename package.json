@@ -20,6 +20,7 @@
   "files": [
     "extensions",
     "src",
+    "examples",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
