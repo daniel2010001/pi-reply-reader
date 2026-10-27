@@ -1,6 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import type { Output } from "./outputs.ts";
 import { onPath, type Voice } from "./voice.ts";
 
@@ -153,12 +152,13 @@ function loadSherpaTts(voice: SherpaVoice): Promise<SherpaTts> {
 	let tts = loaded.get(voice.model);
 	if (!tts) {
 		// sherpa-onnx-node is CommonJS with a native addon; 2.x dropped espeak-ng, so it stays on 1.13.x.
-		const { OfflineTts } = createRequire(import.meta.url)("sherpa-onnx-node") as {
-			OfflineTts: { createAsync(config: unknown): Promise<SherpaTts> };
-		};
-		tts = OfflineTts.createAsync({
-			model: { vits: { model: voice.model, tokens: voice.tokens, dataDir: voice.dataDir }, numThreads: 2, provider: "cpu", debug: 0 },
-			maxNumSentences: 1,
+		// A plain import, not createRequire: Pi's compiled extension loader resolves only imports.
+		tts = import("sherpa-onnx-node").then((module) => {
+			const { OfflineTts } = module.default ?? module;
+			return OfflineTts.createAsync({
+				model: { vits: { model: voice.model, tokens: voice.tokens, dataDir: voice.dataDir }, numThreads: 2, provider: "cpu", debug: 0 },
+				maxNumSentences: 1,
+			}) as Promise<SherpaTts>;
 		});
 		tts.catch(() => loaded.delete(voice.model));
 		loaded.set(voice.model, tts);
