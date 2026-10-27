@@ -97,7 +97,63 @@ function inline(text: string): string {
 }
 
 function codeSpan(code: string): string {
-	return identifierSpaces(code.trim());
+	return speakable(code.trim());
+}
+
+/** IDs, symbols, emoji and paths a voice stumbles on, made speakable (prose and code spans alike). */
+function speakable(text: string): string {
+	const urls: string[] = [];
+	let out = text.replace(/\S*:\/\/\S*/g, (url) => `\uE004${urls.push(url) - 1}\uE005`);
+	out = identifierSpaces(out.replace(/\S+/g, pathWords));
+	out = out.replace(
+		/(?<![\p{L}\p{N}.])P(\d+)\.R(\d+)(?:\.Q(\d+))?(?![\p{L}\p{N}]|\.[\p{L}\p{N}])/gu,
+		(_m, p: string, r: string, q?: string) => `P ${p}, R ${r}${q ? `, Q ${q}` : ""}`,
+	);
+	out = out.replace(/(\d)[ \t]*×[ \t]*(?=\d)/g, "$1 por ");
+	for (const [symbol, word] of SYMBOL_WORDS) out = spokenAs(out, symbol, word);
+	return spokenAs(out, EMOJI, "").replace(/\uE004(\d+)\uE005/g, (_m, index: string) => identifierSpaces(urls[Number(index)]));
+}
+
+const SYMBOL_WORDS: [RegExp, string][] = [
+	[/[→⇒➜]/, "a"],
+	[/←/, "desde"],
+	[/≈/, "aproximadamente"],
+	[/≠/, "distinto de"],
+	[/≥/, "mayor o igual a"],
+	[/≤/, "menor o igual a"],
+	[/±/, "más o menos"],
+	[/&+/, "y"],
+];
+const EMOJI = /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[\u{1F3FB}-\u{1F3FF}\uFE0F\u200D\u20E3])+/u;
+
+/** Replaces `symbol` with `word`, spaced from neighbouring words but not from punctuation. */
+function spokenAs(text: string, symbol: RegExp, word: string): string {
+	const pattern = new RegExp(`[ \\t]*(?:${symbol.source})[ \\t]*`, "gu");
+	return text.replace(pattern, (match: string, offset: number, whole: string) => {
+		const before = offset > 0 && !/[([{\s]/u.test(whole[offset - 1]);
+		const next = whole[offset + match.length];
+		const after = next !== undefined && !/[)\]}.,;:!?\s]/u.test(next);
+		if (word === "") return before && after ? " " : "";
+		return `${before ? " " : ""}${word}${after ? " " : ""}`;
+	});
+}
+
+/**
+ * `~/.gentle-shell/agent/AGENTS.md` reads as "gentle shell agent AGENTS punto md" and
+ * `feat/pending-central` as "feat pending central". Fractions (`1/2`), URLs and short word pairs
+ * such as `y/o` or `km/h` are kept.
+ */
+function pathWords(token: string): string {
+	const [, lead, core, trail] = /^([("'“«[]*)(.*?)([)"'”»\].,;:!?]*)$/u.exec(token) ?? [];
+	if (!core || core.includes("://") || !/[\p{L}\p{N}]/u.test(core)) return token;
+	const rooted = /^(?:~|\.{1,2})?\//.test(core);
+	if (!rooted && !/\p{L}\/[\p{L}\p{N}]|[\p{L}\p{N}]\/\p{L}/u.test(core)) return token;
+	if (!rooted && /^\p{L}{1,3}\/\p{L}{1,3}$/u.test(core)) return token;
+	const segments = core.split("/").map((segment) => segment.replace(/^[~.]+/, "")).filter((segment) => segment !== "");
+	const last = segments.length - 1;
+	if (last >= 0) segments[last] = segments[last].replace(/(?<=[\p{L}\p{N}])\.(?=[\p{L}\p{N}])/gu, " punto ");
+	const words = segments.join(" ").replace(/(?<=[\p{L}\p{N}])[-_]+(?=[\p{L}\p{N}])/gu, " ");
+	return `${lead}${words}${trail}`;
 }
 
 /** `auto_read` reads as "auto read", not "auto guion bajo read". */
@@ -119,7 +175,7 @@ function prose(text: string): string {
 		.replace(/~~(?=\S)(.+?)(?<=\S)~~/g, "$1")
 		.replace(new RegExp(`(?<![${WORD}*])\\*(?=\\S)([^*\\n]*?)(?<=\\S)\\*(?![${WORD}*])`, "gu"), "$1")
 		.replace(new RegExp(`(?<![${WORD}])_(?=\\S)([^_\\n]*?)(?<=\\S)_(?![${WORD}])`, "gu"), "$1");
-	return identifierSpaces(unwrapped);
+	return speakable(unwrapped);
 }
 
 function host(url: string): string {

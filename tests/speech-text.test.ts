@@ -32,7 +32,7 @@ describe("speechText", () => {
 
 	it("speaks inline code without backticks and with identifier underscores as spaces", () => {
 		expect(speechText("Usá `speechText` y `auto_read` en `src/speech-text.ts`.")).toBe(
-			"Usá speechText y auto read en src/speech-text.ts.",
+			"Usá speechText y auto read en src speech text punto ts.",
 		);
 	});
 
@@ -82,6 +82,56 @@ describe("speechText", () => {
 
 	it("collapses runs of spaces and tabs left by removed markers", () => {
 		expect(speechText("Hola  **mundo**\t\ty  `x`   chau")).toBe("Hola mundo y x chau");
+	});
+
+	it("speaks dotted reply IDs as their parts", () => {
+		expect(speechText("Citó P11.R1.Q1 a Q5, ver P11.R1 y `P12.R3.Q2`.")).toBe(
+			"Citó P 11, R 1, Q 1 a Q5, ver P 11, R 1 y P 12, R 3, Q 2.",
+		);
+	});
+
+	it("speaks symbols as words", () => {
+		expect(speechText("s llena R: Sí. o → Sí. según el formato (→).")).toBe("s llena R: Sí. o a Sí. según el formato (a).");
+		expect(speechText("a ⇒ b ➜ c ← d, la sugerencia ≈.")).toBe("a a b a c desde d, la sugerencia aproximadamente.");
+		expect(speechText("x ≠ y, n ≥ 2, n ≤ 5, ± 3, 1920×1080, 3 × 4, R&D y `a && b`.")).toBe(
+			"x distinto de y, n mayor o igual a 2, n menor o igual a 5, más o menos 3, 1920 por 1080, 3 por 4, R y D y a y b.",
+		);
+	});
+
+	it("drops emoji and pictographs", () => {
+		expect(speechText("- ✅ Hecho 🎉.\nListo 👍🏽, `ok ✨` y 🇦🇷 fin")).toBe("Hecho.\nListo, ok y fin");
+	});
+
+	it("speaks paths and branches as words, in prose and inline code", () => {
+		expect(speechText("Creé ~/.gentle-shell/agent/AGENTS.md, en la rama feat/pending-central.")).toBe(
+			"Creé gentle shell agent AGENTS punto md, en la rama feat pending central.",
+		);
+		expect(speechText("Abrí `~/.gentle-shell/agent/AGENTS.md`, `feat/pending-central`, `./src/auto_read.ts` y luego /replies.")).toBe(
+			"Abrí gentle shell agent AGENTS punto md, feat pending central, src auto read punto ts y luego replies.",
+		);
+	});
+
+	it("keeps fractions and y/o-style words as they are", () => {
+		expect(speechText("Leé 1/2 o `3/4` y/o and/or.")).toBe("Leé 1/2 o 3/4 y/o and/or.");
+	});
+
+	it("keeps URL hosts unchanged next to the path rule", () => {
+		expect(speechText("Ver https://github.com/x/y/pull/1 y <https://pi.dev/docs/a>.")).toBe("Ver github.com y pi.dev.");
+		expect(speechText("Abrí `http://localhost:8082/dev/sticky?barra=columna&alto=bajo` → listo.")).toBe(
+			"Abrí http://localhost:8082/dev/sticky?barra=columna&alto=bajo a listo.",
+		);
+	});
+
+	it("keeps plain numbers, dates and versions unchanged", () => {
+		expect(speechText("Son 1,044 respuestas, 42 tests y 3.5 s.")).toBe("Son 1,044 respuestas, 42 tests y 3.5 s.");
+		expect(speechText("El 2026-10-27 y `2026-10-27`.")).toBe("El 2026-10-27 y 2026-10-27.");
+		expect(speechText("Versiones 1.13.8, v2.0.1 y `sherpa-onnx-node@2.0.1`.")).toBe(
+			"Versiones 1.13.8, v2.0.1 y sherpa-onnx-node@2.0.1.",
+		);
+	});
+
+	it("still announces a fenced block that holds paths and symbols", () => {
+		expect(speechText("Así:\n```\ncat ~/.x/y.md → ✅\n```")).toBe("Así:\nBloque de código.");
 	});
 
 	it("is deterministic and collapses blank runs", () => {
