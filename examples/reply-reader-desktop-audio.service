@@ -1,0 +1,44 @@
+# Carries pi-reply-reader's audio from the machine that runs Pi (here the HS) to the PipeWire of
+# the machine you sit at (here li-desktop), over SSH.
+#
+# Why a tunnel and not a TCP PulseAudio port on the desktop: pipewire-pulse has no IP allow-list,
+# so a LAN port would let anyone on the network play sound on the desktop or record its microphone
+# unless a firewall closes it. The tunnel opens nothing on the desktop: it forwards a loopback port
+# on this machine to the desktop's own Pulse socket, with SSH doing authentication and encryption.
+#
+# Install (on the machine that runs Pi):
+#     cp examples/reply-reader-desktop-audio.service ~/.config/systemd/user/
+#     systemctl --user daemon-reload && systemctl --user enable --now reply-reader-desktop-audio.service
+# Then name the output in ~/.config/pi-reply-reader/outputs.json:
+#     { "desktop": "tcp:127.0.0.1:4714" }
+# Verify (prints the desktop's host name; plays nothing):
+#     PULSE_SERVER=tcp:127.0.0.1:4714 pactl info | grep 'Host Name'
+#
+# It is down while the desktop is off; the restart policy retries, and a reading on "desktop"
+# fails with "Playback on "desktop" failed: ..." in the meantime.
+
+[Unit]
+Description=SSH tunnel for pi-reply-reader audio to li-desktop's PipeWire (loopback port 4714)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The desktop's address and its user's runtime dir, in one place.
+Environment=AUDIO_HOST=192.168.1.22
+Environment=AUDIO_UID=1000
+ExecStart=/usr/bin/ssh -N \
+  -o BatchMode=yes \
+  -o ExitOnForwardFailure=yes \
+  -o ConnectTimeout=10 \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o ControlMaster=no \
+  -o ControlPath=none \
+  -L 127.0.0.1:4714:/run/user/${AUDIO_UID}/pulse/native \
+  danielblc@${AUDIO_HOST}
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
