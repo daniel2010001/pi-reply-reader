@@ -3,13 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import replyReader, { createReplyReader } from "../extensions/reply-reader.ts";
+import type { SherpaRequest, SherpaTts } from "../src/playback.ts";
 import { speechText } from "../src/speech-text.ts";
 
 let root: string;
 let env: NodeJS.ProcessEnv;
 let next = 0;
+/** Every request the fake engine received, in order. */
+let synthesized: SherpaRequest[];
 
 beforeEach(() => {
+	synthesized = [];
 	root = mkdtempSync(join(tmpdir(), "reply-reader-ext-"));
 	mkdirSync(join(root, "bin"));
 	env = { PATH: join(root, "bin"), HOME: join(root, "home"), XDG_DATA_HOME: join(root, "data"), XDG_CONFIG_HOME: join(root, "config") };
@@ -25,18 +29,39 @@ function script(name: string, body: string): void {
 	chmodSync(path, 0o755);
 }
 
-/** A local piper voice whose engine records the text and a paplay that records each playback. */
-function installVoice(piperBody = `cat > "${log("piper.text")}"; printf PCM`): void {
-	script("piper-tts", piperBody);
+const BUNDLE = "sherpa-onnx-supertonic-3-tts-int8-2026-05-11";
+const MODEL_FILES = [
+	"duration_predictor.int8.onnx",
+	"text_encoder.int8.onnx",
+	"vector_estimator.int8.onnx",
+	"vocoder.int8.onnx",
+	"tts.json",
+	"unicode_indexer.bin",
+	"voice.bin",
+];
+
+/**
+ * An installed Supertonic model and a paplay that records each playback. The default paplay keeps
+ * the reading going until stopped when `paplayBody` makes it sleep.
+ */
+function installVoice(paplayBody = ""): void {
 	script(
 		"paplay",
-		`n=$(ls "${root}" | grep -c '^play-.*\.pid$'); echo "\${PULSE_SERVER-unset}" > "${root}/play-$n.server"; echo $$ > "${root}/play-$n.pid"; cat > "${root}/play-$n.audio"`,
+		`n=$(ls "${root}" | grep -c '^play-.*\.pid$'); echo "\${PULSE_SERVER-unset}" > "${root}/play-$n.server"; echo $$ > "${root}/play-$n.pid"; ${paplayBody} cat > "${root}/play-$n.audio"`,
 	);
-	const models = join(root, "data", "piper-tts", "models");
-	mkdirSync(models, { recursive: true });
-	writeFileSync(join(models, "es_MX-claude-high.onnx"), "onnx");
-	writeFileSync(join(models, "es_MX-claude-high.onnx.json"), JSON.stringify({ audio: { sample_rate: 22050 } }));
+	const dir = join(root, "data", "pi-reply-reader", "voices", BUNDLE);
+	mkdirSync(dir, { recursive: true });
+	for (const name of MODEL_FILES) writeFileSync(join(dir, name), name);
 }
+
+/** The engine: each segment becomes one silent sample, so paplay receives two bytes per segment. The latest reply has two. */
+const loadSherpa = async (): Promise<SherpaTts> => ({
+	sampleRate: 44100,
+	async generateAsync(request) {
+		synthesized.push(request);
+		return { samples: new Float32Array(1) };
+	},
+});
 
 function configureOutputs(outputs: Record<string, string>): void {
 	mkdirSync(join(root, "config", "pi-reply-reader"), { recursive: true });
@@ -62,7 +87,7 @@ function load(answers: { select?: string; confirm?: boolean } = {}) {
 		registerCommand: (name: string, options: { handler: Handler; getArgumentCompletions?: Handler }) => commands.set(name, options),
 		on: (event: string, handler: Handler) => events.set(event, handler),
 	};
-	createReplyReader({ env, hostname: "hs-node" })(pi as never);
+	createReplyReader({ env, hostname: "hs-node", loadSherpa })(pi as never);
 
 	const notes: [string, string | undefined][] = [];
 	const selects: [string, string[]][] = [];
@@ -92,6 +117,7 @@ function load(answers: { select?: string; confirm?: boolean } = {}) {
 		run: (name: string, args = "") => (commands.get(name)!.handler as (a: string, c: unknown) => Promise<void>)(args, ctx),
 		key: (data: string) => input?.(data),
 		shutdown: () => (events.get("session_shutdown") as (event: unknown, ctx: unknown) => void)({}, ctx),
+		restart: () => (events.get("session_start") as (event: unknown, ctx: unknown) => void)({ reason: "new" }, ctx),
 		/** Waits until the reading in progress clears its status line. */
 		settled: () => waitFor(() => statuses.length > 0 && statuses.at(-1) === undefined),
 	};
@@ -101,7 +127,7 @@ describe("reply-reader extension", () => {
 	it("registers /read and /read-output by default", () => {
 		const names: string[] = [];
 		replyReader({ registerCommand: (name: string) => names.push(name), on: () => {} } as never);
-		expect(names).toEqual(["read", "read-output"]);
+		expect(names).toEqual(["read", "read-output", "read-voice"]);
 	});
 
 	it("/read speaks the latest reply, cleaned for speech, and shows then clears its status", async () => {
@@ -109,8 +135,9 @@ describe("reply-reader extension", () => {
 		const reader = load();
 		await reader.run("read");
 		await reader.settled();
-		expect(read("piper.text")).toBe(speechText("## Segunda\n\n- `auto_read` listo"));
-		expect(read("play-0.audio")).toBe("PCM");
+		expect(speechText("## Segunda\n\n- `auto_read` listo")).toBe("Segunda.\n\nauto read listo.");
+		expect(synthesized.map((request) => request.text)).toEqual(["Segunda.", "auto read listo."]);
+		expect(readFileSync(log("play-0.audio"))).toHaveLength(4);
 		expect(reader.statuses).toEqual(["Reading P2.R1 on local · Esc stops", undefined]);
 		expect(reader.selects).toEqual([]);
 	});
@@ -120,7 +147,7 @@ describe("reply-reader extension", () => {
 		const reader = load();
 		await reader.run("read", "p1.r1");
 		await reader.settled();
-		expect(read("piper.text")).toBe("Primera respuesta.");
+		expect(synthesized.map((request) => request.text)).toEqual(["Primera respuesta."]);
 	});
 
 	it("/read with an unknown ID says so and plays nothing", async () => {
@@ -206,8 +233,8 @@ describe("reply-reader extension", () => {
 		expect(reader.notes[0][0]).toMatch(/^Ignored .*outputs\.json: not valid JSON/);
 	});
 
-	it("clears the status and shows the error when paplay dies while piper still writes", async () => {
-		installVoice("cat > /dev/null; exec head -c 2000000 /dev/zero");
+	it("clears the status and shows the error when paplay dies before reading", async () => {
+		installVoice();
 		script("paplay", 'echo "Connection refused" >&2; exit 1');
 		const reader = load();
 		await reader.run("read");
@@ -216,39 +243,113 @@ describe("reply-reader extension", () => {
 	});
 
 	it("a new /read stops the one playing", async () => {
-		installVoice(`echo $$ > "${log("piper.pid")}"; exec sleep 30`);
+		installVoice("sleep 30;");
 		const reader = load();
 		await reader.run("read");
-		await waitFor(() => existsSync(log("piper.pid")) && existsSync(log("play-0.pid")));
-		const first = Number(read("piper.pid"));
-		rmSync(log("piper.pid"));
+		await waitFor(() => existsSync(log("play-0.pid")));
 		await reader.run("read", "P1.R1");
-		await waitFor(() => !alive(first));
-		await waitFor(() => existsSync(log("piper.pid")));
-		expect(alive(Number(read("piper.pid")))).toBe(true);
+		await waitFor(() => !alive(Number(read("play-0.pid"))));
+		await waitFor(() => existsSync(log("play-1.pid")));
+		expect(alive(Number(read("play-1.pid")))).toBe(true);
 		reader.shutdown();
+		await waitFor(() => !alive(Number(read("play-1.pid"))));
 	});
 
 	it("Esc stops a reading and is consumed only while one plays", async () => {
-		installVoice(`echo $$ > "${log("piper.pid")}"; exec sleep 30`);
+		installVoice("sleep 30;");
 		const reader = load();
 		expect(reader.key("\x1b")).toBeUndefined();
 		await reader.run("read");
-		await waitFor(() => existsSync(log("piper.pid")));
+		await waitFor(() => existsSync(log("play-0.pid")));
 		expect(reader.key("a")).toBeUndefined();
 		expect(reader.key("\x1b")).toEqual({ consume: true });
 		await reader.settled();
-		await waitFor(() => !alive(Number(read("piper.pid"))));
+		await waitFor(() => !alive(Number(read("play-0.pid"))));
 		expect(reader.key("\x1b")).toBeUndefined();
 	});
 
 	it("ending the session stops the reading", async () => {
-		installVoice(`echo $$ > "${log("piper.pid")}"; exec sleep 30`);
+		installVoice("sleep 30;");
 		const reader = load();
 		await reader.run("read");
-		await waitFor(() => existsSync(log("piper.pid")));
+		await waitFor(() => existsSync(log("play-0.pid")));
 		reader.shutdown();
-		await waitFor(() => !alive(Number(read("piper.pid"))));
+		await waitFor(() => !alive(Number(read("play-0.pid"))));
+	});
+
+	it("reads with the male voice by default", async () => {
+		installVoice();
+		const reader = load();
+		await reader.run("read");
+		await reader.settled();
+		expect(synthesized.map((request) => request.generationConfig.sid)).toEqual([6, 6]);
+	});
+
+	it("/read-voice female switches the next reading to sid 0 and confirms", async () => {
+		installVoice();
+		const reader = load();
+		await reader.run("read-voice", "female");
+		await reader.run("read");
+		await reader.settled();
+		expect(reader.notes).toEqual([["Readings will use the female voice.", "info"]]);
+		expect(reader.selects).toEqual([]);
+		expect(synthesized.map((request) => request.generationConfig.sid)).toEqual([0, 0]);
+	});
+
+	it("/read-voice rejects an unknown name, listing both, and keeps the voice", async () => {
+		installVoice();
+		const reader = load();
+		await reader.run("read-voice", "robot");
+		await reader.run("read");
+		await reader.settled();
+		expect(reader.notes).toEqual([['No voice named "robot". Voices: male, female.', "warning"]]);
+		expect(synthesized.map((request) => request.generationConfig.sid)).toEqual([6, 6]);
+	});
+
+	it("/read-voice without a name asks, and completes voice names", async () => {
+		const reader = load({ select: "female" });
+		await reader.run("read-voice");
+		expect(reader.selects).toEqual([["Which voice should read?", ["male", "female"]]]);
+		expect(reader.notes).toEqual([["Readings will use the female voice.", "info"]]);
+		const complete = reader.commands.get("read-voice")!.getArgumentCompletions as (prefix: string) => unknown;
+		expect(complete("")).toEqual([
+			{ value: "male", label: "male", description: "Supertonic 3, speaker 6" },
+			{ value: "female", label: "female", description: "Supertonic 3, speaker 0" },
+		]);
+		expect(complete("fe")).toEqual([{ value: "female", label: "female", description: "Supertonic 3, speaker 0" }]);
+	});
+
+	it("/read-voice keeps the voice when the question is dismissed", async () => {
+		installVoice();
+		const reader = load({ select: undefined });
+		await reader.run("read-voice");
+		await reader.run("read");
+		await reader.settled();
+		expect(reader.notes).toEqual([]);
+		expect(synthesized.map((request) => request.generationConfig.sid)).toEqual([6, 6]);
+	});
+
+	it("a voice change leaves the reading in progress alone and applies to the next one", async () => {
+		installVoice("sleep 30;");
+		const reader = load();
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-0.pid")));
+		await reader.run("read-voice", "female");
+		expect(alive(Number(read("play-0.pid")))).toBe(true);
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-1.pid")) && synthesized.length === 4);
+		expect(synthesized.map((request) => request.generationConfig.sid)).toEqual([6, 6, 0, 0]);
+		reader.shutdown();
+	});
+
+	it("a new session goes back to the male voice", async () => {
+		installVoice();
+		const reader = load();
+		await reader.run("read-voice", "female");
+		reader.restart();
+		await reader.run("read");
+		await reader.settled();
+		expect(synthesized.map((request) => request.generationConfig.sid)).toEqual([6, 6]);
 	});
 
 	it("offers the download when there is no voice, and reads nothing if declined", async () => {
@@ -256,7 +357,7 @@ describe("reply-reader extension", () => {
 		const reader = load({ confirm: false });
 		await reader.run("read");
 		expect(reader.confirms).toEqual([
-			`Download the Spanish voice es_MX-claude-high (67 MB) from github.com into ${join(root, "data", "pi-reply-reader", "voices")}?`,
+			`Download the Spanish voice Supertonic 3 (129 MB) from github.com into ${join(root, "data", "pi-reply-reader", "voices")}?`,
 		]);
 		expect(reader.notes).toEqual([["Reading cancelled: the voice was not downloaded.", "info"]]);
 		expect(reader.statuses).toEqual([]);

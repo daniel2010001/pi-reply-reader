@@ -1,20 +1,22 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
 import type { Output } from "./outputs.ts";
-import { onPath, type Voice } from "./voice.ts";
+import { onPath, type Speaker, type Voice } from "./voice.ts";
 
-type SherpaVoice = Extract<Voice, { engine: "sherpa" }>;
+/** What one segment asks of Supertonic; the real loader wraps `generationConfig` in sherpa's GenerationConfig. */
+export interface SherpaRequest {
+	text: string;
+	generationConfig: { sid: number; speed: number; numSteps: number; extra: { lang: string; seed: number } };
+	/**
+	 * Called with each synthesized chunk; returning false stops the generation. Always passed: on Bun,
+	 * which runs Pi, sherpa's generateAsync without it fails with "Invalid argument".
+	 */
+	onProgress: (info: { samples: Float32Array; progress: number }) => boolean;
+}
 
 /** The slice of sherpa-onnx-node's OfflineTts a reading uses. */
 export interface SherpaTts {
 	sampleRate: number;
-	generateAsync(request: {
-		text: string;
-		sid: number;
-		speed: number;
-		/** Receives each synthesized chunk; returning false stops the generation. */
-		onProgress: (info: { samples: Float32Array; progress: number }) => boolean;
-	}): Promise<unknown>;
+	generateAsync(request: SherpaRequest): Promise<{ samples: Float32Array }>;
 }
 
 export interface Reading {
@@ -26,52 +28,30 @@ export interface Reading {
 const PAPLAY_MISSING =
 	"Cannot play: paplay was not found on PATH (it comes with libpulse on Arch, pulseaudio-utils on Debian and Ubuntu).";
 
+/** Supertonic's default seed is random; a fixed one makes the same text always sound the same. */
+const SEED = 42;
+
 /**
- * Speaks `text` with `voice` on `output`. The voice produces raw 16-bit mono PCM that `paplay` plays on
- * this machine's default sink or, for a named output, on its PULSE_SERVER. Nothing here throws: every
- * failure ends in `done`, and `stop()` ends the processes and settles `done` quietly.
+ * Speaks `text` with `speaker` on `output`. Supertonic synthesizes one sentence at a time, so the first
+ * audio comes after one sentence instead of the whole reply; each sentence goes to `paplay` as raw 16-bit
+ * mono PCM, on this machine's default sink or, for a named output, on its PULSE_SERVER. Nothing here
+ * throws: every failure ends in `done`, and `stop()` ends the player and settles `done` quietly.
  */
 export function startReading(options: {
 	voice: Voice;
+	speaker: Speaker;
 	text: string;
 	output: Output;
 	env: NodeJS.ProcessEnv;
-	loadSherpa?: (voice: SherpaVoice) => Promise<SherpaTts>;
+	loadSherpa?: (voice: Voice) => Promise<SherpaTts>;
 }): Reading {
-	const { voice, text, output, env, loadSherpa = loadSherpaTts } = options;
-	const children: ChildProcess[] = [];
+	const { voice, speaker, text, output, env, loadSherpa = loadSherpaTts } = options;
+	let player: ChildProcess | undefined;
 	let stopped = false;
-
-	const playerFailed = `Playback on "${output.name}" failed`;
-	const startPlayer = (bin: string, rate: number): ChildProcess => {
-		const playerEnv = output.pulseServer ? { ...env, PULSE_SERVER: output.pulseServer } : env;
-		const args = ["--raw", "--format=s16le", `--rate=${rate}`, "--channels=1", "--client-name=pi-reply-reader", "--stream-name=reply"];
-		return track(spawn(bin, args, { env: playerEnv, stdio: ["pipe", "ignore", "pipe"] }));
-	};
-	const track = (child: ChildProcess): ChildProcess => {
-		children.push(child);
-		// A player that quits early closes its stdin; writing to it must not crash Pi.
-		child.stdin?.on("error", () => {});
-		return child;
-	};
 
 	const run = async (): Promise<void> => {
 		const paplay = onPath("paplay", env);
 		if (!paplay) throw new Error(PAPLAY_MISSING);
-
-		if (voice.engine === "piper") {
-			const rate = sampleRate(voice.config);
-			const piper = track(spawn(voice.bin, ["-m", voice.model, "-c", voice.config, "--output-raw"], { env }));
-			const player = startPlayer(paplay, rate);
-			piper.stdout?.pipe(player.stdin!);
-			// Without a reader, piper would block on a full pipe forever and `done` would never settle.
-			player.on("close", () => piper.kill());
-			piper.stdin?.end(text);
-			const [engine, playback] = await Promise.allSettled([finished(piper, "piper-tts failed"), finished(player, playerFailed)]);
-			if (playback.status === "rejected") throw playback.reason;
-			if (engine.status === "rejected") throw engine.reason;
-			return;
-		}
 
 		let tts: SherpaTts;
 		try {
@@ -80,32 +60,48 @@ export function startReading(options: {
 			throw new Error(`Speech synthesis failed: ${(error as Error).message}`);
 		}
 		if (stopped) return;
-		const player = startPlayer(paplay, tts.sampleRate);
-		const playback = finished(player, playerFailed);
+
+		const playerEnv = output.pulseServer ? { ...env, PULSE_SERVER: output.pulseServer } : env;
+		const args = ["--raw", "--format=s16le", `--rate=${tts.sampleRate}`, "--channels=1", "--client-name=pi-reply-reader", "--stream-name=reply"];
+		const child = spawn(paplay, args, { env: playerEnv, stdio: ["pipe", "ignore", "pipe"] });
+		player = child;
+		// A player that quits early closes its stdin; writing to it must not crash Pi.
+		child.stdin?.on("error", () => {});
+		const playback = finished(child, `Playback on "${output.name}" failed`);
 		let playerGone = false;
-		playback.catch(() => {}).finally(() => (playerGone = true));
-		try {
-			await tts.generateAsync({
-				text,
-				sid: 0,
-				speed: 1,
-				onProgress: ({ samples }) => {
-					if (stopped || playerGone) return false;
-					player.stdin?.write(pcm16(samples));
-					return true;
-				},
-			});
-		} catch (error) {
-			if (!stopped && !playerGone) throw new Error(`Speech synthesis failed: ${(error as Error).message}`);
+		const gone = playback.then(
+			() => {},
+			() => {},
+		);
+		gone.then(() => (playerGone = true));
+
+		for (const segment of segments(text)) {
+			if (stopped || playerGone) break;
+			let samples: Float32Array;
+			try {
+				({ samples } = await tts.generateAsync({
+					text: segment,
+					generationConfig: { sid: speaker.sid, speed: 1, numSteps: 8, extra: { lang: "es", seed: SEED } },
+					onProgress: () => !stopped && !playerGone,
+				}));
+			} catch (error) {
+				if (stopped || playerGone) break;
+				throw new Error(`Speech synthesis failed: ${(error as Error).message}`);
+			}
+			if (stopped || playerGone) break;
+			// Wait until the player takes this sentence, so a slow or stuck player does not buffer the whole reply.
+			if (!child.stdin?.write(pcm16(samples, speaker.gain))) {
+				await Promise.race([new Promise((resolve) => child.stdin?.once("drain", resolve)), gone]);
+			}
 		}
-		player.stdin?.end();
+		child.stdin?.end();
 		await playback;
 	};
 
 	const done = run().then(
 		() => undefined,
 		(error: Error) => {
-			for (const child of children) child.kill();
+			player?.kill();
 			if (!stopped) throw error;
 		},
 	);
@@ -113,7 +109,7 @@ export function startReading(options: {
 		done,
 		stop() {
 			stopped = true;
-			for (const child of children) child.kill();
+			player?.kill();
 		},
 	};
 
@@ -134,36 +130,56 @@ export function startReading(options: {
 	}
 }
 
-function sampleRate(config: string): number {
-	const rate = (JSON.parse(readFileSync(config, "utf8")) as { audio?: { sample_rate?: unknown } }).audio?.sample_rate;
-	if (typeof rate !== "number") throw new Error(`Cannot read audio.sample_rate from ${config}`);
-	return rate;
+/** Sentences and lines, in order; Supertonic only calls back once per 300 characters, so we split first. */
+function segments(text: string): string[] {
+	return text
+		.split(/(?<=[.!?…:;])\s+|\n+/)
+		.map((segment) => segment.trim())
+		.filter((segment) => segment !== "");
 }
 
-/** Float samples in [-1, 1] to 16-bit little-endian PCM, clipping anything outside. */
-function pcm16(samples: Float32Array): Buffer {
+/** Samples below this level pass through the limiter unchanged (-6 dBFS). */
+const KNEE = 0.5;
+/** No sample leaves the limiter above -1 dBFS, rounded down to a whole PCM step so rounding cannot pass it. */
+const CEILING = Math.floor(10 ** (-1 / 20) * 32767) / 32767;
+
+/**
+ * Float samples to 16-bit little-endian PCM with the speaker's fixed gain. Above the knee a tanh curve
+ * bends peaks smoothly toward the ceiling, so they never clip or wrap around.
+ */
+function pcm16(samples: Float32Array, gain: number): Buffer {
 	const out = Buffer.alloc(samples.length * 2);
-	for (let i = 0; i < samples.length; i++) out.writeInt16LE(Math.round(Math.max(-1, Math.min(1, samples[i])) * 32767), i * 2);
+	for (let i = 0; i < samples.length; i++) {
+		const x = samples[i] * gain;
+		const level = Math.abs(x);
+		const limited = level <= KNEE ? x : Math.sign(x) * (KNEE + (CEILING - KNEE) * Math.tanh((level - KNEE) / (CEILING - KNEE)));
+		out.writeInt16LE(Math.round(limited * 32767), i * 2);
+	}
 	return out;
 }
 
 const loaded = new Map<string, Promise<SherpaTts>>();
 
-/** Loads the voice once per model; loading takes about a second and a half. */
-function loadSherpaTts(voice: SherpaVoice): Promise<SherpaTts> {
-	let tts = loaded.get(voice.model);
+/** Loads the model once; loading takes about a second. */
+function loadSherpaTts(voice: Voice): Promise<SherpaTts> {
+	const key = voice.supertonic.ttsJson;
+	let tts = loaded.get(key);
 	if (!tts) {
-		// sherpa-onnx-node is CommonJS with a native addon; 2.x dropped espeak-ng, so it stays on 1.13.x.
+		// sherpa-onnx-node is CommonJS with a native addon.
 		// A plain import, not createRequire: Pi's compiled extension loader resolves only imports.
-		tts = import("sherpa-onnx-node").then((module) => {
-			const { OfflineTts } = module.default ?? module;
-			return OfflineTts.createAsync({
-				model: { vits: { model: voice.model, tokens: voice.tokens, dataDir: voice.dataDir }, numThreads: 2, provider: "cpu", debug: 0 },
-				maxNumSentences: 1,
-			}) as Promise<SherpaTts>;
+		tts = import("sherpa-onnx-node").then(async (module) => {
+			const { OfflineTts, GenerationConfig } = module.default ?? module;
+			const engine = await OfflineTts.createAsync({
+				model: { supertonic: voice.supertonic, numThreads: 2, provider: "cpu", debug: 0 },
+			});
+			return {
+				sampleRate: engine.sampleRate,
+				generateAsync: ({ generationConfig, ...request }: SherpaRequest) =>
+					engine.generateAsync({ ...request, generationConfig: new GenerationConfig(generationConfig) }),
+			};
 		});
-		tts.catch(() => loaded.delete(voice.model));
-		loaded.set(voice.model, tts);
+		tts.catch(() => loaded.delete(key));
+		loaded.set(key, tts);
 	}
 	return tts;
 }

@@ -4,9 +4,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { downloadVoice, findVoice, VOICE_ARCHIVE, type VoiceArchive } from "../src/voice.ts";
+import { downloadVoice, findVoice, SPEAKERS, VOICE_ARCHIVE, type VoiceArchive } from "../src/voice.ts";
 
 let root: string;
 let env: NodeJS.ProcessEnv;
@@ -27,38 +27,31 @@ afterEach(async () => {
 	rmSync(root, { recursive: true, force: true });
 });
 
+const BUNDLE = "sherpa-onnx-supertonic-3-tts-int8-2026-05-11";
+const FILES = [
+	"duration_predictor.int8.onnx",
+	"text_encoder.int8.onnx",
+	"vector_estimator.int8.onnx",
+	"vocoder.int8.onnx",
+	"tts.json",
+	"unicode_indexer.bin",
+	"voice.bin",
+];
 const voicesDir = () => join(root, "data", "pi-reply-reader", "voices");
-const bundleDir = () => join(voicesDir(), "vits-piper-es_MX-claude-high");
-
-function installPiperBinary(): string {
-	const bin = join(root, "bin", "piper-tts");
-	writeFileSync(bin, "#!/bin/sh\n");
-	chmodSync(bin, 0o755);
-	return bin;
-}
-
-function installPiperModel(): { model: string; config: string } {
-	const dir = join(root, "data", "piper-tts", "models");
-	mkdirSync(dir, { recursive: true });
-	const model = join(dir, "es_MX-claude-high.onnx");
-	writeFileSync(model, "onnx");
-	writeFileSync(`${model}.json`, "{}");
-	return { model, config: `${model}.json` };
-}
+const bundleDir = () => join(voicesDir(), BUNDLE);
 
 function installBundle(dir = bundleDir()): void {
-	mkdirSync(join(dir, "espeak-ng-data"), { recursive: true });
-	writeFileSync(join(dir, "es_MX-claude-high.onnx"), "onnx");
-	writeFileSync(join(dir, "tokens.txt"), "_ 0\n");
+	mkdirSync(dir, { recursive: true });
+	for (const name of FILES) writeFileSync(join(dir, name), name);
 }
 
 /** Builds a voice archive like the real one, minus whatever `omit` names. */
 function buildArchive(omit: string[] = []): Buffer {
 	const staging = join(root, "staging");
-	installBundle(join(staging, "vits-piper-es_MX-claude-high"));
-	for (const name of omit) rmSync(join(staging, "vits-piper-es_MX-claude-high", name), { recursive: true });
+	installBundle(join(staging, BUNDLE));
+	for (const name of omit) rmSync(join(staging, BUNDLE, name), { recursive: true });
 	const file = join(root, "voice.tar.bz2");
-	execFileSync("tar", ["-cjf", file, "-C", staging, "vits-piper-es_MX-claude-high"]);
+	execFileSync("tar", ["-cjf", file, "-C", staging, BUNDLE]);
 	rmSync(staging, { recursive: true });
 	return readFileSync(file);
 }
@@ -79,70 +72,73 @@ function archiveFor(url: string, body: Buffer): VoiceArchive {
 const accept = async () => true;
 
 describe("findVoice", () => {
-	it("reuses a local piper-tts with the es_MX-claude-high model and its config", () => {
-		const bin = installPiperBinary();
-		const { model, config } = installPiperModel();
-		expect(findVoice(env)).toEqual({ engine: "piper", bin, model, config });
-	});
-
-	it("does not reuse a local model without piper-tts, nor piper-tts without the model", () => {
-		installPiperModel();
-		expect(findVoice(env)).toBeUndefined();
-		rmSync(join(root, "data", "piper-tts"), { recursive: true });
-		installPiperBinary();
-		expect(findVoice(env)).toBeUndefined();
-	});
-
-	it("ignores a binary named piper, which on Arch is the gaming mouse configurator", () => {
-		writeFileSync(join(root, "bin", "piper"), "#!/bin/sh\n");
-		chmodSync(join(root, "bin", "piper"), 0o755);
-		installPiperModel();
-		expect(findVoice(env)).toBeUndefined();
-	});
-
-	it("uses the downloaded sherpa-onnx voice when there is no local piper", () => {
+	it("uses the downloaded Supertonic 3 model, one path per file sherpa-onnx loads", () => {
 		installBundle();
+		const dir = bundleDir();
 		expect(findVoice(env)).toEqual({
-			engine: "sherpa",
-			model: join(bundleDir(), "es_MX-claude-high.onnx"),
-			tokens: join(bundleDir(), "tokens.txt"),
-			dataDir: join(bundleDir(), "espeak-ng-data"),
+			supertonic: {
+				durationPredictor: join(dir, "duration_predictor.int8.onnx"),
+				textEncoder: join(dir, "text_encoder.int8.onnx"),
+				vectorEstimator: join(dir, "vector_estimator.int8.onnx"),
+				vocoder: join(dir, "vocoder.int8.onnx"),
+				ttsJson: join(dir, "tts.json"),
+				unicodeIndexer: join(dir, "unicode_indexer.bin"),
+				voiceStyle: join(dir, "voice.bin"),
+			},
 		});
 	});
 
-	it("prefers the local piper over the downloaded voice", () => {
-		installBundle();
-		installPiperBinary();
-		installPiperModel();
-		expect(findVoice(env)?.engine).toBe("piper");
+	it("finds nothing while any model file is missing", () => {
+		for (const name of FILES) {
+			installBundle();
+			rmSync(join(bundleDir(), name));
+			expect(findVoice(env)).toBeUndefined();
+		}
 	});
 
-	it("ignores relative PATH entries", () => {
-		installPiperBinary();
-		installPiperModel();
-		env.PATH = relative(process.cwd(), join(root, "bin"));
+	it("does not reuse a local piper-tts voice any more", () => {
+		writeFileSync(join(root, "bin", "piper-tts"), "#!/bin/sh\n");
+		chmodSync(join(root, "bin", "piper-tts"), 0o755);
+		const models = join(root, "data", "piper-tts", "models");
+		mkdirSync(models, { recursive: true });
+		writeFileSync(join(models, "es_MX-claude-high.onnx"), "onnx");
+		writeFileSync(join(models, "es_MX-claude-high.onnx.json"), "{}");
 		expect(findVoice(env)).toBeUndefined();
 	});
 
 	it("ignores a relative XDG_DATA_HOME, as the XDG spec requires", () => {
-		installBundle(join(root, "home", ".local", "share", "pi-reply-reader", "voices", "vits-piper-es_MX-claude-high"));
+		installBundle(join(root, "home", ".local", "share", "pi-reply-reader", "voices", BUNDLE));
 		env.XDG_DATA_HOME = "relative/data";
-		expect(findVoice(env)?.engine).toBe("sherpa");
+		expect(findVoice(env)?.supertonic.ttsJson).toBe(join(root, "home", ".local", "share", "pi-reply-reader", "voices", BUNDLE, "tts.json"));
 	});
 
 	it("falls back to ~/.local/share when XDG_DATA_HOME is unset", () => {
 		delete env.XDG_DATA_HOME;
-		installBundle(join(root, "home", ".local", "share", "pi-reply-reader", "voices", "vits-piper-es_MX-claude-high"));
-		expect(findVoice(env)?.engine).toBe("sherpa");
+		installBundle(join(root, "home", ".local", "share", "pi-reply-reader", "voices", BUNDLE));
+		expect(findVoice(env)).toBeDefined();
+	});
+});
+
+describe("SPEAKERS", () => {
+	it("offers the male voice (sid 6) and the female voice (sid 0), male first", () => {
+		expect(Object.keys(SPEAKERS)).toEqual(["male", "female"]);
+		expect(SPEAKERS.male.sid).toBe(6);
+		expect(SPEAKERS.female.sid).toBe(0);
+	});
+
+	it("lifts each voice's measured speech level to about -16 dBFS", () => {
+		// Bake-off speech RMS: -22.7 dBFS for sid 6, -23.5 dBFS for sid 0.
+		expect(20 * Math.log10(SPEAKERS.male.gain)).toBeCloseTo(6.7, 1);
+		expect(20 * Math.log10(SPEAKERS.female.gain)).toBeCloseTo(7.5, 1);
 	});
 });
 
 describe("downloadVoice", () => {
 	it("pins the published sherpa-onnx archive", () => {
 		expect(VOICE_ARCHIVE).toEqual({
-			url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-es_MX-claude-high.tar.bz2",
-			bytes: 67207890,
-			sha256: "ec33fb689c248fe64810aab564cba97babf0f506672cfd404928d46e751a4721",
+			url: `https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/${BUNDLE}.tar.bz2`,
+			bytes: 128774318,
+			sha256: "82fa96f91c4ef8abaae3a14a3f4153facf88bed821d1f7331cec2700f432c427",
 		});
 	});
 
@@ -156,17 +152,17 @@ describe("downloadVoice", () => {
 		});
 		expect(voice).toBeUndefined();
 		expect(asked).toEqual([
-			`Download the Spanish voice es_MX-claude-high (67 MB) from 127.0.0.1 into ${voicesDir()}?`,
+			`Download the Spanish voice Supertonic 3 (129 MB) from 127.0.0.1 into ${voicesDir()}?`,
 		]);
 		expect(requests).toBe(0);
 		expect(existsSync(join(root, "data"))).toBe(false);
 	});
 
-	it("names github.com and 67 MB for the pinned archive", async () => {
+	it("names github.com and 129 MB for the pinned archive", async () => {
 		const asked: string[] = [];
 		await downloadVoice({ env, confirm: async (message) => (asked.push(message), false) });
 		expect(asked).toEqual([
-			`Download the Spanish voice es_MX-claude-high (67 MB) from github.com into ${voicesDir()}?`,
+			`Download the Spanish voice Supertonic 3 (129 MB) from github.com into ${voicesDir()}?`,
 		]);
 	});
 
@@ -174,9 +170,9 @@ describe("downloadVoice", () => {
 		const body = buildArchive();
 		const url = await serve(body);
 		const voice = await downloadVoice({ env, confirm: accept, archive: archiveFor(url, body) });
+		expect(voice).toBeDefined();
 		expect(voice).toEqual(findVoice(env));
-		expect(voice?.engine).toBe("sherpa");
-		expect(readdirSync(voicesDir())).toEqual(["vits-piper-es_MX-claude-high"]);
+		expect(readdirSync(voicesDir())).toEqual([BUNDLE]);
 		expect(requests).toBe(1);
 	});
 
@@ -211,10 +207,10 @@ describe("downloadVoice", () => {
 	});
 
 	it("rejects an archive without the expected files and keeps nothing", async () => {
-		const body = buildArchive(["tokens.txt"]);
+		const body = buildArchive(["vocoder.int8.onnx"]);
 		const url = await serve(body);
 		await expect(downloadVoice({ env, confirm: accept, archive: archiveFor(url, body) })).rejects.toThrow(
-			"Voice download failed: the archive has no vits-piper-es_MX-claude-high/tokens.txt. Nothing was kept.",
+			`Voice download failed: the archive has no ${BUNDLE}/vocoder.int8.onnx. Nothing was kept.`,
 		);
 		expect(readdirSync(voicesDir())).toEqual([]);
 	});
@@ -253,11 +249,12 @@ describe("downloadVoice", () => {
 
 	it("replaces an incomplete voice left in place", async () => {
 		installBundle();
-		rmSync(join(bundleDir(), "tokens.txt"));
+		rmSync(join(bundleDir(), "voice.bin"));
 		const body = buildArchive();
 		const voice = await downloadVoice({ env, confirm: accept, archive: archiveFor(await serve(body), body) });
-		expect(voice?.engine).toBe("sherpa");
-		expect(readdirSync(voicesDir())).toEqual(["vits-piper-es_MX-claude-high"]);
+		expect(voice).toEqual(findVoice(env));
+		expect(readFileSync(join(bundleDir(), "voice.bin"), "utf8")).toBe("voice.bin");
+		expect(readdirSync(voicesDir())).toEqual([BUNDLE]);
 	});
 
 	it("installs once when two sessions download at the same time", async () => {
@@ -267,8 +264,9 @@ describe("downloadVoice", () => {
 			downloadVoice({ env, confirm: accept, archive }),
 			downloadVoice({ env, confirm: accept, archive }),
 		]);
-		expect(voices.map((v) => v?.engine)).toEqual(["sherpa", "sherpa"]);
-		expect(readdirSync(voicesDir())).toEqual(["vits-piper-es_MX-claude-high"]);
+		expect(voices).toEqual([findVoice(env), findVoice(env)]);
+		expect(voices[0]).toBeDefined();
+		expect(readdirSync(voicesDir())).toEqual([BUNDLE]);
 	});
 
 	it("refuses to store the voice when no data directory is absolute, without asking", async () => {
@@ -302,7 +300,8 @@ describe("downloadVoice", () => {
 		installBundle();
 		const asked: string[] = [];
 		const voice = await downloadVoice({ env, confirm: async (m) => (asked.push(m), true) });
-		expect(voice?.engine).toBe("sherpa");
+		expect(voice).toEqual(findVoice(env));
+		expect(voice).toBeDefined();
 		expect(asked).toEqual([]);
 	});
 });

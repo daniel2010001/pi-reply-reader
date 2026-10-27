@@ -7,10 +7,20 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { promisify } from "node:util";
 
-/** The voice is fixed (S3): es_MX-claude-high, through a local piper or a pinned sherpa-onnx download. */
-const VOICE = "es_MX-claude-high";
-const BUNDLE = `vits-piper-${VOICE}`;
-const BUNDLE_FILES = [`${VOICE}.onnx`, "tokens.txt", "espeak-ng-data"];
+/** The local engine (S3): Supertonic 3, int8, as sherpa-onnx packages it for its v2 Node binding. */
+const VOICE = "Supertonic 3";
+const BUNDLE = "sherpa-onnx-supertonic-3-tts-int8-2026-05-11";
+/** sherpa-onnx's supertonic config key → file in the bundle. */
+const MODEL_FILES = {
+	durationPredictor: "duration_predictor.int8.onnx",
+	textEncoder: "text_encoder.int8.onnx",
+	vectorEstimator: "vector_estimator.int8.onnx",
+	vocoder: "vocoder.int8.onnx",
+	ttsJson: "tts.json",
+	unicodeIndexer: "unicode_indexer.bin",
+	voiceStyle: "voice.bin",
+} as const;
+const BUNDLE_FILES = Object.values(MODEL_FILES);
 
 export interface VoiceArchive {
 	url: string;
@@ -18,38 +28,46 @@ export interface VoiceArchive {
 	sha256: string;
 }
 
-/** sherpa-onnx's converted Piper voice; size and digest as published by GitHub for the release asset. */
+/** sherpa-onnx's Supertonic 3 bundle; size and digest as published by GitHub for the release asset. */
 export const VOICE_ARCHIVE: VoiceArchive = {
 	url: `https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/${BUNDLE}.tar.bz2`,
-	bytes: 67207890,
-	sha256: "ec33fb689c248fe64810aab564cba97babf0f506672cfd404928d46e751a4721",
+	bytes: 128774318,
+	sha256: "82fa96f91c4ef8abaae3a14a3f4153facf88bed821d1f7331cec2700f432c427",
 };
 
-export type Voice =
-	| { engine: "piper"; bin: string; model: string; config: string }
-	| { engine: "sherpa"; model: string; tokens: string; dataDir: string };
+/** The model files, shaped as sherpa-onnx's `model.supertonic` config. */
+export interface Voice {
+	supertonic: Record<keyof typeof MODEL_FILES, string>;
+}
+
+export interface Speaker {
+	/** Speaker ID inside the Supertonic model. */
+	sid: number;
+	/** Linear gain applied to every sample of a reading. */
+	gain: number;
+}
 
 /**
- * A local `piper-tts` with the voice wins (L5); otherwise the voice this package downloaded.
- * Only `piper-tts` counts: on Arch, `piper` is a gaming mouse configurator.
+ * The two voices the model ships (S3, L20): male is the default, female is selectable. Each gain
+ * lifts the voice's speech to about -16 dBFS (L22). Measured on the hs bake-off WAVs, speech RMS was
+ * -22.7 dBFS for sid 6 and -23.5 dBFS for sid 0, with peaks at -2.8 and -4.8 dBFS, so the lifted
+ * peaks go past full scale and playback limits them (playback.ts).
  */
+export const SPEAKERS = {
+	male: { sid: 6, gain: 10 ** ((-16 - -22.7) / 20) },
+	female: { sid: 0, gain: 10 ** ((-16 - -23.5) / 20) },
+} as const satisfies Record<string, Speaker>;
+
+export type SpeakerName = keyof typeof SPEAKERS;
+
+/** The voice this package downloaded, when every model file is in place. */
 export function findVoice(env: NodeJS.ProcessEnv): Voice | undefined {
 	const data = dataHome(env);
 	if (!data) return undefined;
-	const bin = onPath("piper-tts", env);
-	const model = join(data, "piper-tts", "models", `${VOICE}.onnx`);
-	if (bin && isFile(model) && isFile(`${model}.json`)) return { engine: "piper", bin, model, config: `${model}.json` };
-
 	const dir = join(data, "pi-reply-reader", "voices", BUNDLE);
-	if (BUNDLE_FILES.every((name) => existsSync(join(dir, name)))) {
-		return {
-			engine: "sherpa",
-			model: join(dir, `${VOICE}.onnx`),
-			tokens: join(dir, "tokens.txt"),
-			dataDir: join(dir, "espeak-ng-data"),
-		};
-	}
-	return undefined;
+	if (!BUNDLE_FILES.every((name) => existsSync(join(dir, name)))) return undefined;
+	const files = Object.entries(MODEL_FILES).map(([key, name]) => [key, join(dir, name)]);
+	return { supertonic: Object.fromEntries(files) as Voice["supertonic"] };
 }
 
 /**

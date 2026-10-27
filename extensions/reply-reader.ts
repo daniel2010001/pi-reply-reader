@@ -2,19 +2,24 @@ import { hostname as osHostname } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { loadOutputs, type Output } from "../src/outputs.ts";
-import { type Reading, startReading } from "../src/playback.ts";
+import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { speechText } from "../src/speech-text.ts";
-import { downloadVoice, findVoice } from "../src/voice.ts";
+import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
 
 const STATUS = "reply-reader";
 const ASK_OUTPUT = "Where should readings sound?";
+const ASK_SPEAKER = "Which voice should read?";
+const SPEAKER_NAMES = Object.keys(SPEAKERS) as SpeakerName[];
 
 /**
  * Reads replies aloud on request only (S1): `/read` speaks the latest reply or one by ID, a new reading
- * or Esc stops the one playing, and `/read-output` picks where it sounds (S4). Nothing plays by itself.
+ * or Esc stops the one playing, `/read-output` picks where it sounds (S4) and `/read-voice` picks the male
+ * or female voice (S3). Nothing plays by itself.
  */
-export function createReplyReader(deps: { env?: NodeJS.ProcessEnv; hostname?: string } = {}) {
+export function createReplyReader(
+	deps: { env?: NodeJS.ProcessEnv; hostname?: string; loadSherpa?: (voice: Voice) => Promise<SherpaTts> } = {},
+) {
 	const env = deps.env ?? process.env;
 	const hostname = deps.hostname ?? osHostname();
 
@@ -22,6 +27,8 @@ export function createReplyReader(deps: { env?: NodeJS.ProcessEnv; hostname?: st
 		let current: { reading: Reading; ctx: ExtensionContext } | undefined;
 		/** The output chosen in this session, by name; asked on the first reading. */
 		let chosen: string | undefined;
+		/** The voice for the next reading in this session (S3: male unless changed). */
+		let speaker: SpeakerName = "male";
 		/** Whether this session's first reading already reported problems in outputs.json. */
 		let warned = false;
 		let unsubscribe: (() => void) | undefined;
@@ -98,7 +105,7 @@ export function createReplyReader(deps: { env?: NodeJS.ProcessEnv; hostname?: st
 				}
 
 				stop();
-				const reading = startReading({ voice, text, output, env });
+				const reading = startReading({ voice, speaker: SPEAKERS[speaker], text, output, env, loadSherpa: deps.loadSherpa });
 				current = { reading, ctx };
 				ctx.ui.setStatus(STATUS, `Reading ${reply.id} on ${output.name} · Esc stops`);
 				reading.done
@@ -138,8 +145,34 @@ export function createReplyReader(deps: { env?: NodeJS.ProcessEnv; hostname?: st
 			},
 		});
 
+		pi.registerCommand("read-voice", {
+			description: "Choose the voice for the next readings: male (default) or female",
+			getArgumentCompletions: (prefix) =>
+				SPEAKER_NAMES.filter((name) => name.startsWith(prefix.trim())).map((name) => ({
+					value: name,
+					label: name,
+					description: `Supertonic 3, speaker ${SPEAKERS[name].sid}`,
+				})),
+			handler: async (args, ctx) => {
+				const name = args.trim();
+				let picked: string | undefined = name;
+				if (!name) {
+					if (!ctx.hasUI) return;
+					picked = await ctx.ui.select(ASK_SPEAKER, SPEAKER_NAMES);
+					if (!picked) return;
+				}
+				if (!SPEAKER_NAMES.includes(picked as SpeakerName)) {
+					ctx.ui.notify(`No voice named "${name}". Voices: ${SPEAKER_NAMES.join(", ")}.`, "warning");
+					return;
+				}
+				speaker = picked as SpeakerName;
+				ctx.ui.notify(`Readings will use the ${speaker} voice.`, "info");
+			},
+		});
+
 		pi.on("session_start", (_event, ctx) => {
 			chosen = undefined;
+			speaker = "male";
 			warned = false;
 			unsubscribe?.();
 			unsubscribe = ctx.hasUI
