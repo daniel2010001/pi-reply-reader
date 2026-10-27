@@ -1,0 +1,1 @@
+Hola, soy una voz de prueba. Hoy vamos a comparar distintos motores de voz para leer en voz alta las respuestas del asistente, con calma y con una pronunciación clara.
