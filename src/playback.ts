@@ -64,6 +64,8 @@ export function startReading(options: {
 			const piper = track(spawn(voice.bin, ["-m", voice.model, "-c", voice.config, "--output-raw"], { env }));
 			const player = startPlayer(paplay, rate);
 			piper.stdout?.pipe(player.stdin!);
+			// Without a reader, piper would block on a full pipe forever and `done` would never settle.
+			player.on("close", () => piper.kill());
 			piper.stdin?.end(text);
 			const [engine, playback] = await Promise.allSettled([finished(piper, "piper-tts failed"), finished(player, playerFailed)]);
 			if (playback.status === "rejected") throw playback.reason;

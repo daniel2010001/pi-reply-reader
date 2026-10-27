@@ -162,6 +162,15 @@ describe("startReading without a working player", () => {
 		);
 	});
 
+	it("stops piper and reports the output when paplay dies while piper is still writing", async () => {
+		script("paplay", 'echo "Connection refused" >&2; exit 1');
+		const voice = piperVoice(`echo $$ > "${log("piper.pid")}"; cat > /dev/null; exec head -c 2000000 /dev/zero`);
+		await expect(startReading({ voice, text: "a", output: desktop, env }).done).rejects.toThrow(
+			'Playback on "desktop" failed: Connection refused',
+		);
+		expect(alive(Number(read("piper.pid")))).toBe(false);
+	});
+
 	it("names the output when paplay dies before reading any audio", async () => {
 		script("paplay", 'echo "Connection refused" >&2; exit 1');
 		const loadSherpa = fakeSherpa(Array.from({ length: 50 }, () => new Float32Array(50_000)));
