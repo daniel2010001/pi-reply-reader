@@ -1,10 +1,10 @@
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { downloadVoice, findVoice, VOICE_ARCHIVE, type VoiceArchive } from "../src/voice.ts";
 
@@ -21,6 +21,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	server?.closeAllConnections();
 	await new Promise<void>((done) => (server ? server.close(() => done()) : done()));
 	server = undefined;
 	rmSync(root, { recursive: true, force: true });
@@ -116,6 +117,19 @@ describe("findVoice", () => {
 		expect(findVoice(env)?.engine).toBe("piper");
 	});
 
+	it("ignores relative PATH entries", () => {
+		installPiperBinary();
+		installPiperModel();
+		env.PATH = relative(process.cwd(), join(root, "bin"));
+		expect(findVoice(env)).toBeUndefined();
+	});
+
+	it("ignores a relative XDG_DATA_HOME, as the XDG spec requires", () => {
+		installBundle(join(root, "home", ".local", "share", "pi-reply-reader", "voices", "vits-piper-es_MX-claude-high"));
+		env.XDG_DATA_HOME = "relative/data";
+		expect(findVoice(env)?.engine).toBe("sherpa");
+	});
+
 	it("falls back to ~/.local/share when XDG_DATA_HOME is unset", () => {
 		delete env.XDG_DATA_HOME;
 		installBundle(join(root, "home", ".local", "share", "pi-reply-reader", "voices", "vits-piper-es_MX-claude-high"));
@@ -202,6 +216,85 @@ describe("downloadVoice", () => {
 		await expect(downloadVoice({ env, confirm: accept, archive: archiveFor(url, body) })).rejects.toThrow(
 			"Voice download failed: the archive has no vits-piper-es_MX-claude-high/tokens.txt. Nothing was kept.",
 		);
+		expect(readdirSync(voicesDir())).toEqual([]);
+	});
+
+	it("rejects a short download and keeps nothing", async () => {
+		const body = buildArchive();
+		const url = await serve(body.subarray(0, 100));
+		await expect(downloadVoice({ env, confirm: accept, archive: archiveFor(url, body) })).rejects.toThrow(
+			`Voice download failed: expected ${body.length} bytes, got 100. Nothing was kept.`,
+		);
+		expect(readdirSync(voicesDir())).toEqual([]);
+	});
+
+	it("keeps nothing when tar cannot extract a digest-matching archive", async () => {
+		const body = randomBytes(5000);
+		const url = await serve(body);
+		await expect(downloadVoice({ env, confirm: accept, archive: archiveFor(url, body) })).rejects.toThrow(
+			/^Voice download failed: Command failed: tar /,
+		);
+		expect(readdirSync(voicesDir())).toEqual([]);
+		expect(findVoice(env)).toBeUndefined();
+	});
+
+	it("gives up on a server that stops sending, and keeps nothing", async () => {
+		server = createServer((_req, res) => {
+			requests++;
+			res.writeHead(200).write("x");
+		});
+		await new Promise<void>((done) => server!.listen(0, "127.0.0.1", done));
+		const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v`;
+		await expect(
+			downloadVoice({ env, confirm: accept, archive: { ...VOICE_ARCHIVE, url }, idleTimeoutMs: 200 }),
+		).rejects.toThrow(`Voice download failed: no data for 0.2 s from ${url}. Nothing was kept.`);
+		expect(readdirSync(voicesDir())).toEqual([]);
+	});
+
+	it("replaces an incomplete voice left in place", async () => {
+		installBundle();
+		rmSync(join(bundleDir(), "tokens.txt"));
+		const body = buildArchive();
+		const voice = await downloadVoice({ env, confirm: accept, archive: archiveFor(await serve(body), body) });
+		expect(voice?.engine).toBe("sherpa");
+		expect(readdirSync(voicesDir())).toEqual(["vits-piper-es_MX-claude-high"]);
+	});
+
+	it("installs once when two sessions download at the same time", async () => {
+		const body = buildArchive();
+		const archive = archiveFor(await serve(body), body);
+		const voices = await Promise.all([
+			downloadVoice({ env, confirm: accept, archive }),
+			downloadVoice({ env, confirm: accept, archive }),
+		]);
+		expect(voices.map((v) => v?.engine)).toEqual(["sherpa", "sherpa"]);
+		expect(readdirSync(voicesDir())).toEqual(["vits-piper-es_MX-claude-high"]);
+	});
+
+	it("refuses to store the voice when no data directory is absolute, without asking", async () => {
+		const asked: string[] = [];
+		await expect(
+			downloadVoice({ env: { PATH: env.PATH, XDG_DATA_HOME: "rel" }, confirm: async (m) => (asked.push(m), true) }),
+		).rejects.toThrow("Voice download failed: neither XDG_DATA_HOME nor HOME is an absolute path. Nothing was kept.");
+		expect(asked).toEqual([]);
+	});
+
+	// A disk write error (here the file size limit) must reject, not crash the Pi process.
+	it("rejects a disk write error and keeps nothing", () => {
+		const script = join(root, "efbig.mts");
+		writeFileSync(
+			script,
+			`import { createHash } from "node:crypto"; import { createServer } from "node:http";
+			const { downloadVoice } = await import(${JSON.stringify(join(process.cwd(), "src/voice.ts"))});
+			const body = Buffer.alloc(4 << 20, 1); const s = createServer((_q, r) => r.end(body));
+			await new Promise((d) => s.listen(0, "127.0.0.1", d));
+			const archive = { url: \`http://127.0.0.1:\${s.address().port}/v\`, bytes: body.length, sha256: createHash("sha256").update(body).digest("hex") };
+			try { await downloadVoice({ env: ${JSON.stringify(env)}, confirm: async () => true, archive }); } catch (e) { console.log(e.message); }
+			process.exit(0);`,
+		);
+		const run = spawnSync("bash", ["-c", 'ulimit -f 1024; exec node "$0"', script], { encoding: "utf8" });
+		expect(run.status).toBe(0);
+		expect(run.stdout).toMatch(/^Voice download failed: EFBIG: .*Nothing was kept\.\n$/);
 		expect(readdirSync(voicesDir())).toEqual([]);
 	});
 
