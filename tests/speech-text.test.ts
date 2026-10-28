@@ -167,7 +167,7 @@ describe("speechText", () => {
 	});
 
 	it("keeps plain numbers, dates and versions unchanged", () => {
-		expect(speechText("Son 1,044 respuestas, 42 tests y 3.5 s.")).toBe("Son 1,044 respuestas, 42 tests y 3.5 s.");
+		expect(speechText("Son 1,044 respuestas, 42 tests y 3.5 s.")).toBe("Son 1,044 respuestas, 42 tests y 3.5 segundos.");
 		expect(speechText("El 2026-10-27 y `2026-10-27`.")).toBe("El 2026-10-27 y 2026-10-27.");
 		expect(speechText("Versiones 1.13.8, v2.0.1 y `sherpa-onnx-node@2.0.1`.")).toBe(
 			"Versiones 1.13.8, v2.0.1 y sherpa-onnx-node@2.0.1.",
@@ -187,6 +187,58 @@ describe("speechText", () => {
 		expect(speechText("Está en `/tmp`, no en /home ni en la carpeta `/etc`.")).toBe(
 			"Está en la carpeta tmp, no en la carpeta home ni en la carpeta etc.",
 		);
+	});
+
+	it("(f1) speaks ~ right before a number as 'aproximadamente', whatever the noun's gender", () => {
+		expect(speechText("~1,2 s")).toBe("aproximadamente 1,2 segundos");
+		expect(speechText("~99%")).toBe("aproximadamente 99 por ciento");
+		expect(speechText("Pasa las ~400 líneas en ~1 ms.")).toBe("Pasa las aproximadamente 400 líneas en aproximadamente 1 milisegundo.");
+		expect(speechText("| Pausa | ~0,33 s |\n|---|---|\n| Total | ~24 s (~5 min) |")).toBe(
+			"Pausa, aproximadamente 0,33 segundos.\nTotal, aproximadamente 24 segundos (aproximadamente 5 minutos).",
+		);
+	});
+
+	it("(f2) speaks units right after a number as words", () => {
+		expect(speechText("Tarda 1 s, 2,5 s, 250 ms, 3 min, 12 KB, 4,5 MB, 2 GB, 80%, -16 dB y -1 dBFS.")).toBe(
+			"Tarda 1 segundo, 2,5 segundos, 250 milisegundos, 3 minutos, 12 kilobytes, 4,5 megabytes, 2 gigabytes, 80 por ciento, -16 decibeles y -1 decibel.",
+		);
+		expect(speechText("En `1.5s` y 30ms.")).toBe("En 1.5 segundos y 30 milisegundos.");
+		expect(speechText("1 ms, 1 min, 1 KB, 1 MB, 1 GB, 1 dB, 1% y 1,0 s.")).toBe(
+			"1 milisegundo, 1 minuto, 1 kilobyte, 1 megabyte, 1 gigabyte, 1 decibel, 1 por ciento y 1,0 segundos.",
+		);
+	});
+
+	it("(f1)/(f2) leave versions, dates, ~/ paths, URLs and unit-like words without a number alone", () => {
+		expect(speechText("Versión 1.13.8, el 2026-10-28, en `~/.gentle-shell` y ~/x/y.md.")).toBe(
+			"Versión 1.13.8, el 2026-10-28, en la carpeta gentle shell y y punto md, en x.",
+		);
+		expect(speechText("Ver https://x.dev/a?b=~1&c=5%20s y los s, 3 semanas, 2 minas, v2 s, R1 ms.")).toBe(
+			"Ver x.dev y los s, 3 semanas, 2 minas, v2 s, R1 ms.",
+		);
+		expect(speechText("Usá `%d`, `printf(\"%s\")` y a~1.")).toBe('Usá %d, printf("%s") y a~1.');
+	});
+
+	it("(f3) speaks inline code holding a single punctuation mark by name", () => {
+		expect(speechText("solo en `.`, `!`, `?` y saltos")).toBe("solo en punto, signo de exclamación, signo de pregunta y saltos");
+		expect(speechText("`,` `;` `:` `~` `/` `-` `_` `*` `#` ` . `")).toBe(
+			"coma punto y coma dos puntos virgulilla barra guion guion bajo asterisco numeral punto",
+		);
+		expect(speechText("Una | barra: `|`.")).toBe("Una | barra: barra vertical.");
+		expect(speechText("Pero `..` y `a.` quedan.")).toBe("Pero .. y a. quedan.");
+	});
+
+	it("(f4) reads a line made entirely of emphasis like a heading", () => {
+		expect(speechText("**Qué cambió**\n- uno")).toBe("Qué cambió.\n\nuno.");
+		expect(speechText("*Nota*\nTexto.")).toBe("Nota.\n\nTexto.");
+		expect(speechText("__X__\nY")).toBe("X.\n\nY");
+		expect(speechText("**a** y **b**\nc")).toBe("a y b\nc");
+	});
+
+	it("(f5) follows headings and bold-only lines with a section break, never after the last line", () => {
+		expect(speechText("## Título\nTexto.")).toBe("Título.\n\nTexto.");
+		expect(speechText("# A\n**B**\nC")).toBe("A.\n\nB.\n\nC");
+		expect(speechText("Texto.\n## Fin")).toBe("Texto.\nFin.");
+		expect(speechText("Texto.\n**Fin**")).toBe("Texto.\nFin.");
 	});
 
 	it("is deterministic and collapses blank runs", () => {

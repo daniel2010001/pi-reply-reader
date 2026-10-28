@@ -144,8 +144,11 @@ export function startReading(options: {
 
 type Boundary = "sentence" | "line" | "paragraph";
 
-/** Seconds of silence after a fragment, by what follows it: a sentence on the same line, a line, a blank line. */
-const PAUSES: Record<Boundary, number> = { sentence: 0.25, line: 0.4, paragraph: 0.6 };
+/**
+ * Seconds of silence after a fragment, by what follows it: a sentence on the same line, a line, a blank line
+ * (also after a heading or bold-only line). Longer than the voice's own 0.08-0.26 s at `,`, `;` and `:` (L39).
+ */
+const PAUSES: Record<Boundary, number> = { sentence: 0.35, line: 0.5, paragraph: 0.75 };
 
 /**
  * Sentences and lines, in order, each with the boundary after it; Supertonic only calls back once per

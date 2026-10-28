@@ -140,8 +140,8 @@ describe("reply-reader extension", () => {
 		await reader.settled();
 		expect(speechText("## Segunda\n\n- `auto_read` listo")).toBe("Segunda.\n\nauto read listo.");
 		expect(synthesized.map((request) => request.text)).toEqual(["Segunda.", "auto read listo."]);
-		// Two one-sample fragments with the 0.6 s paragraph pause (26,460 samples at 44.1 kHz) between them.
-		expect(readFileSync(log("play-0.audio"))).toHaveLength((1 + 26460 + 1) * 2);
+		// Two one-sample fragments with the 0.75 s paragraph pause (33,075 samples at 44.1 kHz) between them.
+		expect(readFileSync(log("play-0.audio"))).toHaveLength((1 + 33075 + 1) * 2);
 		expect(reader.statuses).toEqual(["Reading P2.R1 on local · Esc stops", undefined]);
 		expect(reader.selects).toEqual([]);
 	});

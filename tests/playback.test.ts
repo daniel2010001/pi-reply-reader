@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Output } from "../src/outputs.ts";
 import { type SherpaRequest, type SherpaTts, startReading } from "../src/playback.ts";
+import { speechText } from "../src/speech-text.ts";
 import { SPEAKERS, type Voice } from "../src/voice.ts";
 
 let root: string;
@@ -120,7 +121,7 @@ describe("startReading with Supertonic 3", () => {
 		);
 		// One fixed gain for the whole reading, so quiet and louder sentences keep their balance.
 		const g = SPEAKERS.female.gain * 32767;
-		const sentencePause = new Array(Math.round(44100 * 0.25)).fill(0);
+		const sentencePause = new Array(Math.round(44100 * 0.35)).fill(0);
 		expect(pcm("paplay.audio")).toEqual([0, Math.round(0.1 * g), ...sentencePause, Math.round(-0.2 * g), Math.round(0.05 * g)]);
 	});
 
@@ -147,7 +148,7 @@ describe("startReading with Supertonic 3", () => {
 		const loadSherpa = fakeSherpa(() => new Float32Array([0.125, ...zeros(100), 0.125]));
 		await startReading({ voice, speaker: SPEAKERS.female, text: "Uno. Dos.", output: local, env, loadSherpa }).done;
 		const v = level16(0.125);
-		expect(pcm("paplay.audio")).toEqual([v, ...zeros(100), v, ...zeros(11025), v, ...zeros(100), v]);
+		expect(pcm("paplay.audio")).toEqual([v, ...zeros(100), v, ...zeros(15435), v, ...zeros(100), v]);
 	});
 
 	it("trims each fragment's leading and trailing silence, keeping a 40 ms margin for soft edges", async () => {
@@ -166,17 +167,26 @@ describe("startReading with Supertonic 3", () => {
 		const loadSherpa = fakeSherpa((text) => new Float32Array(quiet[text]));
 		await startReading({ voice, speaker: SPEAKERS.female, text: "Uno. Dos. Tres. Cuatro.", output: local, env, loadSherpa }).done;
 		const v = level16(0.125);
-		expect(pcm("paplay.audio")).toEqual([...new Array(441).fill(v), ...zeros(11025), ...new Array(441).fill(-v)]);
+		expect(pcm("paplay.audio")).toEqual([...new Array(441).fill(v), ...zeros(15435), ...new Array(441).fill(-v)]);
 	});
 
-	it("pauses 0.25 s between sentences, 0.4 s at a line break and 0.6 s at a blank line, never before the first or after the last", async () => {
+	it("pauses 0.35 s between sentences, 0.5 s at a line break and 0.75 s at a blank line, never before the first or after the last", async () => {
 		fakePaplay();
 		const loadSherpa = fakeSherpa(() => new Float32Array(tone(441)));
 		const text = "Título.\n\nUno. Dos.\nTres.\n \nCuatro.\n";
 		await startReading({ voice, speaker: SPEAKERS.female, text, output: local, env, loadSherpa }).done;
 		const f = new Array(441).fill(level16(0.125));
-		const [sentence, line, paragraph] = [zeros(11025), zeros(17640), zeros(26460)];
+		const [sentence, line, paragraph] = [zeros(15435), zeros(22050), zeros(33075)];
 		expect(pcm("paplay.audio")).toEqual([...f, ...paragraph, ...f, ...sentence, ...f, ...line, ...f, ...paragraph, ...f]);
+	});
+
+	it("(f3) keeps a cleaned line that names punctuation marks in one fragment", async () => {
+		fakePaplay();
+		const seen: SherpaRequest[] = [];
+		const loadSherpa = fakeSherpa(() => new Float32Array([0]), seen);
+		const text = speechText("solo en `.`, `!`, `?` y saltos");
+		await startReading({ voice, speaker: male, text, output: local, env, loadSherpa }).done;
+		expect(seen.map((request) => request.text)).toEqual(["solo en punto, signo de exclamación, signo de pregunta y saltos"]);
 	});
 
 	it("leaves PULSE_SERVER alone for local and sets it for a named output", async () => {

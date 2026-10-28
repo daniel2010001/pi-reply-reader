@@ -32,7 +32,10 @@ export function speechText(markdown: string): string {
 			continue;
 		}
 
-		out.push(blockLine(raw));
+		const { text, section } = blockLine(raw);
+		out.push(text);
+		// A heading or bold-only line ends its section, so playback pauses as at a blank line; trim drops a last one.
+		if (section) out.push("");
 	}
 
 	return out
@@ -49,23 +52,28 @@ const CODE_BLOCK = "Bloque de código.";
 const TABLE_SEPARATOR = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 const WORD = String.raw`\p{L}\p{N}_`;
 
-function blockLine(raw: string): string {
+/** A line wrapped whole in one emphasis (`**Qué cambió**`, `*Nota*`, `__X__`), read like a heading. */
+const EMPHASIS_LINE = /^(?:\*\*(?=\S)(?:(?!\*\*).)+(?<=\S)\*\*|__(?=\S)(?:(?!__).)+(?<=\S)__|\*(?=\S)[^*]+(?<=\S)\*|_(?=\S)[^_]+(?<=\S)_)$/;
+
+/** One line of text; `section` marks a heading or bold-only line, which a section break follows. */
+function blockLine(raw: string): { text: string; section?: boolean } {
 	let line = raw.trim();
 	while (/^>\s?/.test(line)) line = line.replace(/^>\s?/, "").trim();
 
-	if (/^([-*_])(\s*\1){2,}$/.test(line)) return "";
-	if (/^\[[^\]]+\]:\s*\S+/.test(line)) return "";
+	if (/^([-*_])(\s*\1){2,}$/.test(line)) return { text: "" };
+	if (/^\[[^\]]+\]:\s*\S+/.test(line)) return { text: "" };
 
 	const heading = /^#{1,6}\s+(.*?)(\s+#+)?$/.exec(line);
-	if (heading) return closeSentence(inline(heading[1]));
+	if (heading) return { text: closeSentence(inline(heading[1])), section: true };
+	if (EMPHASIS_LINE.test(line)) return { text: closeSentence(inline(line)), section: true };
 
 	const bullet = /^[-*+]\s+(?:\[[ xX]\]\s+)?(.*)$/.exec(line);
-	if (bullet) return closeSentence(inline(bullet[1]));
+	if (bullet) return { text: closeSentence(inline(bullet[1])) };
 
 	const numbered = /^(\d+)[.)]\s+(.*)$/.exec(line);
-	if (numbered) return closeSentence(`${numbered[1]}. ${inline(numbered[2])}`);
+	if (numbered) return { text: closeSentence(`${numbered[1]}. ${inline(numbered[2])}`) };
 
-	return inline(line);
+	return { text: inline(line) };
 }
 
 function tableRow(raw: string): string {
@@ -104,8 +112,25 @@ function inline(text: string): string {
 
 /** `before` is the text ahead of the span, so a branch or hash in it can tell what word precedes it. */
 function codeSpan(code: string, before: string): string {
-	return speakable(code.trim(), before);
+	return PUNCTUATION_NAMES[code.trim()] ?? speakable(code.trim(), before);
 }
+
+/** A code span holding one mark is spoken by name; a bare "." would also end a sentence in playback. */
+const PUNCTUATION_NAMES: Record<string, string> = {
+	".": "punto",
+	",": "coma",
+	";": "punto y coma",
+	":": "dos puntos",
+	"!": "signo de exclamación",
+	"?": "signo de pregunta",
+	"~": "virgulilla",
+	"/": "barra",
+	"-": "guion",
+	_: "guion bajo",
+	"*": "asterisco",
+	"#": "numeral",
+	"|": "barra vertical",
+};
 
 /** IDs, symbols, emoji and technical tokens a voice stumbles on, made speakable (prose and code spans alike). */
 function speakable(text: string, before = ""): string {
@@ -116,6 +141,10 @@ function speakable(text: string, before = ""): string {
 			tokenReading(token, previousWord(before + whole.slice(0, offset))),
 		),
 	);
+	out = out
+		// "aproximadamente" has no gender, unlike "unos" ("las unos 400 líneas").
+		.replace(/(?<![\p{L}\p{N}])~(?=\d)/gu, "aproximadamente ")
+		.replace(UNIT, (_m, number: string, unit: string) => `${number} ${(number === "1" ? UNIT_WORD : UNIT_WORDS)[unit]}`);
 	out = out.replace(
 		/(?<![\p{L}\p{N}.])P(\d+)\.R(\d+)(?:\.Q(\d+))?(?![\p{L}\p{N}]|\.[\p{L}\p{N}])/gu,
 		(_m, p: string, r: string, q?: string) => `P ${p}, R ${r}${q ? `, Q ${q}` : ""}`,
@@ -124,6 +153,32 @@ function speakable(text: string, before = ""): string {
 	for (const [symbol, word] of SYMBOL_WORDS) out = spokenAs(out, symbol, word);
 	return spokenAs(out, EMOJI, "").replace(/\uE004(\d+)\uE005/g, (_m, index: string) => identifierSpaces(urls[Number(index)]));
 }
+
+/** A unit right after a number that letters or a version dot do not precede: "2,5 s", "80%", "-16 dB". */
+const UNIT = /(?<![\p{L}\p{N}_.,])(\d+(?:[.,]\d+)*)[ \t]?(dBFS|dB|ms|min|s|KB|MB|GB|%)(?![\p{L}\p{N}])/gu;
+const UNIT_WORDS: Record<string, string> = {
+	s: "segundos",
+	ms: "milisegundos",
+	min: "minutos",
+	KB: "kilobytes",
+	MB: "megabytes",
+	GB: "gigabytes",
+	"%": "por ciento",
+	dB: "decibeles",
+	dBFS: "decibeles",
+};
+/** The same units after exactly 1. */
+const UNIT_WORD: Record<string, string> = {
+	s: "segundo",
+	ms: "milisegundo",
+	min: "minuto",
+	KB: "kilobyte",
+	MB: "megabyte",
+	GB: "gigabyte",
+	"%": "por ciento",
+	dB: "decibel",
+	dBFS: "decibel",
+};
 
 const SYMBOL_WORDS: [RegExp, string][] = [
 	[/[→⇒➜]/, "a"],
