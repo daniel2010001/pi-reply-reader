@@ -90,14 +90,24 @@ The cleanup is deterministic and needs no model, so the same reply always sounds
 - **Reply IDs**: `P11.R1.Q1` is read as "P 11, R 1, Q 1".
 - **Symbols** become words: `→` "a", `←` "desde", `≈` "aproximadamente", `≠` "distinto de", `≥` "mayor o igual
   a", `≤` "menor o igual a", `±` "más o menos", `&` "y", and `×` between numbers "por". Emoji are dropped.
-- **Paths and branches** are read as words: `~/.gentle-shell/agent/AGENTS.md` becomes "gentle shell agent
-  AGENTS punto md", `feat/pending-central` becomes "feat pending central". `snake_case` loses its `_`.
-  Fractions like `1/2` stay as they are.
+- **Technical names** are read by kind (`snake_case` loses its `_` everywhere):
+  - a path, as its file or folder plus where it is: `~/.gentle-shell/agent/AGENTS.md` becomes "AGENTS punto md,
+    en agent", `/tmp/x/wav/hs/` becomes "la carpeta hs, en wav";
+  - a path with a line: `src/speech-text.ts:42` becomes "speech text punto ts, en src, línea 42";
+  - a file name: `README.md` becomes "README punto md";
+  - a branch: `origin/main` becomes "la rama origin main" (after "rama", only the name);
+  - a command: `/reload` becomes "el comando reload", while system folders such as `/tmp` read as "la carpeta tmp";
+  - a commit hash is dropped after "commit" and read as "un commit" elsewhere;
+  - a pair of words: `light/dark` becomes "light o dark".
+
+  Fractions like `1/2`, versions, dates and short pairs like `y/o` stay as they are.
 
 ### Known limits
 
-- Letter pairs such as `light/dark` or `true/false` are read as "light dark": no fixed rule tells them apart
-  from a branch such as `origin/main`.
+- Kinds are guessed from the text alone, so some names are misread: two-word paths such as `odd/tasks`
+  or MIME types such as `application/json` read as alternatives ("odd o tasks"), web routes such as
+  `/users` read as commands, files without an extension read as folders, and some hosts or code names
+  read as file names (`org.bluez` becomes "org punto bluez").
 - Approximations such as `~150` are read as they appear.
 - The voice speaks Spanish (and the code-block announcement is Spanish); English words are read with
   Spanish pronunciation.
