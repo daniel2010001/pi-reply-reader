@@ -33,7 +33,8 @@ const SEED = 42;
 
 /**
  * Speaks `text` with `speaker` on `output`. Supertonic synthesizes one sentence at a time, so the first
- * audio comes after one sentence instead of the whole reply; each sentence goes to `paplay` as raw 16-bit
+ * audio comes after one sentence instead of the whole reply; each sentence loses its own leading and
+ * trailing silence and is followed by our pause for its boundary, then goes to `paplay` as raw 16-bit
  * mono PCM, on this machine's default sink or, for a named output, on its PULSE_SERVER. Nothing here
  * throws: every failure ends in `done`, and `stop()` ends the player and settles `done` quietly.
  */
@@ -75,12 +76,14 @@ export function startReading(options: {
 		);
 		gone.then(() => (playerGone = true));
 
-		for (const segment of segments(text)) {
+		// The pause owed to the last fragment played; none before the first, and the last one's is never written.
+		let pause: number | undefined;
+		for (const fragment of fragments(text)) {
 			if (stopped || playerGone) break;
 			let samples: Float32Array;
 			try {
 				({ samples } = await tts.generateAsync({
-					text: segment,
+					text: fragment.text,
 					generationConfig: { sid: speaker.sid, speed: 1, numSteps: 8, extra: { lang: "es", seed: SEED } },
 					onProgress: () => !stopped && !playerGone,
 				}));
@@ -89,8 +92,17 @@ export function startReading(options: {
 				throw new Error(`Speech synthesis failed: ${(error as Error).message}`);
 			}
 			if (stopped || playerGone) break;
+			const speech = trimSilence(samples, speaker.gain, tts.sampleRate);
+			const after = Math.round(PAUSES[fragment.boundary] * tts.sampleRate);
+			// A silent fragment is dropped, but a stronger boundary it ends still counts.
+			if (!speech) {
+				if (pause !== undefined) pause = Math.max(pause, after);
+				continue;
+			}
+			const audio = pause === undefined ? speech : concat(new Float32Array(pause), speech);
+			pause = after;
 			// Wait until the player takes this sentence, so a slow or stuck player does not buffer the whole reply.
-			if (!child.stdin?.write(pcm16(samples, speaker.gain))) {
+			if (!child.stdin?.write(pcm16(audio, speaker.gain))) {
 				await Promise.race([new Promise((resolve) => child.stdin?.once("drain", resolve)), gone]);
 			}
 		}
@@ -130,12 +142,67 @@ export function startReading(options: {
 	}
 }
 
-/** Sentences and lines, in order; Supertonic only calls back once per 300 characters, so we split first. */
-function segments(text: string): string[] {
-	return text
-		.split(/(?<=[.!?…:;])\s+|\n+/)
-		.map((segment) => segment.trim())
-		.filter((segment) => segment !== "");
+type Boundary = "sentence" | "line" | "paragraph";
+
+/** Seconds of silence after a fragment, by what follows it: a sentence on the same line, a line, a blank line. */
+const PAUSES: Record<Boundary, number> = { sentence: 0.25, line: 0.4, paragraph: 0.6 };
+
+/**
+ * Sentences and lines, in order, each with the boundary after it; Supertonic only calls back once per
+ * 300 characters, so we split first. Never at ":" or ";", where a pause would sound like a full stop.
+ */
+function fragments(text: string): { text: string; boundary: Boundary }[] {
+	const result: { text: string; boundary: Boundary }[] = [];
+	let blank = false;
+	for (const line of text.split("\n")) {
+		const sentences = line
+			.split(/(?<=[.!?…])\s+/)
+			.map((sentence) => sentence.trim())
+			.filter((sentence) => sentence !== "");
+		if (sentences.length === 0) {
+			blank = true;
+			continue;
+		}
+		const previous = result.at(-1);
+		if (previous) previous.boundary = blank ? "paragraph" : "line";
+		blank = false;
+		for (const sentence of sentences) result.push({ text: sentence, boundary: "sentence" });
+	}
+	return result;
+}
+
+/** Windows quieter than this, after the speaker's gain, count as silence (-45 dBFS RMS over 10 ms). */
+const SILENCE = 10 ** (-45 / 20);
+const WINDOW_SECONDS = 0.01;
+/** Kept on each side of the first and last sound, so soft speech edges are not cut. */
+const MARGIN_SECONDS = 0.04;
+
+/**
+ * Supertonic pads every fragment with about 0.4-0.6 s of silence before and 0.6-0.7 s after (L36);
+ * this cuts it to the margin. Undefined when no window is above the threshold.
+ */
+function trimSilence(samples: Float32Array, gain: number, sampleRate: number): Float32Array | undefined {
+	const window = Math.max(1, Math.round(sampleRate * WINDOW_SECONDS));
+	let first = -1;
+	let last = -1;
+	for (let start = 0; start < samples.length; start += window) {
+		const end = Math.min(start + window, samples.length);
+		let sum = 0;
+		for (let i = start; i < end; i++) sum += (samples[i] * gain) ** 2;
+		if (Math.sqrt(sum / (end - start)) <= SILENCE) continue;
+		if (first < 0) first = start;
+		last = end;
+	}
+	if (first < 0) return undefined;
+	const margin = Math.round(sampleRate * MARGIN_SECONDS);
+	return samples.subarray(Math.max(0, first - margin), Math.min(samples.length, last + margin));
+}
+
+function concat(a: Float32Array, b: Float32Array): Float32Array {
+	const out = new Float32Array(a.length + b.length);
+	out.set(a);
+	out.set(b, a.length);
+	return out;
 }
 
 /** Samples below this level pass through the limiter unchanged (-6 dBFS). */

@@ -71,6 +71,12 @@ function pcm(name: string): number[] {
 	return [...new Int16Array(audio.buffer, audio.byteOffset, audio.length / 2)];
 }
 
+/** `n` samples at `level`; 0.125 is exact in float32 and stays under the limiter's knee for both speakers. */
+const tone = (n: number, level = 0.125) => new Array<number>(n).fill(level);
+const zeros = (n: number) => tone(n, 0);
+/** What `level` becomes in the PCM stream for `speaker`, below the knee. */
+const level16 = (level: number, gain = SPEAKERS.female.gain) => Math.round(level * gain * 32767);
+
 const alive = (pid: number) => {
 	try {
 		process.kill(pid, 0);
@@ -81,13 +87,13 @@ const alive = (pid: number) => {
 };
 
 describe("startReading with Supertonic 3", () => {
-	it("synthesizes sentence by sentence, in order, skipping empty segments", async () => {
+	it("synthesizes sentence by sentence, in order, skipping empty segments, never splitting at : or ;", async () => {
 		fakePaplay();
 		const seen: SherpaRequest[] = [];
 		const loadSherpa = fakeSherpa(() => new Float32Array([0]), seen);
 		const text = "Hola, mundo. ¿Qué tal?  Bien!\n\nSigue: uno; dos… tres\n \n";
 		await startReading({ voice, speaker: male, text, output: local, env, loadSherpa }).done;
-		expect(seen.map((request) => request.text)).toEqual(["Hola, mundo.", "¿Qué tal?", "Bien!", "Sigue:", "uno;", "dos…", "tres"]);
+		expect(seen.map((request) => request.text)).toEqual(["Hola, mundo.", "¿Qué tal?", "Bien!", "Sigue: uno; dos…", "tres"]);
 	});
 
 	it("asks for the chosen speaker at speed 1, 8 steps, Spanish and a fixed seed", async () => {
@@ -114,7 +120,8 @@ describe("startReading with Supertonic 3", () => {
 		);
 		// One fixed gain for the whole reading, so quiet and louder sentences keep their balance.
 		const g = SPEAKERS.female.gain * 32767;
-		expect(pcm("paplay.audio")).toEqual([0, Math.round(0.1 * g), Math.round(-0.2 * g), Math.round(0.05 * g)]);
+		const sentencePause = new Array(Math.round(44100 * 0.25)).fill(0);
+		expect(pcm("paplay.audio")).toEqual([0, Math.round(0.1 * g), ...sentencePause, Math.round(-0.2 * g), Math.round(0.05 * g)]);
 	});
 
 	it("limits loud peaks softly below -1 dBFS, keeping their sign and order", async () => {
@@ -135,11 +142,41 @@ describe("startReading with Supertonic 3", () => {
 		expect(out[6]).toBeLessThan(out[5]);
 	});
 
-	it("keeps silence silent", async () => {
+	it("keeps silence silent, inside a fragment and in the pauses", async () => {
 		fakePaplay();
-		const loadSherpa = fakeSherpa(() => new Float32Array(100));
-		await startReading({ voice, speaker: male, text: "a", output: local, env, loadSherpa }).done;
-		expect(pcm("paplay.audio")).toEqual(new Array(100).fill(0));
+		const loadSherpa = fakeSherpa(() => new Float32Array([0.125, ...zeros(100), 0.125]));
+		await startReading({ voice, speaker: SPEAKERS.female, text: "Uno. Dos.", output: local, env, loadSherpa }).done;
+		const v = level16(0.125);
+		expect(pcm("paplay.audio")).toEqual([v, ...zeros(100), v, ...zeros(11025), v, ...zeros(100), v]);
+	});
+
+	it("trims each fragment's leading and trailing silence, keeping a 40 ms margin for soft edges", async () => {
+		fakePaplay();
+		// One second of silence, 20 ms of soft breath below the threshold, 100 ms of speech, one second of silence.
+		const fragment = [...zeros(44100 - 882), ...tone(882, 0.001), ...tone(4410), ...zeros(44100)];
+		const loadSherpa = fakeSherpa(() => new Float32Array(fragment));
+		await startReading({ voice, speaker: SPEAKERS.female, text: "Uno.", output: local, env, loadSherpa }).done;
+		const soft = new Array(882).fill(level16(0.001));
+		expect(pcm("paplay.audio")).toEqual([...zeros(1764 - 882), ...soft, ...new Array(4410).fill(level16(0.125)), ...zeros(1764)]);
+	});
+
+	it("drops a fragment with no sound above the threshold, with its pause", async () => {
+		fakePaplay();
+		const quiet: Record<string, number[]> = { "Uno.": tone(441), "Dos.": zeros(1000), "Tres.": tone(4410, 0.001), "Cuatro.": tone(441, -0.125) };
+		const loadSherpa = fakeSherpa((text) => new Float32Array(quiet[text]));
+		await startReading({ voice, speaker: SPEAKERS.female, text: "Uno. Dos. Tres. Cuatro.", output: local, env, loadSherpa }).done;
+		const v = level16(0.125);
+		expect(pcm("paplay.audio")).toEqual([...new Array(441).fill(v), ...zeros(11025), ...new Array(441).fill(-v)]);
+	});
+
+	it("pauses 0.25 s between sentences, 0.4 s at a line break and 0.6 s at a blank line, never before the first or after the last", async () => {
+		fakePaplay();
+		const loadSherpa = fakeSherpa(() => new Float32Array(tone(441)));
+		const text = "Título.\n\nUno. Dos.\nTres.\n \nCuatro.\n";
+		await startReading({ voice, speaker: SPEAKERS.female, text, output: local, env, loadSherpa }).done;
+		const f = new Array(441).fill(level16(0.125));
+		const [sentence, line, paragraph] = [zeros(11025), zeros(17640), zeros(26460)];
+		expect(pcm("paplay.audio")).toEqual([...f, ...paragraph, ...f, ...sentence, ...f, ...line, ...f, ...paragraph, ...f]);
 	});
 
 	it("leaves PULSE_SERVER alone for local and sets it for a named output", async () => {
@@ -154,7 +191,7 @@ describe("startReading with Supertonic 3", () => {
 	it("waits for the player to take the audio before synthesizing the next segment", async () => {
 		stuckPaplay();
 		const seen: SherpaRequest[] = [];
-		const loadSherpa = fakeSherpa(() => new Float32Array(500_000), seen);
+		const loadSherpa = fakeSherpa(() => new Float32Array(tone(500_000)), seen);
 		const reading = startReading({ voice, speaker: male, text: "Uno. Dos. Tres. Cuatro.", output: local, env, loadSherpa });
 		await waitFor(() => existsSync(log("paplay.pid")) && seen.length > 0);
 		await new Promise((resolve) => setTimeout(resolve, 300));
@@ -260,7 +297,7 @@ describe("startReading without a working player", () => {
 	it("names the output and stops synthesizing when paplay dies before reading any audio", async () => {
 		script("paplay", 'echo "Connection refused" >&2; exit 1');
 		const seen: SherpaRequest[] = [];
-		const loadSherpa = fakeSherpa(() => new Float32Array(500_000), seen);
+		const loadSherpa = fakeSherpa(() => new Float32Array(tone(500_000)), seen);
 		const text = Array.from({ length: 50 }, (_, i) => `Frase ${i}.`).join(" ");
 		await expect(startReading({ voice, speaker: male, text, output: desktop, env, loadSherpa }).done).rejects.toThrow(
 			'Playback on "desktop" failed: Connection refused',

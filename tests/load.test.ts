@@ -54,12 +54,15 @@ function installVoice(paplayBody = ""): void {
 	for (const name of MODEL_FILES) writeFileSync(join(dir, name), name);
 }
 
-/** The engine: each segment becomes one silent sample, so paplay receives two bytes per segment. The latest reply has two. */
+/**
+ * The engine: each fragment becomes one audible sample (a silent one would be trimmed away), so paplay receives
+ * two bytes per fragment plus the pause between fragments.
+ */
 const loadSherpa = async (): Promise<SherpaTts> => ({
 	sampleRate: 44100,
 	async generateAsync(request) {
 		synthesized.push(request);
-		return { samples: new Float32Array(1) };
+		return { samples: new Float32Array(1).fill(0.125) };
 	},
 });
 
@@ -137,7 +140,8 @@ describe("reply-reader extension", () => {
 		await reader.settled();
 		expect(speechText("## Segunda\n\n- `auto_read` listo")).toBe("Segunda.\n\nauto read listo.");
 		expect(synthesized.map((request) => request.text)).toEqual(["Segunda.", "auto read listo."]);
-		expect(readFileSync(log("play-0.audio"))).toHaveLength(4);
+		// Two one-sample fragments with the 0.6 s paragraph pause (26,460 samples at 44.1 kHz) between them.
+		expect(readFileSync(log("play-0.audio"))).toHaveLength((1 + 26460 + 1) * 2);
 		expect(reader.statuses).toEqual(["Reading P2.R1 on local · Esc stops", undefined]);
 		expect(reader.selects).toEqual([]);
 	});
