@@ -32,7 +32,7 @@ describe("speechText", () => {
 
 	it("speaks inline code without backticks and with identifier underscores as spaces", () => {
 		expect(speechText("Usá `speechText` y `auto_read` en `src/speech-text.ts`.")).toBe(
-			"Usá speechText y auto read en src speech text punto ts.",
+			"Usá speechText y auto read en speech text punto ts, en src.",
 		);
 	});
 
@@ -102,12 +102,56 @@ describe("speechText", () => {
 		expect(speechText("- ✅ Hecho 🎉.\nListo 👍🏽, `ok ✨` y 🇦🇷 fin")).toBe("Hecho.\nListo, ok y fin");
 	});
 
-	it("speaks paths and branches as words, in prose and inline code", () => {
+	it("speaks paths and branches by class, in prose and inline code", () => {
 		expect(speechText("Creé ~/.gentle-shell/agent/AGENTS.md, en la rama feat/pending-central.")).toBe(
-			"Creé gentle shell agent AGENTS punto md, en la rama feat pending central.",
+			"Creé AGENTS punto md, en agent, en la rama feat pending central.",
 		);
 		expect(speechText("Abrí `~/.gentle-shell/agent/AGENTS.md`, `feat/pending-central`, `./src/auto_read.ts` y luego /replies.")).toBe(
-			"Abrí gentle shell agent AGENTS punto md, feat pending central, src auto read punto ts y luego replies.",
+			"Abrí AGENTS punto md, en agent, la rama feat pending central, auto read punto ts, en src y luego el comando replies.",
+		);
+	});
+
+	it("(e2) speaks a branch as its name words, adding 'la rama' only when it is not said already", () => {
+		expect(speechText("Estoy en la rama `feat/pending-central`.")).toBe("Estoy en la rama feat pending central.");
+		expect(speechText("Mergeé `origin/main` y la rama `origin/main` en el branch fix/x.")).toBe(
+			"Mergeé la rama origin main y la rama origin main en el branch fix x.",
+		);
+	});
+
+	it("(e3) speaks path:N as the file reading plus its line", () => {
+		expect(speechText("Mirá `src/speech-text.ts:42`.")).toBe("Mirá speech text punto ts, en src, línea 42.");
+	});
+
+	it("(e4) speaks a path as its last part plus its folder", () => {
+		expect(speechText("`~/.gentle-shell/agent/AGENTS.md`")).toBe("AGENTS punto md, en agent");
+		expect(speechText("Los WAV están en `/tmp/reply-reader-bakeoff/wav/hs/`.")).toBe(
+			"Los WAV están en la carpeta hs, en wav.",
+		);
+		expect(speechText("Revisé `~/.gentle-shell`.")).toBe("Revisé la carpeta gentle shell.");
+		expect(speechText("Borrá la carpeta `~/.cache/ms-playwright`.")).toBe("Borrá la carpeta ms playwright, en cache.");
+	});
+
+	it("(e5) speaks two letter-only parts as alternatives", () => {
+		expect(speechText("Elegí `light/dark`, y/o km/h.")).toBe("Elegí light o dark, y/o km/h.");
+	});
+
+	it("(e6) speaks a single /word as a command", () => {
+		expect(speechText("Corré `/reload`")).toBe("Corré el comando reload");
+		expect(speechText("Usá el comando `/usage`.")).toBe("Usá el comando usage.");
+	});
+
+	it("(e7) speaks a bare file name with 'punto', leaving versions, numbers and URL hosts", () => {
+		expect(speechText("`README.md`")).toBe("README punto md");
+		expect(speechText("Leé `README.md`. Y CHANGELOG.md, v2.0.1, 3.5 y https://pi.dev/docs.")).toBe(
+			"Leé README punto md. Y CHANGELOG punto md, v2.0.1, 3.5 y pi.dev.",
+		);
+		expect(speechText("Desde `422773f..HEAD`.")).toBe("Desde 422773f..HEAD.");
+	});
+
+	it("(e8) drops a commit hash after 'commit' and calls it 'un commit' elsewhere", () => {
+		expect(speechText("commit `0e8bb95`")).toBe("commit");
+		expect(speechText("Quedó en el commit `0e8bb95`. Revertí `12a88a0` y los commits 4cf2cac.")).toBe(
+			"Quedó en el commit. Revertí un commit y los commits.",
 		);
 	});
 
@@ -132,6 +176,17 @@ describe("speechText", () => {
 
 	it("still announces a fenced block that holds paths and symbols", () => {
 		expect(speechText("Así:\n```\ncat ~/.x/y.md → ✅\n```")).toBe("Así:\nBloque de código.");
+	});
+
+	it("contracts de el and a el, but not before él", () => {
+		expect(speechText("Después de `/reload` vuelve a `/read`.")).toBe("Después del comando reload vuelve al comando read.");
+		expect(speechText("Hablale a él o de él.")).toBe("Hablale a él o de él.");
+	});
+
+	it("reads top-level system folders as folders, not commands", () => {
+		expect(speechText("Está en `/tmp`, no en /home ni en la carpeta `/etc`.")).toBe(
+			"Está en la carpeta tmp, no en la carpeta home ni en la carpeta etc.",
+		);
 	});
 
 	it("is deterministic and collapses blank runs", () => {
