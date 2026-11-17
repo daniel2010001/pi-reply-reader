@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `/read-auto on|questions|off` (bare toggles): read each new reply, or only its "Needs your decision"
+  section, when the agent's turn ends; off at every session start.
+- `/read <file|ID|empty>#<section>`: read only that section; add `rest` to read on to the end.
+- `reply-reader <file.md>` command: reads a Markdown file (or `-` for standard input) aloud outside Pi, with
+  `--output`, `--speed` (this run only), `--voice` and `--help`. Exit codes 0/1/2, and 129/130/143 when a
+  signal stops it. It shares the one-reading-per-machine rule with `/read`.
 - English replies and files are read with English connecting words ("the command", "Code block.", "1 point 1",
   units and marks), detected from the text itself; Spanish text reads as before.
 - `/read` reads a reply aloud on request only: the latest reply of the branch, or one by ID with

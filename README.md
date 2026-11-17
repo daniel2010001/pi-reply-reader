@@ -53,7 +53,9 @@ sentence is synthesized, about 1-2 s.
 | `/read` | Read a reply aloud: the latest, or one by ID (P12.R1); or a Markdown file (notes.md) | Reads the latest reply of the current branch. |
 | `/read <id>` | | Reads one reply by ID (see below). |
 | `/read <file.md>` | | Reads a Markdown file (see below). |
+| `/read <target>#<section> [rest]` | | Reads one section of a file or reply (see [Reading one section](#reading-one-section)). |
 | `/read-stop` | Stop the reading playing, in this or another Pi session (Esc or a new /read stop it too) | Stops the reading playing, in any Pi session of yours on this machine, and says `Reading stopped.`; with nothing playing anywhere, says `Nothing is being read.` |
+| `/read-auto [on\|questions\|off]` | Read each new reply aloud when the agent finishes, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles | See [Auto-read](#auto-read). |
 | `/read-output [name]` | Choose where readings sound: local or an output from outputs.json | With a name, switches to that output; without one, asks. See [Outputs](#outputs). |
 | `/read-voice [male\|female]` | Choose the voice for the next readings: male (default) or female | With a name, switches the voice; without one, asks. |
 | `/read-speed [n]` | Choose the voice speed for the next readings, 0.5 to 2.0 (default 1.1); saved for later sessions | With a number, sets that speed; without one, offers 0.8 to 1.5. See [Speed](#speed). |
@@ -100,6 +102,49 @@ footer as a reply.
 - A missing or unreadable file gets one warning naming the path as you typed it, such as
   `Cannot read "notes.md": file not found.`, and nothing plays (and no voice download is offered).
 - A file with nothing to read says `notes.md has nothing to read.`
+
+### Reading one section
+
+Add `#section` to read only one section: `/read README.md#install`, `/read P3.R1#usage`, or `/read #usage`
+for the latest reply. It reads from the first matching heading up to the next heading of the same or a
+higher level, subsections included. Add `rest` to keep reading to the end: `/read README.md#install rest`.
+Matching ignores case, accents, punctuation and leading numbers like `2.`, and you can write spaces as `-`
+(`#one-reading-per-machine`). An exact heading wins over one that only starts with your text, which counts
+only if exactly one heading starts with it. If no heading matches you get `No section "<section>" in <name>.`
+and nothing plays. Only `#` headings count.
+
+### Auto-read
+
+`/read-auto on` reads each new reply aloud when the agent finishes its turn; `/read-auto questions` reads only
+the reply's closing **Needs your decision** section (nothing when a reply has none); `/read-auto off` stops.
+`/read-auto` alone toggles (off → on in full, on → off). It is per session and starts off in every new
+session. Replies from before you turned it on are never read. Auto-readings use the same output, voice,
+speed, footer and stop keys (Esc, `/read-stop`) as `/read`, and still follow one reading per machine.
+
+### Standalone command
+
+`reply-reader <file.md>` reads a Markdown file aloud from a terminal, without Pi, with the same cleanup,
+voice, saved speed, outputs and one-reading-per-machine rule as `/read`. `-` reads standard input
+(`cat notes.md | reply-reader -`).
+
+| Option | Effect |
+|---|---|
+| `--output <name>` | where it sounds: `local` (default) or a name from `outputs.json` |
+| `--speed <n>` | voice speed from 0.5 to 2.0 for this run only; settings.json is not changed |
+| `--voice male\|female` | the voice (default male) |
+| `-h`, `--help` | usage |
+
+If the voice is missing, the command asks `[y/N]` before downloading it. Without a terminal, or when reading
+standard input, it exits with an error instead of downloading. Ctrl+C, `kill` or closing the terminal stops
+the reading. A new `/read` or `/read-stop` in any Pi session stops a command reading, and the command stops a
+Pi reading.
+
+Exit codes: 0 read (or nothing to read, or stopped by another reading), 1 cannot read, download or play,
+2 bad arguments, 129/130/143 stopped by SIGHUP, Ctrl+C or SIGTERM.
+
+To install it from a checkout, run `pnpm link --global` (or `npm link`) in the repository, or link
+`bin/reply-reader.ts` into a folder on your `PATH`. It needs Node 22.18 or newer, which runs TypeScript
+directly; a registry install cannot run it yet, since Node does not strip types inside `node_modules`.
 
 ### Speed
 
