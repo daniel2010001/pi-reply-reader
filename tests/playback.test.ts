@@ -97,18 +97,31 @@ describe("startReading with Supertonic 3", () => {
 		expect(seen.map((request) => request.text)).toEqual(["Hola, mundo.", "¿Qué tal?", "Bien!", "Sigue: uno; dos…", "tres"]);
 	});
 
-	it("asks for the chosen speaker at speed 1, 8 steps, Spanish and a fixed seed", async () => {
+	it("asks for the chosen speaker at the default speed 1.1, 8 steps, Spanish and a fixed seed", async () => {
 		fakePaplay();
 		const seen: SherpaRequest[] = [];
 		const loadSherpa = fakeSherpa(() => new Float32Array([0]), seen);
 		await startReading({ voice, speaker: male, text: "Uno. Dos.", output: local, env, loadSherpa }).done;
 		await startReading({ voice, speaker: SPEAKERS.female, text: "Uno.", output: local, env, loadSherpa }).done;
-		const config = { speed: 1, numSteps: 8, extra: { lang: "es", seed: 42 } };
+		const config = { speed: 1.1, numSteps: 8, extra: { lang: "es", seed: 42 } };
 		expect(seen.map((request) => request.generationConfig)).toEqual([
 			{ sid: 6, ...config },
 			{ sid: 6, ...config },
 			{ sid: 0, ...config },
 		]);
+	});
+
+	it("passes the given speed to Supertonic for every fragment, and only the voice speed changes, not our pauses", async () => {
+		fakePaplay();
+		const seen: SherpaRequest[] = [];
+		const loadSherpa = fakeSherpa(() => new Float32Array([0.125]), seen);
+		await startReading({ voice, speaker: SPEAKERS.female, text: "Uno. Dos.", output: local, env, loadSherpa, speed: 1.3 }).done;
+		expect(seen.map((request) => request.generationConfig)).toEqual([
+			{ sid: 0, speed: 1.3, numSteps: 8, extra: { lang: "es", seed: 42 } },
+			{ sid: 0, speed: 1.3, numSteps: 8, extra: { lang: "es", seed: 42 } },
+		]);
+		const v = level16(0.125);
+		expect(pcm("paplay.audio")).toEqual([v, ...zeros(15435), v]);
 	});
 
 	it("plays every segment's audio in order as 16-bit PCM at the engine's rate", async () => {

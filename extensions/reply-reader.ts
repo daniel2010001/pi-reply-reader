@@ -6,12 +6,14 @@ import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { loadOutputs, type Output } from "../src/outputs.ts";
 import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
+import { formatSpeed, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSpeed } from "../src/settings.ts";
 import { speechText } from "../src/speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
 
 const STATUS = "reply-reader";
 const ASK_OUTPUT = "Where should readings sound?";
 const ASK_SPEAKER = "Which voice should read?";
+const ASK_SPEED = "Which speed should readings use?";
 const SPEAKER_NAMES = Object.keys(SPEAKERS) as SpeakerName[];
 /** An argument naming a Markdown file rather than a reply (S6). */
 const MARKDOWN_FILE = /\.(md|markdown)$/i;
@@ -27,7 +29,7 @@ function readProblem(error: NodeJS.ErrnoException): string {
 /**
  * Reads replies aloud on request only (S1): `/read` speaks the latest reply or one by ID, a new reading
  * or Esc stops the one playing, `/read-output` picks where it sounds (S4) and `/read-voice` picks the male
- * or female voice (S3). `/read <file.md>` reads a Markdown file the same way (S6). Nothing plays by itself.
+ * or female voice (S3), `/read-speed` the voice speed, saved in settings.json (S3). `/read <file.md>` reads a Markdown file the same way (S6). Nothing plays by itself.
  */
 export function createReplyReader(
 	deps: { env?: NodeJS.ProcessEnv; hostname?: string; loadSherpa?: (voice: Voice) => Promise<SherpaTts> } = {},
@@ -43,6 +45,10 @@ export function createReplyReader(
 		let speaker: SpeakerName = "male";
 		/** Whether this session's first reading already reported problems in outputs.json. */
 		let warned = false;
+		/** A speed set with /read-speed in this session; otherwise each reading uses the saved one. */
+		let sessionSpeed: number | undefined;
+		/** Whether this session already reported a problem in settings.json. */
+		let speedWarned = false;
 		let unsubscribe: (() => void) | undefined;
 
 		const stop = (): void => {
@@ -75,6 +81,15 @@ export function createReplyReader(
 			if (remembered) return remembered;
 			if (list.length === 1) return list[0];
 			return askOutput(ctx, list);
+		};
+
+		/** The speed for a new reading: this session's choice, else the saved one, warning once about a bad file. */
+		const speedForReading = (ctx: ExtensionContext): number => {
+			if (sessionSpeed !== undefined) return sessionSpeed;
+			const { speed, problem } = loadSpeed(env);
+			if (problem && !speedWarned) ctx.ui.notify(problem, "warning");
+			if (problem) speedWarned = true;
+			return speed;
 		};
 
 		pi.registerCommand("read", {
@@ -137,7 +152,8 @@ export function createReplyReader(
 				}
 
 				stop();
-				const reading = startReading({ voice, speaker: SPEAKERS[speaker], text, output, env, loadSherpa: deps.loadSherpa });
+				const speed = speedForReading(ctx);
+				const reading = startReading({ voice, speaker: SPEAKERS[speaker], text, output, env, loadSherpa: deps.loadSherpa, speed });
 				current = { reading, ctx };
 				ctx.ui.setStatus(STATUS, `Reading ${name} on ${output.name} · Esc stops`);
 				reading.done
@@ -202,10 +218,40 @@ export function createReplyReader(
 			},
 		});
 
+		pi.registerCommand("read-speed", {
+			description: "Choose the voice speed for the next readings, 0.5 to 2.0 (default 1.1); saved for later sessions",
+			getArgumentCompletions: (prefix) =>
+				SPEED_CHOICES.filter((choice) => choice.startsWith(prefix.trim())).map((choice) => ({ value: choice, label: choice })),
+			handler: async (args, ctx) => {
+				let text = args.trim();
+				if (!text) {
+					if (!ctx.hasUI) return;
+					const picked = await ctx.ui.select(ASK_SPEED, SPEED_CHOICES);
+					if (!picked) return;
+					text = picked;
+				}
+				const speed = parseSpeed(text);
+				if (speed === undefined) {
+					ctx.ui.notify(SPEED_HINT, "warning");
+					return;
+				}
+				sessionSpeed = speed;
+				try {
+					saveSpeed(env, speed);
+				} catch (error) {
+					ctx.ui.notify(`Readings will use speed ${formatSpeed(speed)} in this session, but ${(error as Error).message}.`, "warning");
+					return;
+				}
+				ctx.ui.notify(`Readings will use speed ${formatSpeed(speed)}.`, "info");
+			},
+		});
+
 		pi.on("session_start", (_event, ctx) => {
 			chosen = undefined;
 			speaker = "male";
 			warned = false;
+			sessionSpeed = undefined;
+			speedWarned = false;
 			unsubscribe?.();
 			unsubscribe = ctx.hasUI
 				? ctx.ui.onTerminalInput((data) => {

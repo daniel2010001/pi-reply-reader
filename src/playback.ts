@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { Output } from "./outputs.ts";
+import { DEFAULT_SPEED } from "./settings.ts";
 import { onPath, type Speaker, type Voice } from "./voice.ts";
 
 /** What one segment asks of Supertonic; the real loader wraps `generationConfig` in sherpa's GenerationConfig. */
@@ -32,7 +33,8 @@ const PAPLAY_MISSING =
 const SEED = 42;
 
 /**
- * Speaks `text` with `speaker` on `output`. Supertonic synthesizes one sentence at a time, so the first
+ * Speaks `text` with `speaker` at `speed` (Supertonic's voice speed, 1.1 by default; our pauses do not
+ * change with it) on `output`. Supertonic synthesizes one sentence at a time, so the first
  * audio comes after one sentence instead of the whole reply; each sentence loses its own leading and
  * trailing silence and is followed by our pause for its boundary, then goes to `paplay` as raw 16-bit
  * mono PCM, on this machine's default sink or, for a named output, on its PULSE_SERVER. Nothing here
@@ -45,8 +47,9 @@ export function startReading(options: {
 	output: Output;
 	env: NodeJS.ProcessEnv;
 	loadSherpa?: (voice: Voice) => Promise<SherpaTts>;
+	speed?: number;
 }): Reading {
-	const { voice, speaker, text, output, env, loadSherpa = loadSherpaTts } = options;
+	const { voice, speaker, text, output, env, loadSherpa = loadSherpaTts, speed = DEFAULT_SPEED } = options;
 	let player: ChildProcess | undefined;
 	let stopped = false;
 
@@ -84,7 +87,7 @@ export function startReading(options: {
 			try {
 				({ samples } = await tts.generateAsync({
 					text: fragment.text,
-					generationConfig: { sid: speaker.sid, speed: 1, numSteps: 8, extra: { lang: "es", seed: SEED } },
+					generationConfig: { sid: speaker.sid, speed, numSteps: 8, extra: { lang: "es", seed: SEED } },
 					onProgress: () => !stopped && !playerGone,
 				}));
 			} catch (error) {

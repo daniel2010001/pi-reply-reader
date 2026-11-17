@@ -55,6 +55,7 @@ sentence is synthesized, about 1-2 s.
 | `/read <file.md>` | | Reads a Markdown file (see below). |
 | `/read-output [name]` | Choose where readings sound: local or an output from outputs.json | With a name, switches to that output; without one, asks. See [Outputs](#outputs). |
 | `/read-voice [male\|female]` | Choose the voice for the next readings: male (default) or female | With a name, switches the voice; without one, asks. |
+| `/read-speed [n]` | Choose the voice speed for the next readings, 0.5 to 2.0 (default 1.1); saved for later sessions | With a number, sets that speed; without one, offers 0.8 to 1.5. See [Speed](#speed). |
 
 While a reading plays, the footer shows `Reading P12.R1 on local · Esc stops` (or the file name, as in
 `Reading notes.md on local · Esc stops`).
@@ -90,6 +91,21 @@ footer as a reply.
 - A missing or unreadable file gets one warning naming the path as you typed it, such as
   `Cannot read "notes.md": file not found.`, and nothing plays (and no voice download is offered).
 - A file with nothing to read says `notes.md has nothing to read.`
+
+### Speed
+
+The voice reads at speed 1.1 by default (1.0 is Supertonic's own pace). `/read-speed 1.15` sets any speed
+from 0.5 to 2.0, and a comma decimal works too (`/read-speed 1,15`); it confirms with
+`Readings will use speed 1.15.` `/read-speed` alone offers 0.8, 0.9, 1.0, 1.1, 1.2, 1.3 and 1.5. Anything
+else says `Speed must be a number from 0.5 to 2.0.` and changes nothing.
+
+- The choice is saved in `$XDG_CONFIG_HOME/pi-reply-reader/settings.json` (`~/.config/…` when
+  `XDG_CONFIG_HOME` is unset) as `{ "speed": 1.15 }`, keeping any other keys, and every later session and
+  reading uses it. A reading already playing keeps its speed.
+- Only the voice speed changes; the pauses between sentences, lines and sections stay the same.
+- No file means 1.1. An invalid file, or a speed outside 0.5 to 2.0, is ignored with one warning per
+  session, and readings use 1.1. `/read-speed` does not overwrite a file that is not valid JSON.
+- If the file cannot be saved, the speed still applies to this session and a warning says it was not saved.
 
 ## How replies are cleaned for listening
 

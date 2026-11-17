@@ -11,9 +11,12 @@ let env: NodeJS.ProcessEnv;
 let next = 0;
 /** Every request the fake engine received, in order. */
 let synthesized: SherpaRequest[];
+/** When set, the fake engine waits for it before answering each fragment. */
+let gate: Promise<void> | undefined;
 
 beforeEach(() => {
 	synthesized = [];
+	gate = undefined;
 	root = mkdtempSync(join(tmpdir(), "reply-reader-ext-"));
 	mkdirSync(join(root, "bin"));
 	env = { PATH: join(root, "bin"), HOME: join(root, "home"), XDG_DATA_HOME: join(root, "data"), XDG_CONFIG_HOME: join(root, "config") };
@@ -62,9 +65,20 @@ const loadSherpa = async (): Promise<SherpaTts> => ({
 	sampleRate: 44100,
 	async generateAsync(request) {
 		synthesized.push(request);
+		await gate;
 		return { samples: new Float32Array(1).fill(0.125) };
 	},
 });
+
+const settingsDir = () => join(root, "config", "pi-reply-reader");
+const settingsPath = () => join(settingsDir(), "settings.json");
+
+function writeSettings(content: string): void {
+	mkdirSync(settingsDir(), { recursive: true });
+	writeFileSync(settingsPath(), content);
+}
+
+const speeds = () => synthesized.map((request) => request.generationConfig.speed);
 
 function configureOutputs(outputs: Record<string, string>): void {
 	mkdirSync(join(root, "config", "pi-reply-reader"), { recursive: true });
@@ -131,7 +145,7 @@ describe("reply-reader extension", () => {
 	it("registers /read and /read-output by default", () => {
 		const names: string[] = [];
 		replyReader({ registerCommand: (name: string) => names.push(name), on: () => {} } as never);
-		expect(names).toEqual(["read", "read-output", "read-voice"]);
+		expect(names).toEqual(["read", "read-output", "read-voice", "read-speed"]);
 	});
 
 	it("/read speaks the latest reply, cleaned for speech, and shows then clears its status", async () => {
@@ -431,6 +445,223 @@ describe("reply-reader extension", () => {
 		await reader.run("read");
 		await reader.settled();
 		expect(synthesized.map((request) => request.generationConfig.sid)).toEqual([6, 6]);
+	});
+
+	it("reads at speed 1.1 when there is no settings file, without warning", async () => {
+		installVoice();
+		const reader = load();
+		await reader.run("read");
+		await reader.settled();
+		expect(speeds()).toEqual([1.1, 1.1]);
+		expect(reader.notes).toEqual([]);
+		expect(existsSync(settingsPath())).toBe(false);
+	});
+
+	it("/read-speed N (comma decimal too) confirms, saves { speed } and applies to the next readings and sessions", async () => {
+		installVoice();
+		const reader = load();
+		await reader.run("read-speed", "1,15");
+		expect(reader.notes).toEqual([["Readings will use speed 1.15.", "info"]]);
+		expect(JSON.parse(readFileSync(settingsPath(), "utf8"))).toEqual({ speed: 1.15 });
+		await reader.run("read");
+		await reader.settled();
+		reader.restart();
+		await reader.run("read", "P1.R1");
+		await reader.settled();
+		const other = load();
+		await other.run("read", "P1.R1");
+		await other.settled();
+		expect(speeds()).toEqual([1.15, 1.15, 1.15, 1.15]);
+		expect(other.notes).toEqual([]);
+	});
+
+	it("/read-speed accepts 0.5 and 2.0, the ends of the range", async () => {
+		const reader = load();
+		await reader.run("read-speed", "0.5");
+		expect(JSON.parse(readFileSync(settingsPath(), "utf8"))).toEqual({ speed: 0.5 });
+		await reader.run("read-speed", "2.0");
+		expect(JSON.parse(readFileSync(settingsPath(), "utf8"))).toEqual({ speed: 2 });
+		expect(reader.notes).toEqual([
+			["Readings will use speed 0.5.", "info"],
+			["Readings will use speed 2.0.", "info"],
+		]);
+	});
+
+	it("/read-speed keeps the other keys of settings.json", async () => {
+		writeSettings('{ "other": { "a": [1, 2] }, "speed": 1.2 }');
+		const reader = load();
+		await reader.run("read-speed", "0.7");
+		expect(JSON.parse(readFileSync(settingsPath(), "utf8"))).toEqual({ other: { a: [1, 2] }, speed: 0.7 });
+	});
+
+	it("/read-speed with anything else warns, changes nothing and leaves the file absent or byte-identical", async () => {
+		installVoice();
+		const bad = ["abc", "0.4", "2.1", "0", "-1", "1.2.3", "1,2,3", "1.", "1.2x", "NaN", "Infinity", "1e0"];
+		const reader = load();
+		for (const value of bad) await reader.run("read-speed", value);
+		expect(existsSync(settingsPath())).toBe(false);
+		const original = '{"speed":1.3,  "x": 1}\n';
+		writeSettings(original);
+		for (const value of bad) await reader.run("read-speed", value);
+		expect(readFileSync(settingsPath(), "utf8")).toBe(original);
+		expect(reader.notes).toEqual(new Array(bad.length * 2).fill(["Speed must be a number from 0.5 to 2.0.", "warning"]));
+		await reader.run("read");
+		await reader.settled();
+		expect(speeds()).toEqual([1.3, 1.3]);
+	});
+
+	it("/read-speed without a number offers the speeds, saves the pick, and completes them", async () => {
+		const reader = load({ select: "1.3" });
+		await reader.run("read-speed");
+		expect(reader.selects).toEqual([["Which speed should readings use?", ["0.8", "0.9", "1.0", "1.1", "1.2", "1.3", "1.5"]]]);
+		expect(reader.notes).toEqual([["Readings will use speed 1.3.", "info"]]);
+		expect(JSON.parse(readFileSync(settingsPath(), "utf8"))).toEqual({ speed: 1.3 });
+		const complete = reader.commands.get("read-speed")!.getArgumentCompletions as (prefix: string) => { value: string }[];
+		expect(complete("1.").map((item) => item.value)).toEqual(["1.0", "1.1", "1.2", "1.3", "1.5"]);
+	});
+
+	it("/read-speed keeps the speed and the file when the selector is dismissed", async () => {
+		const reader = load({ select: undefined });
+		await reader.run("read-speed");
+		expect(reader.notes).toEqual([]);
+		expect(existsSync(settingsPath())).toBe(false);
+	});
+
+	it("saves under ~/.config when XDG_CONFIG_HOME is unset", async () => {
+		delete env.XDG_CONFIG_HOME;
+		const reader = load();
+		await reader.run("read-speed", "0.9");
+		expect(JSON.parse(readFileSync(join(root, "home", ".config", "pi-reply-reader", "settings.json"), "utf8"))).toEqual({ speed: 0.9 });
+		expect(existsSync(settingsPath())).toBe(false);
+	});
+
+	it("an invalid settings.json warns once per session and reads at 1.1", async () => {
+		installVoice();
+		writeSettings('{ "speed": 1.2, }');
+		const reader = load();
+		await reader.run("read");
+		await reader.settled();
+		await reader.run("read", "P1.R1");
+		await reader.settled();
+		expect(reader.notes).toHaveLength(1);
+		expect(reader.notes[0][1]).toBe("warning");
+		expect(reader.notes[0][0]).toMatch(
+			new RegExp(`^Ignored ${settingsPath().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: not valid JSON \\(.+\\)\\. Readings use speed 1\\.1\\.$`),
+		);
+		reader.restart();
+		await reader.run("read", "P1.R1");
+		await reader.settled();
+		expect(reader.notes).toHaveLength(2);
+		expect(speeds()).toEqual([1.1, 1.1, 1.1, 1.1]);
+	});
+
+	it("a stored speed out of range, or not a number, or a file that is not an object, warns and reads at 1.1", async () => {
+		installVoice();
+		const cases: [string, string][] = [
+			['{ "speed": 3 }', "speed must be a number from 0.5 to 2.0"],
+			['{ "speed": "1.2" }', "speed must be a number from 0.5 to 2.0"],
+			["[1.2]", "expected an object"],
+		];
+		for (const [content, reason] of cases) {
+			writeSettings(content);
+			const reader = load();
+			await reader.run("read", "P1.R1");
+			await reader.settled();
+			expect(reader.notes).toEqual([[`Ignored ${settingsPath()}: ${reason}. Readings use speed 1.1.`, "warning"]]);
+		}
+		expect(speeds()).toEqual([1.1, 1.1, 1.1]);
+	});
+
+	it("a settings file without a speed reads at 1.1 without warning", async () => {
+		installVoice();
+		writeSettings('{ "other": true }');
+		const reader = load();
+		await reader.run("read", "P1.R1");
+		await reader.settled();
+		expect(reader.notes).toEqual([]);
+		expect(speeds()).toEqual([1.1]);
+	});
+
+	it("when saving fails, the speed applies to this session and a warning says it was not saved", async () => {
+		installVoice();
+		// A file where the folder should be: the folder cannot be created.
+		mkdirSync(join(root, "config"), { recursive: true });
+		writeFileSync(settingsDir(), "not a folder");
+		const reader = load();
+		await reader.run("read-speed", "1.4");
+		expect(reader.notes).toHaveLength(1);
+		expect(reader.notes[0][1]).toBe("warning");
+		expect(reader.notes[0][0]).toMatch(/^Readings will use speed 1\.4 in this session, but it was not saved to .*settings\.json: .+\.$/);
+		expect(readFileSync(settingsDir(), "utf8")).toBe("not a folder");
+		await reader.run("read");
+		await reader.settled();
+		expect(speeds()).toEqual([1.4, 1.4]);
+		expect(reader.notes).toHaveLength(1);
+	});
+
+	it("refuses to overwrite an invalid settings.json: the speed applies to this session, the file stays", async () => {
+		installVoice();
+		const original = '{ "speed": 1.2, }';
+		writeSettings(original);
+		const reader = load();
+		await reader.run("read-speed", "0.8");
+		expect(reader.notes).toEqual([
+			[`Readings will use speed 0.8 in this session, but it was not saved to ${settingsPath()}: it is not valid JSON.`, "warning"],
+		]);
+		expect(readFileSync(settingsPath(), "utf8")).toBe(original);
+		await reader.run("read", "P1.R1");
+		await reader.settled();
+		expect(speeds()).toEqual([0.8]);
+	});
+
+	it("a speed change leaves the reading in progress at its speed and applies to the next one", async () => {
+		installVoice();
+		let release = () => {};
+		gate = new Promise((resolve) => (release = resolve));
+		const reader = load();
+		await reader.run("read");
+		await waitFor(() => synthesized.length === 1);
+		await reader.run("read-speed", "1.3");
+		release();
+		await reader.settled();
+		gate = undefined;
+		await reader.run("read");
+		await waitFor(() => reader.statuses.filter((status) => status === undefined).length === 2);
+		expect(speeds()).toEqual([1.1, 1.1, 1.3, 1.3]);
+	});
+
+	it("a different speed keeps our pauses: the same audio length at 1.5 as at 1.1", async () => {
+		installVoice();
+		const reader = load();
+		await reader.run("read-speed", "1.5");
+		await reader.run("read");
+		await reader.settled();
+		expect(speeds()).toEqual([1.5, 1.5]);
+		expect(readFileSync(log("play-0.audio"))).toHaveLength((1 + 33075 + 1) * 2);
+	});
+
+	it("/read-output, /read-voice and /read of a reply and a file behave as before, now at the saved speed", async () => {
+		installVoice();
+		configureOutputs({ desktop: "tcp:x" });
+		mkdirSync(join(root, "work"));
+		writeFileSync(join(root, "work", "notes.md"), "# Notas");
+		const reader = load();
+		await reader.run("read-output", "desktop");
+		await reader.run("read-voice", "female");
+		await reader.run("read", "P1.R1");
+		await reader.settled();
+		await reader.run("read", "notes.md");
+		await reader.settled();
+		expect(reader.notes).toEqual([
+			["Readings will sound on desktop (tcp:x).", "info"],
+			["Readings will use the female voice.", "info"],
+		]);
+		expect(reader.statuses.filter(Boolean)).toEqual(["Reading P1.R1 on desktop · Esc stops", "Reading notes.md on desktop · Esc stops"]);
+		expect(read("play-0.server").trim()).toBe("tcp:x");
+		expect(synthesized.map((request) => [request.text, request.generationConfig])).toEqual([
+			["Primera respuesta.", { sid: 0, speed: 1.1, numSteps: 8, extra: { lang: "es", seed: 42 } }],
+			["Notas.", { sid: 0, speed: 1.1, numSteps: 8, extra: { lang: "es", seed: 42 } }],
+		]);
 	});
 
 	it("offers the download when there is no voice, and reads nothing if declined", async () => {

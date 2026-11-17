@@ -14,6 +14,11 @@
   `$XDG_DATA_HOME/pi-reply-reader/voices`; a failed download keeps nothing. Text is synthesized sentence by
   sentence, so audio starts after the first sentence, and both voices are brought to the same loudness.
 - `/read-voice [male|female]` picks the voice for the next readings: male (default) or female.
+- Configurable voice speed, 1.1 by default. `/read-speed <n>` sets any speed from 0.5 to 2.0 (`1,15` works
+  too); `/read-speed` alone offers 0.8 to 1.5. It is saved in `$XDG_CONFIG_HOME/pi-reply-reader/settings.json`
+  as `{ "speed": … }`, keeping other keys, for every later reading and session; a reading already playing
+  keeps its speed, and the pauses do not change. An invalid file or speed warns once per session and uses
+  1.1; if saving fails, the speed applies to the session with a warning.
 - Replies are cleaned for listening: Markdown syntax is removed, table rows become sentences, code blocks
   are announced as "Bloque de código.", URLs are read as their host, reply IDs as "P 11, R 1, Q 1",
   symbols such as `→` and `≈` as words, emoji are dropped, and paths and branches are read as words.

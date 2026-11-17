@@ -19,7 +19,7 @@ const VALUE_HINT = 'the value must be a PULSE_SERVER string such as "tcp:192.168
 export function loadOutputs(env: NodeJS.ProcessEnv, hostname: string): { outputs: Output[]; problems: string[] } {
 	const outputs: Output[] = [{ name: "local", label: `local (${hostname})` }];
 	const problems: string[] = [];
-	const path = configPath(env);
+	const path = configFile(env, "outputs.json");
 	if (!path) return { outputs, problems };
 
 	let raw: string;
@@ -58,13 +58,16 @@ export function loadOutputs(env: NodeJS.ProcessEnv, hostname: string): { outputs
 	return { outputs, problems };
 }
 
-/** XDG_CONFIG_HOME, then ~/.config; relative values are ignored, as the XDG spec says. */
-function configPath(env: NodeJS.ProcessEnv): string | undefined {
+/**
+ * `name` in this package's config folder: XDG_CONFIG_HOME, then ~/.config; relative values are ignored,
+ * as the XDG spec says. Undefined when neither is usable.
+ */
+export function configFile(env: NodeJS.ProcessEnv, name: string): string | undefined {
 	const base =
 		env.XDG_CONFIG_HOME && isAbsolute(env.XDG_CONFIG_HOME)
 			? env.XDG_CONFIG_HOME
 			: env.HOME && isAbsolute(env.HOME)
 				? join(env.HOME, ".config")
 				: undefined;
-	return base && join(base, "pi-reply-reader", "outputs.json");
+	return base && join(base, "pi-reply-reader", name);
 }
