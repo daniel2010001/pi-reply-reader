@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -27,7 +27,7 @@ describe("package metadata", () => {
 	it("points the bin at the compiled file that the build emits, and builds before packing", () => {
 		expect(buildConfig.compilerOptions.outDir).toBe("dist");
 		expect(pkg.bin).toEqual({ "reply-reader": "./dist/bin/reply-reader.js" });
-		expect(pkg.scripts.build).toBe("tsc -p tsconfig.build.json");
+		expect(pkg.scripts.build).toBe("npm run clean && tsc -p tsconfig.build.json");
 		expect(pkg.scripts.prepack).toBe("npm run build");
 	});
 
@@ -56,6 +56,42 @@ describe("package metadata", () => {
 		const unwanted = paths.filter((path) => /^(odd|tests|bin|node_modules|\.atl)\/|^\.|\.tgz$|^pnpm-|^tsconfig/.test(path));
 		expect(unwanted).toEqual([]);
 	});
+});
+
+/** (S12) `build` starts from an empty dist/, so a file the sources no longer emit never reaches the tarball. */
+describe("build in a copy of the package", () => {
+	let copy: string;
+	const stale = () => {
+		mkdirSync(join(copy, "dist", "old"), { recursive: true });
+		writeFileSync(join(copy, "dist", "old", "stale.js"), "export {};\n");
+	};
+
+	beforeAll(() => {
+		copy = mkdtempSync(join(tmpdir(), "reply-reader-pack-"));
+		for (const entry of ["package.json", "tsconfig.json", "tsconfig.build.json", "README.md", "CHANGELOG.md", "LICENSE", "bin", "src", "extensions", "examples"]) {
+			cpSync(join(ROOT, entry), join(copy, entry), { recursive: true });
+		}
+		symlinkSync(join(ROOT, "node_modules"), join(copy, "node_modules"), "dir");
+	});
+
+	afterAll(() => rmSync(copy, { recursive: true, force: true }));
+
+	it("`npm run build` removes what an earlier build left in dist/ and emits the bin", () => {
+		stale();
+		execFileSync("npm", ["run", "build"], { cwd: copy, stdio: "pipe" });
+		expect(existsSync(join(copy, "dist", "old", "stale.js"))).toBe(false);
+		expect(existsSync(join(copy, "dist", "bin", "reply-reader.js"))).toBe(true);
+	}, 120_000);
+
+	it("`npm pack` builds first and packs dist/ without stale files", () => {
+		stale();
+		const stdout = execFileSync("npm", ["pack", "--dry-run", "--json"], { cwd: copy, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+		// Lifecycle scripts may print to stdout before npm's JSON.
+		const [packed] = JSON.parse(stdout.slice(stdout.search(/^\[$/m)));
+		const paths: string[] = packed.files.map((file: { path: string }) => file.path);
+		expect(paths).toEqual(expect.arrayContaining(["dist/bin/reply-reader.js", "dist/src/cli.js", "dist/src/speech-text.js"]));
+		expect(paths.filter((path) => path.includes("stale"))).toEqual([]);
+	}, 120_000);
 });
 
 describe("compiled reply-reader bin", () => {
