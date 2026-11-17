@@ -585,10 +585,10 @@ registerHooks({
 		expect(readFileSync(BIN, "utf8").split("\n")[0]).toBe("#!/usr/bin/env node");
 	});
 
-	it("is registered as the reply-reader command and shipped in the package", () => {
+	it("is registered as the reply-reader command through its compiled build (tests/package.test.ts)", () => {
 		const pkg = JSON.parse(readFileSync(resolve(import.meta.dirname, "..", "package.json"), "utf8"));
-		expect(pkg.bin).toEqual({ "reply-reader": "./bin/reply-reader.ts" });
-		expect(pkg.files).toContain("bin");
+		expect(pkg.bin).toEqual({ "reply-reader": "./dist/bin/reply-reader.js" });
+		expect(pkg.files).toContain("dist");
 	});
 
 	it("--help prints the usage and exits 0", async () => {

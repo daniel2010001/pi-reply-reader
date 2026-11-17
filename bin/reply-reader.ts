@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// `reply-reader <file.md>`: reads a Markdown file aloud from a terminal, without Pi (S6). Run by Node's type stripping.
+// `reply-reader <file.md>`: reads a Markdown file aloud from a terminal, without Pi (S6). The installed
+// command runs the compiled dist/bin/reply-reader.js (`npm run build`, run before packing), since Node does not strip
+// types under node_modules; from a checkout this file also runs directly with Node's type stripping.
 import { createInterface } from "node:readline";
 import { main } from "../src/cli.ts";
 

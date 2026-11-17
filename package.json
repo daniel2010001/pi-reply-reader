@@ -1,10 +1,18 @@
 {
   "name": "pi-reply-reader",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Read a Pi or Gentle Shell reply aloud on request, with local text-to-speech and Markdown cleaned up for listening.",
   "type": "module",
   "license": "MIT",
   "author": "Daniel Li",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/daniel2010001/pi-reply-reader.git"
+  },
+  "homepage": "https://github.com/daniel2010001/pi-reply-reader#readme",
+  "bugs": {
+    "url": "https://github.com/daniel2010001/pi-reply-reader/issues"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -18,10 +26,10 @@
     ]
   },
   "bin": {
-    "reply-reader": "./bin/reply-reader.ts"
+    "reply-reader": "./dist/bin/reply-reader.js"
   },
   "files": [
-    "bin",
+    "dist",
     "extensions",
     "src",
     "examples",
@@ -33,12 +41,22 @@
     "node": ">=22.19.0"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "test": "vitest --run",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=1.2.0 <2",
     "@earendil-works/pi-tui": ">=1.2.0 <2"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "1.4.0",

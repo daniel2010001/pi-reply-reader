@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 — 2026-11-17
+
+First release.
 
 - Event contract v1 for other extensions over `pi.events`, for `pi-reply-thread`'s Alt+R `s` key:
   `reply-reader:ping` `{ v: 1 }` is answered at once with `reply-reader:ready` `{ v: 1 }` (also sent at every
@@ -11,7 +13,8 @@
 - `/read <file|ID|empty>#<section>`: read only that section; add `rest` to read on to the end.
 - `reply-reader <file.md>` command: reads a Markdown file (or `-` for standard input) aloud outside Pi, with
   `--output`, `--speed` (this run only), `--voice` and `--help`. Exit codes 0/1/2, and 129/130/143 when a
-  signal stops it. It shares the one-reading-per-machine rule with `/read`.
+  signal stops it. It shares the one-reading-per-machine rule with `/read`. `npm i -g pi-reply-reader`
+  installs it as compiled JavaScript, without installing Pi.
 - English replies and files are read with English connecting words ("the command", "Code block.", "1 point 1",
   units and marks), detected from the text itself; Spanish text reads as before.
 - `/read` reads a reply aloud on request only: the latest reply of the branch, or one by ID with
@@ -31,7 +34,8 @@
 - Local Spanish voice, Supertonic 3 through sherpa-onnx-node 2.0.1, on the CPU with no API key. The first
   `/read` asks before downloading it once (129 MB, pinned size and sha256) into
   `$XDG_DATA_HOME/pi-reply-reader/voices`; a failed download keeps nothing. Text is synthesized sentence by
-  sentence, so audio starts after the first sentence, and both voices are brought to the same loudness.
+  sentence, so audio starts after the first sentence, and the next sentence is synthesized while one plays;
+  both voices are brought to the same loudness.
 - `/read-voice [male|female]` picks the voice for the next readings: male (default) or female.
 - Configurable voice speed, 1.1 by default. `/read-speed <n>` sets any speed from 0.5 to 2.0 (`1,15` works
   too, and so does `.9` without the leading zero); `/read-speed` alone offers 0.8 to 1.5. It is saved in `$XDG_CONFIG_HOME/pi-reply-reader/settings.json`
@@ -40,7 +44,8 @@
   1.1; if saving fails, the speed applies to the session with a warning.
 - Replies are cleaned for listening: Markdown syntax is removed, table rows become sentences, code blocks
   are announced as "Bloque de código.", URLs are read as their host, reply IDs as "P 11, R 1, Q 1",
-  symbols such as `→` and `≈` as words, emoji are dropped, and paths and branches are read as words.
+  symbols such as `→` and `≈` as words, and emoji are dropped. Technical names are read by kind: a path as
+  its file or folder plus where it is, a branch, a command, a file name, a commit hash, a pair of words.
   Approximations and units are spelled out, numbered items read "1:" instead of stopping after the number,
   and bold-only lines and headings are read as titles. Numbers with dots read "punto" (`1.1` "1 punto 1",
   `## 5.2. Título` "5 punto 2: Título"), while Spanish thousands such as `2.750` and IP addresses stay.

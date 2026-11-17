@@ -1,0 +1,12 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": false,
+		"rewriteRelativeImportExtensions": true,
+		"rootDir": ".",
+		"outDir": "dist",
+		"sourceMap": false,
+		"declaration": false
+	},
+	"include": ["bin/reply-reader.ts", "src/sherpa-onnx-node.d.ts"]
+}

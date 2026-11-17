@@ -15,7 +15,7 @@ another machine you reach over SSH. `/read notes.md` reads a Markdown file the s
 ## Install
 
 ```sh
-pi install npm:pi-reply-reader   # once it is published
+pi install npm:pi-reply-reader
 ```
 
 Or try it for one session from a clone:
@@ -171,9 +171,20 @@ Pi reading.
 Exit codes: 0 read (or nothing to read, or stopped by another reading), 1 cannot read, download or play,
 2 bad arguments, 129/130/143 stopped by SIGHUP, Ctrl+C or SIGTERM.
 
-To install it from a checkout, run `pnpm link --global` (or `npm link`) in the repository, or link
-`bin/reply-reader.ts` into a folder on your `PATH`. It needs Node 22.18 or newer, which runs TypeScript
-directly; a registry install cannot run it yet, since Node does not strip types inside `node_modules`.
+`pi install` does not put the command on your `PATH`. Install it with npm:
+
+```sh
+npm i -g pi-reply-reader
+```
+
+The installed command is compiled JavaScript (Node does not run TypeScript inside `node_modules`), and it does
+not install Pi. From a checkout, build it and link it instead:
+
+```sh
+pnpm install && pnpm build && pnpm link --global   # or npm link instead of pnpm link --global
+```
+
+or link `bin/reply-reader.ts` into a folder on your `PATH`; Node runs that file directly, without a build.
 
 ### Speed
 
@@ -237,8 +248,8 @@ agent", "the branch origin main", "a commit", ", line 42", "1 point 1", "approxi
   or MIME types such as `application/json` read as alternatives ("odd o tasks"), web routes such as
   `/users` read as commands, files without an extension read as folders, and some hosts or code names
   read as file names (`org.bluez` becomes "org punto bluez").
-- The voice speaks Spanish (and the code-block announcement is Spanish); English words are read with
-  Spanish pronunciation.
+- The voice speaks with Spanish pronunciation, also for English text (only the words the cleanup adds
+  switch to English there).
 
 ## Outputs
 
@@ -322,6 +333,7 @@ Pi and no change to its configuration. A new client is one more unit and one mor
 pnpm install
 pnpm test
 pnpm typecheck
+pnpm build   # compiles the reply-reader command into dist/ (also run by npm pack)
 ```
 
 ## License
