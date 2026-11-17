@@ -14,6 +14,8 @@
 - Replies are cleaned for listening: Markdown syntax is removed, table rows become sentences, code blocks
   are announced as "Bloque de código.", URLs are read as their host, reply IDs as "P 11, R 1, Q 1",
   symbols such as `→` and `≈` as words, emoji are dropped, and paths and branches are read as words.
+  Approximations and units are spelled out, numbered items read "1:" instead of stopping after the number,
+  and bold-only lines and headings are read as titles.
 - Named outputs: `local` (this machine's default sink) plus the names in
   `$XDG_CONFIG_HOME/pi-reply-reader/outputs.json`, each mapped to a `PULSE_SERVER`. The first `/read` of a
   session asks which one when there is more than `local`; `/read-output [name]` switches. Bad entries are

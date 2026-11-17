@@ -15,12 +15,12 @@ describe("speechText", () => {
 	});
 
 	it("speaks a heading as its text, closed as a sentence", () => {
-		expect(speechText("## Needs your decision\n\nTexto.")).toBe("Needs your decision.\n\nTexto.");
+		expect(speechText("## Qué cambió\n\nTexto.")).toBe("Qué cambió.\n\nTexto.");
 	});
 
 	it("drops bullet, number punctuation and checkbox markers", () => {
 		expect(speechText("- uno\n* dos\n+ tres\n1) cuatro\n- [x] hecho\n- [ ] pendiente")).toBe(
-			"uno.\ndos.\ntres.\n1. cuatro.\nhecho.\npendiente.",
+			"uno.\ndos.\ntres.\n1: cuatro.\nhecho.\npendiente.",
 		);
 	});
 
@@ -239,6 +239,29 @@ describe("speechText", () => {
 		expect(speechText("# A\n**B**\nC")).toBe("A.\n\nB.\n\nC");
 		expect(speechText("Texto.\n## Fin")).toBe("Texto.\nFin.");
 		expect(speechText("Texto.\n**Fin**")).toBe("Texto.\nFin.");
+	});
+
+	it("(g1) speaks an ordered list marker as \"N:\" so playback does not cut after the number", () => {
+		expect(speechText("1. Después\n2) Luego")).toBe("1: Después.\n2: Luego.");
+		expect(speechText("Versión 2. Luego sigue.")).toBe("Versión 2. Luego sigue.");
+		expect(speechText("## 1. Estado de gsh\n**2. Engram listo.** Bajé todo.")).toBe("1: Estado de gsh.\n\n2: Engram listo. Bajé todo.");
+	});
+
+	it("(g2) undoes a contraction before an article a reading inserts", () => {
+		expect(speechText("Después del `/reload`, listo.")).toBe("Después del comando reload, listo.");
+		expect(speechText("Volvé al `/read`.")).toBe("Volvé al comando read.");
+		expect(speechText("Viene del `feat/pending-central`.")).toBe("Viene de la rama feat pending central.");
+		expect(speechText("Del `origin/main` sale.")).toBe("De la rama origin main sale.");
+		expect(speechText("Pasá al `/tmp/a/b/`.")).toBe("Pasá a la carpeta b, en a.");
+		expect(speechText("Es del `4141c6d`.")).toBe("Es de un commit.");
+		expect(speechText("Corré de `/reload`.")).toBe("Corré del comando reload.");
+		expect(speechText("Lo dijo de él.")).toBe("Lo dijo de él.");
+	});
+
+	it("(g3) speaks the closing \"Needs your decision\" heading in Spanish", () => {
+		expect(speechText("## Needs your decision\n1. ¿Seguimos?")).toBe("Decisiones pendientes.\n\n1: ¿Seguimos?");
+		expect(speechText("**Needs your decision:**\n1. ¿Sí?")).toBe("Decisiones pendientes.\n\n1: ¿Sí?");
+		expect(speechText("Needs your decision")).toBe("Needs your decision");
 	});
 
 	it("is deterministic and collapses blank runs", () => {

@@ -84,19 +84,26 @@ The cleanup is deterministic and needs no model, so the same reply always sounds
 
 - **Markdown**: emphasis, headings, bullets, numbered items, blockquotes, links and rules lose their syntax
   and keep their words. Headings and list items end as sentences. Inline code is read without backticks.
+  A heading or a line that is all bold is read like a title, followed by a longer pause. A numbered item or
+  heading reads its number as "1:" so the voice does not stop after it, and the closing
+  "Needs your decision" heading is read as "Decisiones pendientes".
 - **Tables**: each row is read as one sentence, cells separated by commas.
 - **Code blocks** are announced, not read: `Bloque de código.`
 - **URLs** are read as their host name (`github.com`).
 - **Reply IDs**: `P11.R1.Q1` is read as "P 11, R 1, Q 1".
 - **Symbols** become words: `→` "a", `←` "desde", `≈` "aproximadamente", `≠` "distinto de", `≥` "mayor o igual
   a", `≤` "menor o igual a", `±` "más o menos", `&` "y", and `×` between numbers "por". Emoji are dropped.
+- **Numbers**: `~` before a number reads "aproximadamente", and units after a number are spelled out (`1,2 s`
+  "1,2 segundos", `ms`, `min`, `KB`/`MB`/`GB`, `%` "por ciento", `dB`/`dBFS` "decibeles"), singular after 1.
+  Inline code holding a single punctuation mark reads its name: `` `.` `` "punto", `` `;` `` "punto y coma".
 - **Technical names** are read by kind (`snake_case` loses its `_` everywhere):
   - a path, as its file or folder plus where it is: `~/.gentle-shell/agent/AGENTS.md` becomes "AGENTS punto md,
     en agent", `/tmp/x/wav/hs/` becomes "la carpeta hs, en wav";
   - a path with a line: `src/speech-text.ts:42` becomes "speech text punto ts, en src, línea 42";
   - a file name: `README.md` becomes "README punto md";
   - a branch: `origin/main` becomes "la rama origin main" (after "rama", only the name);
-  - a command: `/reload` becomes "el comando reload", while system folders such as `/tmp` read as "la carpeta tmp";
+  - a command: `/reload` becomes "el comando reload" ("del `/reload`" becomes "del comando reload"), while
+    system folders such as `/tmp` read as "la carpeta tmp";
   - a commit hash is dropped after "commit" and read as "un commit" elsewhere;
   - a pair of words: `light/dark` becomes "light o dark".
 
@@ -108,7 +115,6 @@ The cleanup is deterministic and needs no model, so the same reply always sounds
   or MIME types such as `application/json` read as alternatives ("odd o tasks"), web routes such as
   `/users` read as commands, files without an extension read as folders, and some hosts or code names
   read as file names (`org.bluez` becomes "org punto bluez").
-- Approximations such as `~150` are read as they appear.
 - The voice speaks Spanish (and the code-block announcement is Spanish); English words are read with
   Spanish pronunciation.
 

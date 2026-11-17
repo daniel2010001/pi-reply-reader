@@ -43,6 +43,14 @@ export function speechText(markdown: string): string {
 		.replace(/[ \t]{2,}|\t/g, " ")
 		// The readings above add "el comando"; Spanish contracts "de el" and "a el" (but not "de él").
 		.replace(/(?<![\p{L}\p{N}])([dD]e|[aA]) el(?![\p{L}\p{N}])/gu, (_m, word: string) => (word.length === 1 ? `${word}l` : `${word[0]}el`))
+		// The reverse for a contraction already written before the token: "del el comando" → "del comando",
+		// "del la rama" → "de la rama", "al un commit" → "a un commit".
+		.replace(
+			/(?<![\p{L}\p{N}])([dD]e|[aA])l (el|la|un) (comando|carpeta|rama|commit)(?![\p{L}\p{N}])/gu,
+			(_m, word: string, article: string, noun: string) => (article === "el" ? `${word}l ${noun}` : `${word} ${article} ${noun}`),
+		)
+		// A numbered heading or bold line ("## 1. Estado") starts with "1." too; "1:" keeps playback from cutting there.
+		.replace(/^(\d+)\. /gm, "$1: ")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
 }
@@ -64,16 +72,25 @@ function blockLine(raw: string): { text: string; section?: boolean } {
 	if (/^\[[^\]]+\]:\s*\S+/.test(line)) return { text: "" };
 
 	const heading = /^#{1,6}\s+(.*?)(\s+#+)?$/.exec(line);
-	if (heading) return { text: closeSentence(inline(heading[1])), section: true };
-	if (EMPHASIS_LINE.test(line)) return { text: closeSentence(inline(line)), section: true };
+	if (heading) {
+		const text = inline(heading[1]);
+		return { text: closeSentence(spokenHeading(text)), section: true };
+	}
+	if (EMPHASIS_LINE.test(line)) return { text: closeSentence(spokenHeading(inline(line))), section: true };
 
 	const bullet = /^[-*+]\s+(?:\[[ xX]\]\s+)?(.*)$/.exec(line);
 	if (bullet) return { text: closeSentence(inline(bullet[1])) };
 
 	const numbered = /^(\d+)[.)]\s+(.*)$/.exec(line);
-	if (numbered) return { text: closeSentence(`${numbered[1]}. ${inline(numbered[2])}`) };
+	// "1:" rather than "1.", which playback would cut at, reading the number alone.
+	if (numbered) return { text: closeSentence(`${numbered[1]}: ${inline(numbered[2])}`) };
 
 	return { text: inline(line) };
+}
+
+/** Every reply here closes with the English heading "Needs your decision"; a Spanish voice would mangle it. */
+function spokenHeading(text: string): string {
+	return /^needs your decision:?$/i.test(text) ? "Decisiones pendientes" : text;
 }
 
 function tableRow(raw: string): string {
