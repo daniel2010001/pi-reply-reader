@@ -6,6 +6,9 @@
   `/read P12.R1` (any case, a `.Q<n>` suffix accepted, numbered like `pi-reply-thread`'s `/replies`) or by
   its entry ID. Nothing plays by itself. A new reading stops the one playing, and Esc stops it; the footer
   shows `Reading P12.R1 on local · Esc stops` meanwhile.
+- `/read <file.md>` reads a Markdown file aloud (`.md` or `.markdown`, any case), resolved against the
+  session's working directory (absolute and `~/` paths work too), with the same cleanup, voice, output,
+  Esc and footer as a reply. A missing or unreadable file gets one warning naming it, and nothing plays.
 - Local Spanish voice, Supertonic 3 through sherpa-onnx-node 2.0.1, on the CPU with no API key. The first
   `/read` asks before downloading it once (129 MB, pinned size and sha256) into
   `$XDG_DATA_HOME/pi-reply-reader/voices`; a failed download keeps nothing. Text is synthesized sentence by

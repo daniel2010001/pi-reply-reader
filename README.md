@@ -4,7 +4,7 @@ Read a [Pi](https://github.com/earendil-works/pi) or Gentle Shell reply aloud, o
 
 `/read` takes the latest reply (or one by ID), cleans its Markdown so it sounds like prose instead of
 "asterisco asterisco", and speaks it with a local Spanish voice. The output can be this machine's speakers or
-another machine you reach over SSH.
+another machine you reach over SSH. `/read notes.md` reads a Markdown file the same way.
 
 - **Nothing plays by itself.** A reading starts only with `/read`. A new reading stops the one playing, so
   two never overlap.
@@ -50,12 +50,14 @@ sentence is synthesized, about 1-2 s.
 
 | Command | Description in Pi | What it does |
 |---|---|---|
-| `/read` | Read a reply aloud: the latest, or one by ID (P12.R1) | Reads the latest reply of the current branch. |
+| `/read` | Read a reply aloud: the latest, or one by ID (P12.R1); or a Markdown file (notes.md) | Reads the latest reply of the current branch. |
 | `/read <id>` | | Reads one reply by ID (see below). |
+| `/read <file.md>` | | Reads a Markdown file (see below). |
 | `/read-output [name]` | Choose where readings sound: local or an output from outputs.json | With a name, switches to that output; without one, asks. See [Outputs](#outputs). |
 | `/read-voice [male\|female]` | Choose the voice for the next readings: male (default) or female | With a name, switches the voice; without one, asks. |
 
-While a reading plays, the footer shows `Reading P12.R1 on local · Esc stops`.
+While a reading plays, the footer shows `Reading P12.R1 on local · Esc stops` (or the file name, as in
+`Reading notes.md on local · Esc stops`).
 
 - **Esc** stops the reading. While a reading plays, Esc is taken by the reader, so it does not also
   interrupt a running agent turn at that moment; press it again for that.
@@ -77,6 +79,17 @@ While a reading plays, the footer shows `Reading P12.R1 on local · Esc stops`.
 Only final replies count (not tool calls or errors). Gentle Agents wake messages are not prompts, so replies
 they trigger stay under the prompt that started them; replies before any prompt are `P0`. An ID that matches
 nothing says `No reply matches "<id>".`
+
+### Markdown files
+
+An argument ending in `.md` or `.markdown` (any case) is a file, not a reply ID: `/read notes.md`,
+`/read docs/guide.markdown`, `/read /tmp/plan.md` or `/read ~/notes/today.md`. A relative path is resolved
+against the session's working directory. The file goes through the same cleanup, voice, output, Esc and
+footer as a reply.
+
+- A missing or unreadable file gets one warning naming the path as you typed it, such as
+  `Cannot read "notes.md": file not found.`, and nothing plays (and no voice download is offered).
+- A file with nothing to read says `notes.md has nothing to read.`
 
 ## How replies are cleaned for listening
 

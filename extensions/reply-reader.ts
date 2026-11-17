@@ -1,4 +1,6 @@
-import { hostname as osHostname } from "node:os";
+import { readFileSync } from "node:fs";
+import { homedir, hostname as osHostname } from "node:os";
+import { basename, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { loadOutputs, type Output } from "../src/outputs.ts";
@@ -11,11 +13,21 @@ const STATUS = "reply-reader";
 const ASK_OUTPUT = "Where should readings sound?";
 const ASK_SPEAKER = "Which voice should read?";
 const SPEAKER_NAMES = Object.keys(SPEAKERS) as SpeakerName[];
+/** An argument naming a Markdown file rather than a reply (S6). */
+const MARKDOWN_FILE = /\.(md|markdown)$/i;
+
+/** Why a Markdown file could not be read, in the user's words. */
+function readProblem(error: NodeJS.ErrnoException): string {
+	if (error.code === "ENOENT") return "file not found";
+	if (error.code === "EISDIR") return "it is a folder";
+	if (error.code === "EACCES" || error.code === "EPERM") return "permission denied";
+	return error.message;
+}
 
 /**
  * Reads replies aloud on request only (S1): `/read` speaks the latest reply or one by ID, a new reading
  * or Esc stops the one playing, `/read-output` picks where it sounds (S4) and `/read-voice` picks the male
- * or female voice (S3). Nothing plays by itself.
+ * or female voice (S3). `/read <file.md>` reads a Markdown file the same way (S6). Nothing plays by itself.
  */
 export function createReplyReader(
 	deps: { env?: NodeJS.ProcessEnv; hostname?: string; loadSherpa?: (voice: Voice) => Promise<SherpaTts> } = {},
@@ -66,18 +78,38 @@ export function createReplyReader(
 		};
 
 		pi.registerCommand("read", {
-			description: "Read a reply aloud: the latest, or one by ID (P12.R1)",
+			description: "Read a reply aloud: the latest, or one by ID (P12.R1); or a Markdown file (notes.md)",
 			handler: async (args, ctx) => {
-				const replies = listReplies(ctx.sessionManager.getBranch());
 				const wanted = args.trim();
-				const reply = wanted ? findReply(replies, wanted) : latestReply(replies);
-				if (!reply) {
-					ctx.ui.notify(wanted ? `No reply matches "${wanted}".` : "There is no reply to read yet.", "warning");
-					return;
+				/** What the status line names: the reply ID or the file name. */
+				let name: string;
+				/** What the "nothing to read" message names: the reply ID or the path as given. */
+				let label: string;
+				let markdown: string;
+				if (MARKDOWN_FILE.test(wanted)) {
+					const path = wanted.startsWith("~/") ? resolve(env.HOME || homedir(), wanted.slice(2)) : resolve(ctx.cwd, wanted);
+					try {
+						markdown = readFileSync(path, "utf8");
+					} catch (error) {
+						ctx.ui.notify(`Cannot read "${wanted}": ${readProblem(error as NodeJS.ErrnoException)}.`, "warning");
+						return;
+					}
+					name = basename(path);
+					label = wanted;
+				} else {
+					const replies = listReplies(ctx.sessionManager.getBranch());
+					const reply = wanted ? findReply(replies, wanted) : latestReply(replies);
+					if (!reply) {
+						ctx.ui.notify(wanted ? `No reply matches "${wanted}".` : "There is no reply to read yet.", "warning");
+						return;
+					}
+					name = reply.id;
+					label = reply.id;
+					markdown = reply.text;
 				}
-				const text = speechText(reply.text);
+				const text = speechText(markdown);
 				if (!text) {
-					ctx.ui.notify(`${reply.id} has nothing to read.`, "info");
+					ctx.ui.notify(`${label} has nothing to read.`, "info");
 					return;
 				}
 
@@ -107,7 +139,7 @@ export function createReplyReader(
 				stop();
 				const reading = startReading({ voice, speaker: SPEAKERS[speaker], text, output, env, loadSherpa: deps.loadSherpa });
 				current = { reading, ctx };
-				ctx.ui.setStatus(STATUS, `Reading ${reply.id} on ${output.name} · Esc stops`);
+				ctx.ui.setStatus(STATUS, `Reading ${name} on ${output.name} · Esc stops`);
 				reading.done
 					.catch((error: Error) => {
 						if (current?.reading === reading) ctx.ui.notify(error.message, "error");

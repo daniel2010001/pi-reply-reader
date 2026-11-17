@@ -100,6 +100,7 @@ function load(answers: { select?: string; confirm?: boolean } = {}) {
 	const ctx = {
 		hasUI: true,
 		mode: "tui",
+		cwd: join(root, "work"),
 		sessionManager: { getBranch: () => branch },
 		ui: {
 			notify: (message: string, type?: string) => notes.push([message, type]),
@@ -152,6 +153,82 @@ describe("reply-reader extension", () => {
 		await reader.run("read", "p1.r1");
 		await reader.settled();
 		expect(synthesized.map((request) => request.text)).toEqual(["Primera respuesta."]);
+	});
+
+	it("/read FILE.md reads that Markdown file, cleaned for speech, and names it in the status", async () => {
+		installVoice();
+		mkdirSync(join(root, "work"));
+		writeFileSync(join(root, "work", "notes.md"), "# Notas\n\nHola **mundo**.");
+		const reader = load();
+		await reader.run("read", "notes.md");
+		await reader.settled();
+		expect(synthesized.map((request) => request.text)).toEqual(["Notas.", "Hola mundo."]);
+		expect(existsSync(log("play-0.audio"))).toBe(true);
+		expect(reader.statuses).toEqual(["Reading notes.md on local · Esc stops", undefined]);
+		expect(reader.notes).toEqual([]);
+	});
+
+	it("/read resolves a Markdown path against the session's cwd (any case), or as absolute or ~/", async () => {
+		installVoice();
+		mkdirSync(join(root, "work", "docs"), { recursive: true });
+		mkdirSync(join(root, "home"));
+		writeFileSync(join(root, "work", "docs", "guide.MARKDOWN"), "Guía.");
+		writeFileSync(join(root, "elsewhere.Md"), "Afuera.");
+		writeFileSync(join(root, "home", "home.md"), "Casa.");
+		const reader = load();
+		for (const path of ["docs/guide.MARKDOWN", "../elsewhere.Md", join(root, "home", "home.md"), "~/home.md"]) {
+			await reader.run("read", path);
+			await reader.settled();
+		}
+		expect(synthesized.map((request) => request.text)).toEqual(["Guía.", "Afuera.", "Casa.", "Casa."]);
+		expect(reader.statuses.filter(Boolean)).toEqual([
+			"Reading guide.MARKDOWN on local · Esc stops",
+			"Reading elsewhere.Md on local · Esc stops",
+			"Reading home.md on local · Esc stops",
+			"Reading home.md on local · Esc stops",
+		]);
+		expect(reader.notes).toEqual([]);
+	});
+
+	it("/read of a missing or unreadable Markdown file warns once, naming it, and plays and downloads nothing", async () => {
+		script("paplay", `echo $$ > "${root}/play-0.pid"; cat > /dev/null`);
+		mkdirSync(join(root, "work", "folder.md"), { recursive: true });
+		const reader = load({ confirm: true });
+		await reader.run("read", "missing.md");
+		await reader.run("read", "folder.md");
+		expect(reader.notes).toEqual([
+			['Cannot read "missing.md": file not found.', "warning"],
+			['Cannot read "folder.md": it is a folder.', "warning"],
+		]);
+		expect(reader.confirms).toEqual([]);
+		expect(reader.statuses).toEqual([]);
+		expect(synthesized).toEqual([]);
+		expect(existsSync(log("play-0.pid"))).toBe(false);
+	});
+
+	it("/read of a Markdown file with nothing to read says so, like an empty reply, and downloads nothing", async () => {
+		mkdirSync(join(root, "work"));
+		writeFileSync(join(root, "work", "empty.md"), "  \n\n");
+		const reader = load({ confirm: true });
+		await reader.run("read", "empty.md");
+		expect(reader.notes).toEqual([["empty.md has nothing to read.", "info"]]);
+		expect(reader.confirms).toEqual([]);
+		expect(reader.statuses).toEqual([]);
+		expect(synthesized).toEqual([]);
+	});
+
+	it("/read with a reply ID or an entry ID still reads that reply, not a file", async () => {
+		installVoice();
+		mkdirSync(join(root, "work"));
+		writeFileSync(join(root, "work", "P1.R1"), "Archivo.");
+		const reader = load();
+		await reader.run("read", "P1.R1");
+		await reader.settled();
+		await reader.run("read", branch[3].id);
+		await reader.settled();
+		expect(synthesized.map((request) => request.text)).toEqual(["Primera respuesta.", "Segunda.", "auto read listo."]);
+		expect(reader.statuses.filter(Boolean)).toEqual(["Reading P1.R1 on local · Esc stops", "Reading P2.R1 on local · Esc stops"]);
+		expect(reader.notes).toEqual([]);
 	});
 
 	it("/read with an unknown ID says so and plays nothing", async () => {
