@@ -49,8 +49,9 @@ export function speechText(markdown: string): string {
 			/(?<![\p{L}\p{N}])([dD]e|[aA])l (el|la|un) (comando|carpeta|rama|commit)(?![\p{L}\p{N}])/gu,
 			(_m, word: string, article: string, noun: string) => (article === "el" ? `${word}l ${noun}` : `${word} ${article} ${noun}`),
 		)
-		// A numbered heading or bold line ("## 1. Estado") starts with "1." too; "1:" keeps playback from cutting there.
-		.replace(/^(\d+)\. /gm, "$1: ")
+		// A numbered heading or bold line ("## 1. Estado", "## 5.2. Título") starts with "1." too; "1:" keeps playback
+		// from cutting there.
+		.replace(/^(\d+(?: punto \d+)*)\. /gm, "$1: ")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
 }
@@ -161,14 +162,36 @@ function speakable(text: string, before = ""): string {
 	out = out
 		// "aproximadamente" has no gender, unlike "unos" ("las unos 400 líneas").
 		.replace(/(?<![\p{L}\p{N}])~(?=\d)/gu, "aproximadamente ")
-		.replace(UNIT, (_m, number: string, unit: string) => `${number} ${(number === "1" ? UNIT_WORD : UNIT_WORDS)[unit]}`);
+		.replace(UNIT, (_m, number: string, unit: string) => `${number} ${(number === "1" ? UNIT_WORD : UNIT_WORDS)[unit]}`)
+		// After the units, so "2.1 s" is "2 punto 1 segundos" and not "2 punto 1 segundo".
+		.replace(DOTTED_NUMBER, dottedNumber);
 	out = out.replace(
 		/(?<![\p{L}\p{N}.])P(\d+)\.R(\d+)(?:\.Q(\d+))?(?![\p{L}\p{N}]|\.[\p{L}\p{N}])/gu,
 		(_m, p: string, r: string, q?: string) => `P ${p}, R ${r}${q ? `, Q ${q}` : ""}`,
 	);
 	out = out.replace(/(\d)[ \t]*×[ \t]*(?=\d)/g, "$1 por ");
 	for (const [symbol, word] of SYMBOL_WORDS) out = spokenAs(out, symbol, word);
-	return spokenAs(out, EMOJI, "").replace(/\uE004(\d+)\uE005/g, (_m, index: string) => identifierSpaces(urls[Number(index)]));
+	return spokenAs(out, EMOJI, "")
+		.replace(/\uE004(\d+)\uE005/g, (_m, index: string) => identifierSpaces(urls[Number(index)]))
+		.replace(/\uE009/g, ".");
+}
+
+/**
+ * (h1) Digit groups joined by single dots, standing alone: not inside a word, a version tag (`v2.0.1`,
+ * `x@2.0.1`), a file name (`2.0.1.tgz`), a host (marked by `prose`) or an address after `tcp:`. A dot between
+ * digits in a technical token's own reading is parked as \uE009, so paths and file names keep theirs.
+ */
+const DOTTED_NUMBER =
+	/\uE006[^\uE007]*\uE007|(?<![\p{L}\p{N}_.@/:\\\uE009])(?<![\p{L}\p{N}_]-)\d+(?:\.\d+)+(?![\p{L}\p{N}_@/\\\uE009]|\.[\p{L}\p{N}])/gu;
+/** Spanish thousands: "2.750", "1.500.000". */
+const THOUSANDS = /^[1-9]\d{0,2}(?:\.\d{3})+$/;
+
+/** "1.1" reads as "1 punto 1"; thousands, IP addresses and hosts stay as they are. */
+function dottedNumber(match: string): string {
+	if (match.startsWith("\uE006") || THOUSANDS.test(match)) return match;
+	const groups = match.split(".");
+	if (groups.length === 4 && groups.every((group) => group.length <= 3 && Number(group) <= 255)) return match;
+	return groups.join(" punto ");
 }
 
 /** A unit right after a number that letters or a version dot do not precede: "2,5 s", "80%", "-16 dB". */
@@ -231,7 +254,9 @@ function tokenReading(token: string, previous: string): string {
 	if (!core || /[\uE000-\uE008]/u.test(token) || !/[\p{L}\p{N}]/u.test(core)) return token;
 	const reading = classified(core, previous.toLowerCase());
 	if (reading === undefined) return token;
-	return reading === "" ? `\uE008${trail}` : `${lead}${reading}${trail}`;
+	if (reading === "") return `\uE008${trail}`;
+	// A dot between digits in a reading ("a punto ts, en 1.2") is the token's own; (h1) leaves it.
+	return `${lead}${reading.replace(/(?<=\d)\.(?=\d)/g, "\uE009")}${trail}`;
 }
 
 function classified(core: string, previous: string): string | undefined {

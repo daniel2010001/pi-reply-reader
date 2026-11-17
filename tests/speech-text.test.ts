@@ -143,7 +143,7 @@ describe("speechText", () => {
 	it("(e7) speaks a bare file name with 'punto', leaving versions, numbers and URL hosts", () => {
 		expect(speechText("`README.md`")).toBe("README punto md");
 		expect(speechText("Leé `README.md`. Y CHANGELOG.md, v2.0.1, 3.5 y https://pi.dev/docs.")).toBe(
-			"Leé README punto md. Y CHANGELOG punto md, v2.0.1, 3.5 y pi.dev.",
+			"Leé README punto md. Y CHANGELOG punto md, v2.0.1, 3 punto 5 y pi.dev.",
 		);
 		expect(speechText("Desde `422773f..HEAD`.")).toBe("Desde 422773f..HEAD.");
 	});
@@ -166,11 +166,11 @@ describe("speechText", () => {
 		);
 	});
 
-	it("keeps plain numbers, dates and versions unchanged", () => {
-		expect(speechText("Son 1,044 respuestas, 42 tests y 3.5 s.")).toBe("Son 1,044 respuestas, 42 tests y 3.5 segundos.");
+	it("keeps plain numbers, dates and tagged versions unchanged; (h1) reads dotted numbers with 'punto'", () => {
+		expect(speechText("Son 1,044 respuestas, 42 tests y 3.5 s.")).toBe("Son 1,044 respuestas, 42 tests y 3 punto 5 segundos.");
 		expect(speechText("El 2026-10-27 y `2026-10-27`.")).toBe("El 2026-10-27 y 2026-10-27.");
 		expect(speechText("Versiones 1.13.8, v2.0.1 y `sherpa-onnx-node@2.0.1`.")).toBe(
-			"Versiones 1.13.8, v2.0.1 y sherpa-onnx-node@2.0.1.",
+			"Versiones 1 punto 13 punto 8, v2.0.1 y sherpa-onnx-node@2.0.1.",
 		);
 	});
 
@@ -202,7 +202,7 @@ describe("speechText", () => {
 		expect(speechText("Tarda 1 s, 2,5 s, 250 ms, 3 min, 12 KB, 4,5 MB, 2 GB, 80%, -16 dB y -1 dBFS.")).toBe(
 			"Tarda 1 segundo, 2,5 segundos, 250 milisegundos, 3 minutos, 12 kilobytes, 4,5 megabytes, 2 gigabytes, 80 por ciento, -16 decibeles y -1 decibel.",
 		);
-		expect(speechText("En `1.5s` y 30ms.")).toBe("En 1.5 segundos y 30 milisegundos.");
+		expect(speechText("En `1.5s` y 30ms.")).toBe("En 1 punto 5 segundos y 30 milisegundos.");
 		expect(speechText("1 ms, 1 min, 1 KB, 1 MB, 1 GB, 1 dB, 1% y 1,0 s.")).toBe(
 			"1 milisegundo, 1 minuto, 1 kilobyte, 1 megabyte, 1 gigabyte, 1 decibel, 1 por ciento y 1,0 segundos.",
 		);
@@ -210,7 +210,7 @@ describe("speechText", () => {
 
 	it("(f1)/(f2) leave versions, dates, ~/ paths, URLs and unit-like words without a number alone", () => {
 		expect(speechText("Versión 1.13.8, el 2026-10-28, en `~/.gentle-shell` y ~/x/y.md.")).toBe(
-			"Versión 1.13.8, el 2026-10-28, en la carpeta gentle shell y y punto md, en x.",
+			"Versión 1 punto 13 punto 8, el 2026-10-28, en la carpeta gentle shell y y punto md, en x.",
 		);
 		expect(speechText("Ver https://x.dev/a?b=~1&c=5%20s y los s, 3 semanas, 2 minas, v2 s, R1 ms.")).toBe(
 			"Ver x.dev y los s, 3 semanas, 2 minas, v2 s, R1 ms.",
@@ -262,6 +262,52 @@ describe("speechText", () => {
 		expect(speechText("## Needs your decision\n1. ¿Seguimos?")).toBe("Decisiones pendientes.\n\n1: ¿Seguimos?");
 		expect(speechText("**Needs your decision:**\n1. ¿Sí?")).toBe("Decisiones pendientes.\n\n1: ¿Sí?");
 		expect(speechText("Needs your decision")).toBe("Needs your decision");
+	});
+
+	it("(h1) reads a number with dots with 'punto'", () => {
+		expect(speechText("Versión 1.1 y 0.8.0, con 3.5 s y ~1.5 MB.")).toBe(
+			"Versión 1 punto 1 y 0 punto 8 punto 0, con 3 punto 5 segundos y aproximadamente 1 punto 5 megabytes.",
+		);
+		expect(speechText("Usá `1.13.8` (o 2.1).")).toBe("Usá 1 punto 13 punto 8 (o 2 punto 1).");
+		expect(speechText("Un contraste de 4.5:1, a las 22:48.")).toBe("Un contraste de 4 punto 5:1, a las 22:48.");
+	});
+
+	it("(h1) turns the period after a dotted number ending a numbered heading, bold line or item into ':'", () => {
+		expect(speechText("## 5.2. Título\nTexto.")).toBe("5 punto 2: Título.\n\nTexto.");
+		expect(speechText("**1.1. Engram**\n5.2. Después")).toBe("1 punto 1: Engram.\n\n5 punto 2: Después");
+		expect(speechText("## 5.2 Título")).toBe("5 punto 2 Título.");
+	});
+
+	it("(h1) keeps Spanish thousands as they are", () => {
+		expect(speechText("Son 2.750 respuestas y 1.500.000 bytes, no 0.750 ni 2.75.")).toBe(
+			"Son 2.750 respuestas y 1.500.000 bytes, no 0 punto 750 ni 2 punto 75.",
+		);
+	});
+
+	it("(h1) leaves reply IDs to their own reading", () => {
+		expect(speechText("En P11.R1.Q1 y `P2.R10`, versión 1.1.")).toBe("En P 11, R 1, Q 1 y P 2, R 10, versión 1 punto 1.");
+	});
+
+	it("(h1) leaves URLs to their own reading", () => {
+		expect(speechText("Ver https://10.0.0.1:8080/v/1.2 y `https://x.dev/r/1.2.3`, en 1.2.")).toBe("Ver 10.0.0.1:8080 y https://x.dev/r/1.2.3, en 1 punto 2.");
+	});
+
+	it("(h1) leaves file names to their own reading", () => {
+		expect(speechText("Abrí `1.2.md`, `notas-1.2.md` y 2.0.1.tgz de la 2.0.1.")).toBe("Abrí 1.2.md, notas 1 punto 2 punto md y 2.0.1.tgz de la 2 punto 0 punto 1.");
+	});
+
+	it("(h1) leaves paths to their own reading", () => {
+		expect(speechText("Está en `src/1.2/a.ts` y en `~/v/1.2.3/` desde la 1.2.")).toBe("Está en a punto ts, en 1.2 y en la carpeta 1.2.3, en v desde la 1 punto 2.");
+	});
+
+	it("(h1) keeps IP addresses as they are", () => {
+		expect(speechText("El hs es 192.168.1.22 y el desktop `tcp:10.42.0.145:4713`, no 1.2.3 ni 300.1.1.1.")).toBe(
+			"El hs es 192.168.1.22 y el desktop tcp:10.42.0.145:4713, no 1 punto 2 punto 3 ni 300 punto 1 punto 1 punto 1.",
+		);
+	});
+
+	it("(h1) keeps the period of a number ending a sentence", () => {
+		expect(speechText("Ahora son 1.1. Luego 2.0.")).toBe("Ahora son 1 punto 1. Luego 2 punto 0.");
 	});
 
 	it("is deterministic and collapses blank runs", () => {
