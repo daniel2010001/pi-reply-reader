@@ -145,7 +145,7 @@ describe("reply-reader extension", () => {
 	it("registers /read and /read-output by default", () => {
 		const names: string[] = [];
 		replyReader({ registerCommand: (name: string) => names.push(name), on: () => {} } as never);
-		expect(names).toEqual(["read", "read-output", "read-voice", "read-speed"]);
+		expect(names).toEqual(["read", "read-stop", "read-output", "read-voice", "read-speed"]);
 	});
 
 	it("/read speaks the latest reply, cleaned for speech, and shows then clears its status", async () => {
@@ -363,6 +363,56 @@ describe("reply-reader extension", () => {
 		expect(reader.key("\x1b")).toBeUndefined();
 	});
 
+	it("/read-stop stops the reading playing, says so and clears the status", async () => {
+		installVoice("sleep 30;");
+		const reader = load();
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-0.pid")));
+		await reader.run("read-stop");
+		expect(reader.notes).toEqual([["Reading stopped.", "info"]]);
+		expect(reader.statuses).toEqual(["Reading P2.R1 on local · Esc stops", undefined]);
+		await waitFor(() => !alive(Number(read("play-0.pid"))));
+		expect(reader.key("\x1b")).toBeUndefined();
+	});
+
+	it("/read-stop with nothing playing says so and changes nothing", async () => {
+		installVoice();
+		const reader = load();
+		await reader.run("read-stop");
+		expect(reader.notes).toEqual([["Nothing is being read.", "info"]]);
+		expect(reader.statuses).toEqual([]);
+		await reader.run("read");
+		await reader.settled();
+		const played = synthesized.length;
+		await reader.run("read-stop");
+		expect(reader.notes).toEqual([
+			["Nothing is being read.", "info"],
+			["Nothing is being read.", "info"],
+		]);
+		expect(reader.statuses).toEqual(["Reading P2.R1 on local · Esc stops", undefined]);
+		expect(synthesized).toHaveLength(played);
+		expect(existsSync(log("play-1.pid"))).toBe(false);
+	});
+
+	it("Esc and a new /read still stop a reading, alongside /read-stop", async () => {
+		installVoice("sleep 30;");
+		const reader = load();
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-0.pid")));
+		expect(reader.key("\x1b")).toEqual({ consume: true });
+		await waitFor(() => !alive(Number(read("play-0.pid"))));
+		await reader.run("read-stop");
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-1.pid")));
+		await reader.run("read", "P1.R1");
+		await waitFor(() => !alive(Number(read("play-1.pid"))));
+		await waitFor(() => existsSync(log("play-2.pid")));
+		expect(alive(Number(read("play-2.pid")))).toBe(true);
+		expect(reader.notes).toEqual([["Nothing is being read.", "info"]]);
+		reader.shutdown();
+		await waitFor(() => !alive(Number(read("play-2.pid"))));
+	});
+
 	it("ending the session stops the reading", async () => {
 		installVoice("sleep 30;");
 		const reader = load();
@@ -487,6 +537,18 @@ describe("reply-reader extension", () => {
 		]);
 	});
 
+	it("/read-speed accepts a decimal without a leading zero, with a period or a comma", async () => {
+		const reader = load();
+		await reader.run("read-speed", ".9");
+		expect(JSON.parse(readFileSync(settingsPath(), "utf8"))).toEqual({ speed: 0.9 });
+		await reader.run("read-speed", ",75");
+		expect(JSON.parse(readFileSync(settingsPath(), "utf8"))).toEqual({ speed: 0.75 });
+		expect(reader.notes).toEqual([
+			["Readings will use speed 0.9.", "info"],
+			["Readings will use speed 0.75.", "info"],
+		]);
+	});
+
 	it("/read-speed keeps the other keys of settings.json", async () => {
 		writeSettings('{ "other": { "a": [1, 2] }, "speed": 1.2 }');
 		const reader = load();
@@ -496,7 +558,7 @@ describe("reply-reader extension", () => {
 
 	it("/read-speed with anything else warns, changes nothing and leaves the file absent or byte-identical", async () => {
 		installVoice();
-		const bad = ["abc", "0.4", "2.1", "0", "-1", "1.2.3", "1,2,3", "1.", "1.2x", "NaN", "Infinity", "1e0"];
+		const bad = ["abc", "0.4", "2.1", "0", "-1", "1.2.3", "1,2,3", "1.", "1.2x", "NaN", "Infinity", "1e0", ".", ",", ".4", ",3", "..9", ".9.1"];
 		const reader = load();
 		for (const value of bad) await reader.run("read-speed", value);
 		expect(existsSync(settingsPath())).toBe(false);

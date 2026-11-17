@@ -27,8 +27,8 @@ function readProblem(error: NodeJS.ErrnoException): string {
 }
 
 /**
- * Reads replies aloud on request only (S1): `/read` speaks the latest reply or one by ID, a new reading
- * or Esc stops the one playing, `/read-output` picks where it sounds (S4) and `/read-voice` picks the male
+ * Reads replies aloud on request only (S1): `/read` speaks the latest reply or one by ID, a new reading,
+ * Esc or `/read-stop` stops the one playing, `/read-output` picks where it sounds (S4) and `/read-voice` picks the male
  * or female voice (S3), `/read-speed` the voice speed, saved in settings.json (S3). `/read <file.md>` reads a Markdown file the same way (S6). Nothing plays by itself.
  */
 export function createReplyReader(
@@ -165,6 +165,18 @@ export function createReplyReader(
 						ctx.ui.setStatus(STATUS, undefined);
 						current = undefined;
 					});
+			},
+		});
+
+		pi.registerCommand("read-stop", {
+			description: "Stop the reading playing (Esc or a new /read stop it too)",
+			handler: async (_args, ctx) => {
+				if (!current) {
+					ctx.ui.notify("Nothing is being read.", "info");
+					return;
+				}
+				stop();
+				ctx.ui.notify("Reading stopped.", "info");
 			},
 		});
 

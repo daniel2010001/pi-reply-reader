@@ -11,13 +11,13 @@ export const SPEED_CHOICES = ["0.8", "0.9", "1.0", "1.1", "1.2", "1.3", "1.5"];
 export const SPEED_HINT = "Speed must be a number from 0.5 to 2.0.";
 
 const SETTINGS = "settings.json";
-/** Digits with an optional decimal part, after a period or a comma. */
-const NUMBER = /^\d+(?:[.,]\d+)?$/;
+/** Digits with an optional decimal part after a period or a comma, or only the decimal part (".9", ",9"). */
+const NUMBER = /^(?:\d+(?:[.,]\d+)?|[.,]\d+)$/;
 
 const inRange = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value) && value >= MIN_SPEED && value <= MAX_SPEED;
 
-/** A speed typed by the user ("1.15" or "1,15"), or undefined when it is not one from 0.5 to 2.0. */
+/** A speed typed by the user ("1.15", "1,15" or ".9"), or undefined when it is not one from 0.5 to 2.0. */
 export function parseSpeed(text: string): number | undefined {
 	const trimmed = text.trim();
 	if (!NUMBER.test(trimmed)) return undefined;

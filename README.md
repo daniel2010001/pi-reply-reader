@@ -7,7 +7,7 @@ Read a [Pi](https://github.com/earendil-works/pi) or Gentle Shell reply aloud, o
 another machine you reach over SSH. `/read notes.md` reads a Markdown file the same way.
 
 - **Nothing plays by itself.** A reading starts only with `/read`. A new reading stops the one playing, so
-  two never overlap.
+  two never overlap, and `/read-stop` or Esc stops it.
 - **Local and offline after setup.** Speech is synthesized on the machine that runs Pi, on the CPU, with no
   API key. Your replies never leave the machine (except as audio to an output you configured).
 - **Nothing enters the model context.**
@@ -53,6 +53,7 @@ sentence is synthesized, about 1-2 s.
 | `/read` | Read a reply aloud: the latest, or one by ID (P12.R1); or a Markdown file (notes.md) | Reads the latest reply of the current branch. |
 | `/read <id>` | | Reads one reply by ID (see below). |
 | `/read <file.md>` | | Reads a Markdown file (see below). |
+| `/read-stop` | Stop the reading playing (Esc or a new /read stop it too) | Stops the reading playing and says `Reading stopped.`; with nothing playing, says `Nothing is being read.` |
 | `/read-output [name]` | Choose where readings sound: local or an output from outputs.json | With a name, switches to that output; without one, asks. See [Outputs](#outputs). |
 | `/read-voice [male\|female]` | Choose the voice for the next readings: male (default) or female | With a name, switches the voice; without one, asks. |
 | `/read-speed [n]` | Choose the voice speed for the next readings, 0.5 to 2.0 (default 1.1); saved for later sessions | With a number, sets that speed; without one, offers 0.8 to 1.5. See [Speed](#speed). |
@@ -62,6 +63,8 @@ While a reading plays, the footer shows `Reading P12.R1 on local · Esc stops` (
 
 - **Esc** stops the reading. While a reading plays, Esc is taken by the reader, so it does not also
   interrupt a running agent turn at that moment; press it again for that.
+- **`/read-stop`** stops the reading and says `Reading stopped.`; with nothing playing it says
+  `Nothing is being read.` and changes nothing.
 - **A new `/read`** stops the reading that is playing and starts the new one.
 - The output and the voice last for the session. A new session starts with the male voice and asks for the
   output again on its first reading (only when there is more than `local` to choose from).
@@ -95,8 +98,8 @@ footer as a reply.
 ### Speed
 
 The voice reads at speed 1.1 by default (1.0 is Supertonic's own pace). `/read-speed 1.15` sets any speed
-from 0.5 to 2.0, and a comma decimal works too (`/read-speed 1,15`); it confirms with
-`Readings will use speed 1.15.` `/read-speed` alone offers 0.8, 0.9, 1.0, 1.1, 1.2, 1.3 and 1.5. Anything
+from 0.5 to 2.0, and a comma decimal or no leading zero works too (`/read-speed 1,15`, `/read-speed .9`); it
+confirms with `Readings will use speed 1.15.` `/read-speed` alone offers 0.8, 0.9, 1.0, 1.1, 1.2, 1.3 and 1.5. Anything
 else says `Speed must be a number from 0.5 to 2.0.` and changes nothing.
 
 - The choice is saved in `$XDG_CONFIG_HOME/pi-reply-reader/settings.json` (`~/.config/…` when
@@ -125,6 +128,9 @@ The cleanup is deterministic and needs no model, so the same reply always sounds
 - **Numbers**: `~` before a number reads "aproximadamente", and units after a number are spelled out (`1,2 s`
   "1,2 segundos", `ms`, `min`, `KB`/`MB`/`GB`, `%` "por ciento", `dB`/`dBFS` "decibeles"), singular after 1.
   Inline code holding a single punctuation mark reads its name: `` `.` `` "punto", `` `;` `` "punto y coma".
+  Numbers with dots read "punto": `1.1` is "1 punto 1", `0.8.0` "0 punto 8 punto 0", and a numbered heading
+  `## 5.2. Título` reads "5 punto 2: Título". Spanish thousands (`2.750`, `1.500.000`), IP addresses, reply
+  IDs, URLs, file names and paths keep their own reading, and a number ending a sentence keeps its period.
 - **Technical names** are read by kind (`snake_case` loses its `_` everywhere):
   - a path, as its file or folder plus where it is: `~/.gentle-shell/agent/AGENTS.md` becomes "AGENTS punto md,
     en agent", `/tmp/x/wav/hs/` becomes "la carpeta hs, en wav";
