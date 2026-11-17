@@ -4,6 +4,56 @@
  * Deterministic and model-free, so the same reply always sounds the same.
  */
 export function speechText(markdown: string): string {
+	return speechReading(markdown).text;
+}
+
+export type Language = "es" | "en";
+
+/** The cleaned text plus the language its added words are in (S7). */
+export function speechReading(markdown: string): { text: string; language: Language } {
+	const language = detectLanguage(markdown);
+	const previous = words;
+	words = PHRASEBOOKS[language];
+	try {
+		return { text: cleaned(markdown, language), language };
+	} finally {
+		words = previous;
+	}
+}
+
+/**
+ * (S7) English or Spanish, from the text's own function words; code, URLs and paths do not count.
+ * Spanish wins ties, so a reply with no clear English majority reads as it always did.
+ */
+export function detectLanguage(markdown: string): Language {
+	const prose = markdown
+		.replace(/^\s{0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^\s{0,3}\1[^\n]*$|(?![\s\S]))/gm, " ")
+		// The closing heading every reply here uses is English even in a Spanish reply.
+		.replace(/^\s*(?:#{1,6}\s+|\*\*|__)?needs your decision:?(?:\*\*|__)?\s*$/gim, " ")
+		.replace(/(`+)[\s\S]+?\1/g, " ")
+		.replace(/\S*(?::\/\/|[/\\~])\S*/g, " ")
+		.toLowerCase();
+	let english = 0;
+	let spanish = 0;
+	for (const [word] of prose.matchAll(/\p{L}+/gu)) {
+		if (ENGLISH_WORDS.has(word)) english++;
+		else if (SPANISH_WORDS.has(word)) spanish++;
+	}
+	return english > spanish ? "en" : "es";
+}
+
+/** Common function words found in one language only ("a", "no" and "me" are in both and count for neither). */
+const ENGLISH_WORDS = new Set(
+	"the and of to is are was were be been being it its this that these those with for from on at by an as or not but if then than when which what who how you your we our they their there here will would can could should does do did has have had into only also just about all any each more most such so".split(" "),
+);
+const SPANISH_WORDS = new Set(
+	"el la los las de del al que y en un una unos unas es son era fue ser está están estar por para con sin se lo le les su sus este esta esto estos estas ese esa eso como más pero si sí ya hay cuando también porque sobre muy entre hasta desde todo todos cada qué cómo donde dónde o ni".split(" "),
+);
+
+/** The phrasebook of the text being cleaned; `speechReading` sets it around one synchronous run. */
+let words: Phrasebook;
+
+function cleaned(markdown: string, language: Language): string {
 	const out: string[] = [];
 	const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
 	let fence: { char: string; length: number } | undefined;
@@ -19,7 +69,7 @@ export function speechText(markdown: string): string {
 		const open = /^\s{0,3}(`{3,}|~{3,})/.exec(raw);
 		if (open) {
 			fence = { char: open[1][0], length: open[1].length };
-			out.push(CODE_BLOCK);
+			out.push(words.codeBlock);
 			continue;
 		}
 
@@ -38,26 +88,186 @@ export function speechText(markdown: string): string {
 		if (section) out.push("");
 	}
 
-	return out
-		.join("\n")
-		.replace(/[ \t]{2,}|\t/g, " ")
-		// The readings above add "el comando"; Spanish contracts "de el" and "a el" (but not "de él").
-		.replace(/(?<![\p{L}\p{N}])([dD]e|[aA]) el(?![\p{L}\p{N}])/gu, (_m, word: string) => (word.length === 1 ? `${word}l` : `${word[0]}el`))
-		// The reverse for a contraction already written before the token: "del el comando" → "del comando",
-		// "del la rama" → "de la rama", "al un commit" → "a un commit".
-		.replace(
-			/(?<![\p{L}\p{N}])([dD]e|[aA])l (el|la|un) (comando|carpeta|rama|commit)(?![\p{L}\p{N}])/gu,
-			(_m, word: string, article: string, noun: string) => (article === "el" ? `${word}l ${noun}` : `${word} ${article} ${noun}`),
-		)
+	const joined = out.join("\n").replace(/[ \t]{2,}|\t/g, " ");
+	return (language === "es" ? contracted(joined) : joined)
 		// A numbered heading or bold line ("## 1. Estado", "## 5.2. Título") starts with "1." too; "1:" keeps playback
 		// from cutting there.
-		.replace(/^(\d+(?: punto \d+)*)\. /gm, "$1: ")
+		.replace(new RegExp(`^(\\d+(?: ${words.point} \\d+)*)\\. `, "gm"), "$1: ")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
 }
 
-/** Said in place of a fenced block, so a sentence like "run this:" does not hang. */
-const CODE_BLOCK = "Bloque de código.";
+/** Spanish only: the readings add "el comando", "la rama", "un commit" next to "de" and "a". */
+function contracted(text: string): string {
+	return (
+		text
+			// Spanish contracts "de el" and "a el" (but not "de él").
+			.replace(/(?<![\p{L}\p{N}])([dD]e|[aA]) el(?![\p{L}\p{N}])/gu, (_m, word: string) => (word.length === 1 ? `${word}l` : `${word[0]}el`))
+			// The reverse for a contraction already written before the token: "del el comando" → "del comando",
+			// "del la rama" → "de la rama", "al un commit" → "a un commit".
+			.replace(
+				/(?<![\p{L}\p{N}])([dD]e|[aA])l (el|la|un) (comando|carpeta|rama|commit)(?![\p{L}\p{N}])/gu,
+				(_m, word: string, article: string, noun: string) => (article === "el" ? `${word}l ${noun}` : `${word} ${article} ${noun}`),
+			)
+	);
+}
+
+/** Every word the cleanup adds, per language (S7). */
+interface Phrasebook {
+	/** Said in place of a fenced block, so a sentence like "run this:" does not hang. */
+	codeBlock: string;
+	command: string;
+	folder: string;
+	branch: string;
+	aCommit: string;
+	/** "AGENTS punto md, en agent": the folder a path's last part is in. */
+	in: string;
+	line: string;
+	/** Between a file name and its extension. */
+	dot: string;
+	/** Between the digit groups of a dotted number (h1). */
+	point: string;
+	or: string;
+	approximately: string;
+	/** × between numbers. */
+	times: string;
+	units: Record<string, string>;
+	/** The same units after exactly 1. */
+	unit: Record<string, string>;
+	punctuation: Record<string, string>;
+	symbols: [RegExp, string][];
+	/** "2.750" is a Spanish thousand; in English it is a decimal. */
+	thousands: boolean;
+}
+
+const SPANISH: Phrasebook = {
+	codeBlock: "Bloque de código.",
+	command: "el comando",
+	folder: "la carpeta",
+	branch: "la rama",
+	aCommit: "un commit",
+	in: "en",
+	line: "línea",
+	dot: "punto",
+	point: "punto",
+	or: "o",
+	approximately: "aproximadamente",
+	times: "por",
+	units: {
+		s: "segundos",
+		ms: "milisegundos",
+		min: "minutos",
+		KB: "kilobytes",
+		MB: "megabytes",
+		GB: "gigabytes",
+		"%": "por ciento",
+		dB: "decibeles",
+		dBFS: "decibeles",
+	},
+	unit: {
+		s: "segundo",
+		ms: "milisegundo",
+		min: "minuto",
+		KB: "kilobyte",
+		MB: "megabyte",
+		GB: "gigabyte",
+		"%": "por ciento",
+		dB: "decibel",
+		dBFS: "decibel",
+	},
+	punctuation: {
+		".": "punto",
+		",": "coma",
+		";": "punto y coma",
+		":": "dos puntos",
+		"!": "signo de exclamación",
+		"?": "signo de pregunta",
+		"~": "virgulilla",
+		"/": "barra",
+		"-": "guion",
+		_: "guion bajo",
+		"*": "asterisco",
+		"#": "numeral",
+		"|": "barra vertical",
+	},
+	symbols: [
+		[/[→⇒➜]/, "a"],
+		[/←/, "desde"],
+		[/≈/, "aproximadamente"],
+		[/≠/, "distinto de"],
+		[/≥/, "mayor o igual a"],
+		[/≤/, "menor o igual a"],
+		[/±/, "más o menos"],
+		[/&+/, "y"],
+	],
+	thousands: true,
+};
+
+const ENGLISH: Phrasebook = {
+	codeBlock: "Code block.",
+	command: "the command",
+	folder: "the folder",
+	branch: "the branch",
+	aCommit: "a commit",
+	in: "in",
+	line: "line",
+	dot: "dot",
+	point: "point",
+	or: "or",
+	approximately: "approximately",
+	times: "times",
+	units: {
+		s: "seconds",
+		ms: "milliseconds",
+		min: "minutes",
+		KB: "kilobytes",
+		MB: "megabytes",
+		GB: "gigabytes",
+		"%": "percent",
+		dB: "decibels",
+		dBFS: "decibels",
+	},
+	unit: {
+		s: "second",
+		ms: "millisecond",
+		min: "minute",
+		KB: "kilobyte",
+		MB: "megabyte",
+		GB: "gigabyte",
+		"%": "percent",
+		dB: "decibel",
+		dBFS: "decibel",
+	},
+	punctuation: {
+		".": "period",
+		",": "comma",
+		";": "semicolon",
+		":": "colon",
+		"!": "exclamation mark",
+		"?": "question mark",
+		"~": "tilde",
+		"/": "slash",
+		"-": "hyphen",
+		_: "underscore",
+		"*": "asterisk",
+		"#": "hash",
+		"|": "pipe",
+	},
+	symbols: [
+		[/[→⇒➜]/, "to"],
+		[/←/, "from"],
+		[/≈/, "approximately"],
+		[/≠/, "not equal to"],
+		[/≥/, "greater than or equal to"],
+		[/≤/, "less than or equal to"],
+		[/±/, "plus or minus"],
+		[/&+/, "and"],
+	],
+	thousands: false,
+};
+
+const PHRASEBOOKS: Record<Language, Phrasebook> = { es: SPANISH, en: ENGLISH };
+words = SPANISH;
 const TABLE_SEPARATOR = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 const WORD = String.raw`\p{L}\p{N}_`;
 
@@ -91,7 +301,7 @@ function blockLine(raw: string): { text: string; section?: boolean } {
 
 /** Every reply here closes with the English heading "Needs your decision"; a Spanish voice would mangle it. */
 function spokenHeading(text: string): string {
-	return /^needs your decision:?$/i.test(text) ? "Decisiones pendientes" : text;
+	return words === SPANISH && /^needs your decision:?$/i.test(text) ? "Decisiones pendientes" : text;
 }
 
 function tableRow(raw: string): string {
@@ -130,25 +340,9 @@ function inline(text: string): string {
 
 /** `before` is the text ahead of the span, so a branch or hash in it can tell what word precedes it. */
 function codeSpan(code: string, before: string): string {
-	return PUNCTUATION_NAMES[code.trim()] ?? speakable(code.trim(), before);
+	// A code span holding one mark is spoken by name; a bare "." would also end a sentence in playback.
+	return Object.hasOwn(words.punctuation, code.trim()) ? words.punctuation[code.trim()] : speakable(code.trim(), before);
 }
-
-/** A code span holding one mark is spoken by name; a bare "." would also end a sentence in playback. */
-const PUNCTUATION_NAMES: Record<string, string> = {
-	".": "punto",
-	",": "coma",
-	";": "punto y coma",
-	":": "dos puntos",
-	"!": "signo de exclamación",
-	"?": "signo de pregunta",
-	"~": "virgulilla",
-	"/": "barra",
-	"-": "guion",
-	_: "guion bajo",
-	"*": "asterisco",
-	"#": "numeral",
-	"|": "barra vertical",
-};
 
 /** IDs, symbols, emoji and technical tokens a voice stumbles on, made speakable (prose and code spans alike). */
 function speakable(text: string, before = ""): string {
@@ -161,16 +355,16 @@ function speakable(text: string, before = ""): string {
 	);
 	out = out
 		// "aproximadamente" has no gender, unlike "unos" ("las unos 400 líneas").
-		.replace(/(?<![\p{L}\p{N}])~(?=\d)/gu, "aproximadamente ")
-		.replace(UNIT, (_m, number: string, unit: string) => `${number} ${(number === "1" ? UNIT_WORD : UNIT_WORDS)[unit]}`)
+		.replace(/(?<![\p{L}\p{N}])~(?=\d)/gu, `${words.approximately} `)
+		.replace(UNIT, (_m, number: string, unit: string) => `${number} ${(number === "1" ? words.unit : words.units)[unit]}`)
 		// After the units, so "2.1 s" is "2 punto 1 segundos" and not "2 punto 1 segundo".
 		.replace(DOTTED_NUMBER, dottedNumber);
 	out = out.replace(
 		/(?<![\p{L}\p{N}.])P(\d+)\.R(\d+)(?:\.Q(\d+))?(?![\p{L}\p{N}]|\.[\p{L}\p{N}])/gu,
 		(_m, p: string, r: string, q?: string) => `P ${p}, R ${r}${q ? `, Q ${q}` : ""}`,
 	);
-	out = out.replace(/(\d)[ \t]*×[ \t]*(?=\d)/g, "$1 por ");
-	for (const [symbol, word] of SYMBOL_WORDS) out = spokenAs(out, symbol, word);
+	out = out.replace(/(\d)[ \t]*×[ \t]*(?=\d)/g, `$1 ${words.times} `);
+	for (const [symbol, word] of words.symbols) out = spokenAs(out, symbol, word);
 	return spokenAs(out, EMOJI, "")
 		.replace(/\uE004(\d+)\uE005/g, (_m, index: string) => identifierSpaces(urls[Number(index)]))
 		.replace(/\uE009/g, ".");
@@ -186,50 +380,16 @@ const DOTTED_NUMBER =
 /** Spanish thousands: "2.750", "1.500.000". */
 const THOUSANDS = /^[1-9]\d{0,2}(?:\.\d{3})+$/;
 
-/** "1.1" reads as "1 punto 1"; thousands, IP addresses and hosts stay as they are. */
+/** "1.1" reads as "1 punto 1"; Spanish thousands, IP addresses and hosts stay as they are. */
 function dottedNumber(match: string): string {
-	if (match.startsWith("\uE006") || THOUSANDS.test(match)) return match;
+	if (match.startsWith("\uE006") || (words.thousands && THOUSANDS.test(match))) return match;
 	const groups = match.split(".");
 	if (groups.length === 4 && groups.every((group) => group.length <= 3 && Number(group) <= 255)) return match;
-	return groups.join(" punto ");
+	return groups.join(` ${words.point} `);
 }
 
 /** A unit right after a number that letters or a version dot do not precede: "2,5 s", "80%", "-16 dB". */
 const UNIT = /(?<![\p{L}\p{N}_.,])(\d+(?:[.,]\d+)*)[ \t]?(dBFS|dB|ms|min|s|KB|MB|GB|%)(?![\p{L}\p{N}])/gu;
-const UNIT_WORDS: Record<string, string> = {
-	s: "segundos",
-	ms: "milisegundos",
-	min: "minutos",
-	KB: "kilobytes",
-	MB: "megabytes",
-	GB: "gigabytes",
-	"%": "por ciento",
-	dB: "decibeles",
-	dBFS: "decibeles",
-};
-/** The same units after exactly 1. */
-const UNIT_WORD: Record<string, string> = {
-	s: "segundo",
-	ms: "milisegundo",
-	min: "minuto",
-	KB: "kilobyte",
-	MB: "megabyte",
-	GB: "gigabyte",
-	"%": "por ciento",
-	dB: "decibel",
-	dBFS: "decibel",
-};
-
-const SYMBOL_WORDS: [RegExp, string][] = [
-	[/[→⇒➜]/, "a"],
-	[/←/, "desde"],
-	[/≈/, "aproximadamente"],
-	[/≠/, "distinto de"],
-	[/≥/, "mayor o igual a"],
-	[/≤/, "menor o igual a"],
-	[/±/, "más o menos"],
-	[/&+/, "y"],
-];
 const EMOJI = /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[\u{1F3FB}-\u{1F3FF}\uFE0F\u200D\u20E3])+/u;
 
 /** Replaces `symbol` with `word`, spaced from neighbouring words but not from punctuation. */
@@ -263,8 +423,8 @@ function classified(core: string, previous: string): string | undefined {
 	if (previous === "rama" || previous === "branch") return nameWords(core);
 	const line = /^(.+):(\d+)$/.exec(core);
 	const file = line && (pathReading(line[1], previous) ?? fileName(line[1]));
-	if (line && file) return `${file}, línea ${line[2]}`;
-	if (BRANCH.test(core) && !/\.\p{L}+$/u.test(core)) return `la rama ${nameWords(core)}`;
+	if (line && file) return `${file}, ${words.line} ${line[2]}`;
+	if (BRANCH.test(core) && !/\.\p{L}+$/u.test(core)) return `${words.branch} ${nameWords(core)}`;
 	return (
 		alternatives(core) ??
 		pathReading(core, previous) ??
@@ -289,7 +449,7 @@ function nameWords(core: string): string {
 function alternatives(core: string): string | undefined {
 	const pair = /^(\p{L}+)\/(\p{L}+)$/u.exec(core);
 	if (!pair) return undefined;
-	return pair[1].length <= 3 && pair[2].length <= 3 ? core : `${pair[1]} o ${pair[2]}`;
+	return pair[1].length <= 3 && pair[2].length <= 3 ? core : `${pair[1]} ${words.or} ${pair[2]}`;
 }
 
 /**
@@ -307,9 +467,9 @@ function pathReading(core: string, previous: string): string | undefined {
 	const name = partName(parts.at(-1) ?? "");
 	if (name === "") return undefined;
 	const said = previous === "carpeta" || previous === "folder";
-	const reading = (!isFolder && fileReading(parts.at(-1) ?? "")) || (said ? name : `la carpeta ${name}`);
+	const reading = (!isFolder && fileReading(parts.at(-1) ?? "")) || (said ? name : `${words.folder} ${name}`);
 	const folder = parts.length > 1 ? partName(parts[parts.length - 2]) : "";
-	return folder === "" ? reading : `${reading}, en ${folder}`;
+	return folder === "" ? reading : `${reading}, ${words.in} ${folder}`;
 }
 
 /** A leading `.` is dropped and `-`/`_` become spaces: `.gentle-shell` reads as "gentle shell". */
@@ -321,8 +481,8 @@ function partName(part: string): string {
 function fileReading(part: string): string | undefined {
 	const file = /^(.*\p{L}.*)\.(\p{L}+)$/u.exec(part);
 	if (!file) return undefined;
-	const name = partName(file[1]).replace(/(?<=[\p{L}\p{N}])\.(?=[\p{L}\p{N}])/gu, " punto ");
-	return name === "" ? undefined : `${name} punto ${file[2]}`;
+	const name = partName(file[1]).replace(/(?<=[\p{L}\p{N}])\.(?=[\p{L}\p{N}])/gu, ` ${words.dot} `);
+	return name === "" ? undefined : `${name} ${words.dot} ${file[2]}`;
 }
 
 /** Top-level folders of a Unix system: `/tmp` is a place, not a command. */
@@ -332,8 +492,8 @@ const SYSTEM_FOLDERS = new Set(["bin", "boot", "dev", "etc", "home", "lib", "med
 function command(core: string, previous: string): string | undefined {
 	const name = /^\/(\p{L}[\p{L}\p{N}_:-]*)$/u.exec(core)?.[1]?.replace(/[-_:]+/g, " ");
 	if (!name) return undefined;
-	if (SYSTEM_FOLDERS.has(name)) return previous === "carpeta" || previous === "folder" ? name : `la carpeta ${name}`;
-	return previous === "comando" || previous === "command" ? name : `el comando ${name}`;
+	if (SYSTEM_FOLDERS.has(name)) return previous === "carpeta" || previous === "folder" ? name : `${words.folder} ${name}`;
+	return previous === "comando" || previous === "command" ? name : `${words.command} ${name}`;
 }
 
 /** A bare `README.md`; versions, numbers, hosts, `a..b` ranges and abbreviations such as `e.g` are not file names. */
@@ -346,7 +506,7 @@ function fileName(core: string): string | undefined {
 /** A hash is dropped right after "commit" and spoken as "un commit" elsewhere. */
 function commitHash(core: string, previous: string): string | undefined {
 	if (!/^(?=.*\d)(?=.*[a-f])[0-9a-f]{7,40}$/.test(core)) return undefined;
-	return previous === "commit" || previous === "commits" ? "" : "un commit";
+	return previous === "commit" || previous === "commits" ? "" : words.aCommit;
 }
 
 /** Other paths, such as `@scope/pkg`, `lab-*` globs or `/a/<id>/b`, keep (d)'s reading: their parts as words. */

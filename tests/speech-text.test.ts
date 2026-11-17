@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { speechText } from "../src/speech-text.ts";
+import { detectLanguage, speechReading, speechText } from "../src/speech-text.ts";
 
 describe("speechText", () => {
 	it("leaves plain prose untouched", () => {
@@ -314,5 +314,126 @@ describe("speechText", () => {
 		const input = "# A\n\n\n\nB\n\n";
 		expect(speechText(input)).toBe("A.\n\nB");
 		expect(speechText(input)).toBe(speechText(input));
+	});
+});
+
+describe("S7: language of the added words", () => {
+	it("classifies a Spanish reply, an English README and a tie as Spanish unless English words win", () => {
+		expect(detectLanguage("## Qué cambió\n\nEl comando `/read` lee la última respuesta y se detiene con Esc.")).toBe("es");
+		expect(
+			detectLanguage(
+				"# pi-reply-reader\n\nRead a Pi reply aloud, only when you ask. The output can be this machine's speakers.\n\n```sh\nla de el que y en los\n```",
+			),
+		).toBe("en");
+		// One function word of each language ("the", "la"): Spanish wins ties.
+		expect(detectLanguage("the casa la house")).toBe("es");
+		// Code, URLs and paths do not count: only "el" and "the" are left, a tie.
+		expect(detectLanguage("El `the and of to is` the https://x.dev/the/and/of ~/the/and/of.md")).toBe("es");
+		expect(detectLanguage("")).toBe("es");
+		// The closing "Needs your decision" heading of every reply here does not count either.
+		expect(detectLanguage("## Needs your decision\n1. ¿Seguimos?")).toBe("es");
+		expect(detectLanguage("**Needs your decision:**\nOk.")).toBe("es");
+	});
+
+	it("returns the cleaned text with its language; speechText still returns the text", () => {
+		const markdown = "Run `/reload` and then read the reply again.";
+		expect(speechReading(markdown)).toEqual({ text: "Run the command reload and then read the reply again.", language: "en" });
+		expect(speechText(markdown)).toBe(speechReading(markdown).text);
+		expect(speechReading("Corré `/reload` y leé la respuesta.")).toEqual({ text: "Corré el comando reload y leé la respuesta.", language: "es" });
+	});
+
+	it("announces a fenced code block in English", () => {
+		expect(speechText("Run this in the terminal:\n\n```bash\npnpm test\n```\n\nThat is all.")).toBe(
+			"Run this in the terminal:\n\nCode block.\n\nThat is all.",
+		);
+	});
+
+	it("reads a command in English", () => {
+		expect(speechText("Run `/reload` in the terminal, then use the command `/usage`.")).toBe(
+			"Run the command reload in the terminal, then use the command usage.",
+		);
+	});
+
+	it("reads folders and system folders in English", () => {
+		expect(speechText("The WAV files are in `/tmp/reply-reader-bakeoff/wav/hs/`, not in `/tmp`.")).toBe(
+			"The WAV files are in the folder hs, in wav, not in the folder tmp.",
+		);
+		expect(speechText("Remove the folder `~/.cache/ms-playwright` and `~/.gentle-shell` from the disk.")).toBe(
+			"Remove the folder ms playwright, in cache and the folder gentle shell from the disk.",
+		);
+	});
+
+	it("reads files and paths in English", () => {
+		expect(speechText("Edit `~/.gentle-shell/agent/AGENTS.md` and the `README.md` for this.")).toBe(
+			"Edit AGENTS dot md, in agent and the README dot md for this.",
+		);
+	});
+
+	it("reads branches in English", () => {
+		expect(speechText("Merge `origin/main` into the branch `feat/pending-central`.")).toBe(
+			"Merge the branch origin main into the branch feat pending central.",
+		);
+	});
+
+	it("reads commit hashes in English", () => {
+		expect(speechText("It is in the commit `0e8bb95`, and I reverted `12a88a0` with that.")).toBe(
+			"It is in the commit, and I reverted a commit with that.",
+		);
+	});
+
+	it("reads a path with a line in English", () => {
+		expect(speechText("See `src/speech-text.ts:42` for the rule.")).toBe("See speech text dot ts, in src, line 42 for the rule.");
+	});
+
+	it("reads approximations in English", () => {
+		expect(speechText("It takes ~400 lines and the ~ is kept in `a~1` for the path.")).toBe(
+			"It takes approximately 400 lines and the ~ is kept in a~1 for the path.",
+		);
+	});
+
+	it("reads units in English, singular after 1", () => {
+		expect(speechText("It takes 2,5 s, 250 ms, 3 min, 12 KB, 4 MB, 2 GB, 80%, -16 dB and -3 dBFS for the run.")).toBe(
+			"It takes 2,5 seconds, 250 milliseconds, 3 minutes, 12 kilobytes, 4 megabytes, 2 gigabytes, 80 percent, -16 decibels and -3 decibels for the run.",
+		);
+		expect(speechText("It is 1 s, 1 ms, 1 min, 1 KB, 1 MB, 1 GB, 1% and 1 dB for the run.")).toBe(
+			"It is 1 second, 1 millisecond, 1 minute, 1 kilobyte, 1 megabyte, 1 gigabyte, 1 percent and 1 decibel for the run.",
+		);
+	});
+
+	it("reads punctuation marks by name in English", () => {
+		expect(speechText("The marks are `.` `,` `;` `:` `!` `?` `~` `/` `-` `_` `*` `#` `|` in the text.")).toBe(
+			"The marks are period comma semicolon colon exclamation mark question mark tilde slash hyphen underscore asterisk hash pipe in the text.",
+		);
+	});
+
+	it("reads symbols in English", () => {
+		expect(speechText("The flow is a → b ← c, and x ≈ y, x ≠ y, n ≥ 2, n ≤ 5, ± 3, 3 × 4, R&D with the rest.")).toBe(
+			"The flow is a to b from c, and x approximately y, x not equal to y, n greater than or equal to 2, n less than or equal to 5, plus or minus 3, 3 times 4, R and D with the rest.",
+		);
+	});
+
+	it("reads alternatives in English", () => {
+		expect(speechText("Pick the `light/dark` theme, and/or the km/h unit.")).toBe("Pick the light or dark theme, and/or the km/h unit.");
+	});
+
+	it("reads dotted numbers with 'point' in English, numbered headings with ':'", () => {
+		expect(speechText("The version is 1.1 and the next is 0.8.0, with the 2.750 rate.")).toBe(
+			"The version is 1 point 1 and the next is 0 point 8 point 0, with the 2 point 750 rate.",
+		);
+		expect(speechText("## 5.2. The title\nThis is the text.")).toBe("5 point 2: The title.\n\nThis is the text.");
+	});
+
+	it("keeps reply IDs as in Spanish", () => {
+		expect(speechText("This is in P11.R1.Q1 and the `P2.R10` reply.")).toBe("This is in P 11, R 1, Q 1 and the P 2, R 10 reply.");
+	});
+
+	it("does not apply Spanish-only rules to English text", () => {
+		expect(speechText("Then go back to `/read` from the menu, and to `/tmp/a/b/` for the files.")).toBe(
+			"Then go back to the command read from the menu, and to the folder b, in a for the files.",
+		);
+		expect(speechText("## Needs your decision\n1. Do you want the change?")).toBe("Needs your decision.\n\n1: Do you want the change?");
+		expect(speechText("I said a el and de el in the text of the page for the user.")).toBe(
+			"I said a el and de el in the text of the page for the user.",
+		);
 	});
 });
