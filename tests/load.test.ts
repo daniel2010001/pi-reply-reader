@@ -194,6 +194,15 @@ describe("reply-reader extension", () => {
 			expect(texts()).toEqual(["Decisiones pendientes.", "1: ¿Seguimos?", "2: ¿Publicamos?"]);
 		});
 
+		it("questions mode keeps the whole reply's language for added words (S7)", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto", "questions");
+			reader.turn([user("a"), assistant("The build is done and the tests pass for the new parser.\n\n## Needs your decision\n\n1. Run `/reload`?")]);
+			await reader.settled();
+			expect(texts()).toEqual(["Needs your decision.", "1: Run the command reload?"]);
+		});
+
 		it("bare /read-auto toggles: off to on in full, and any on to off", async () => {
 			installVoice();
 			const reader = load();
@@ -346,6 +355,16 @@ describe("reply-reader extension", () => {
 	});
 
 	describe("/read <target>#<section> (S9)", () => {
+		it("a section of an English file keeps the file's language for added words (S7)", async () => {
+			installVoice();
+			mkdirSync(join(root, "work"));
+			writeFileSync(join(root, "work", "tool.md"), "# Tool\n\nThis is the tool and it reads the files that you give it.\n\n## Develop\n\n```sh\npnpm test\n```\n");
+			const reader = load();
+			await reader.run("read", "tool.md#develop");
+			await reader.settled();
+			expect(texts()).toEqual(["Develop.", "Code block."]);
+		});
+
 		const texts = () => synthesized.map((request) => request.text);
 		const guide = "Intro.\n\n## 1. Instalación\n\nPaso uno.\n\n## Uso del lector\n\nPaso dos.";
 		const withGuide = [user("hola"), assistant(guide), user("otra"), assistant("## Segunda\n\nFin.\n\n## Otra cosa\n\nMás.")];

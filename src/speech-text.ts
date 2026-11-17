@@ -3,15 +3,17 @@
  * ("asterisco asterisco", "or col 1 or", "comilla simple") is removed and the words are kept.
  * Deterministic and model-free, so the same reply always sounds the same.
  */
-export function speechText(markdown: string): string {
-	return speechReading(markdown).text;
+export function speechText(markdown: string, language?: Language): string {
+	return speechReading(markdown, language).text;
 }
 
 export type Language = "es" | "en";
 
-/** The cleaned text plus the language its added words are in (S7). */
-export function speechReading(markdown: string): { text: string; language: Language } {
-	const language = detectLanguage(markdown);
+/**
+ * The cleaned text plus the language its added words are in (S7). Pass `language` when `markdown` is part
+ * of a larger text (a section, the closing questions), so the part follows the language of the whole.
+ */
+export function speechReading(markdown: string, language: Language = detectLanguage(markdown)): { text: string; language: Language } {
 	const previous = words;
 	words = PHRASEBOOKS[language];
 	try {

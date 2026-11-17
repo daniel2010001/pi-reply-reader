@@ -10,7 +10,7 @@ import { type Claim, openReadingLock } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { sectionFrom } from "../src/sections.ts";
 import { formatSpeed, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSpeed } from "../src/settings.ts";
-import { speechText } from "../src/speech-text.ts";
+import { detectLanguage, type Language, speechText } from "../src/speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
 
 const STATUS = "reply-reader";
@@ -128,8 +128,8 @@ export function createReplyReader(
 		 * session, the footer, Esc, /read-stop and one reading per machine. Used by /read and by auto-read.
 		 * `name` is what the footer names, `label` what the "nothing to read" message names.
 		 */
-		const readAloud = async (ctx: ExtensionContext, name: string, label: string, markdown: string): Promise<void> => {
-			const text = speechText(markdown);
+		const readAloud = async (ctx: ExtensionContext, name: string, label: string, markdown: string, language?: Language): Promise<void> => {
+			const text = speechText(markdown, language);
 			if (!text) {
 				ctx.ui.notify(`${label} has nothing to read.`, "info");
 				return;
@@ -242,7 +242,10 @@ export function createReplyReader(
 					label = reply.id;
 					markdown = reply.text;
 				}
+				let language: Language | undefined;
 				if (section) {
+					// The section reads in the language of the whole file or reply (S7), not its own few words.
+					language = detectLanguage(markdown);
 					const from = sectionFrom(markdown, section, { rest });
 					if (from === undefined) {
 						ctx.ui.notify(`No section "${section}" in ${label}.`, "warning");
@@ -250,7 +253,7 @@ export function createReplyReader(
 					}
 					markdown = from;
 				}
-				await readAloud(ctx, name, label, markdown);
+				await readAloud(ctx, name, label, markdown, language);
 			},
 		});
 
@@ -378,7 +381,7 @@ export function createReplyReader(
 			const markdown = auto === "questions" ? questionsSection(reply.text) : reply.text;
 			if (markdown === undefined) return;
 			// Not awaited: a download confirm or the output question must not hold Pi's settlement.
-			readAloud(ctx, reply.id, reply.id, markdown).catch((error: Error) => ctx.ui.notify(error.message, "error"));
+			readAloud(ctx, reply.id, reply.id, markdown, detectLanguage(reply.text)).catch((error: Error) => ctx.ui.notify(error.message, "error"));
 		});
 
 		pi.on("session_start", (_event, ctx) => {
