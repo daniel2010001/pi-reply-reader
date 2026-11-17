@@ -329,7 +329,8 @@ function inline(text: string): string {
 	const parked = text
 		.replace(
 			/(`+)(.+?)(?<!`)\1(?!`)/g,
-			(_m, _ticks, code: string, offset: number) => `\uE002${spans.push(codeSpan(code, text.slice(0, offset))) - 1}\uE003`,
+			(m: string, _ticks, code: string, offset: number) =>
+				`\uE002${spans.push(codeSpan(code, text.slice(0, offset), text.slice(offset + m.length))) - 1}\uE003`,
 		)
 		.replace(/\\([\\`*_{}[\]()#+\-.!|~<>])/g, (_m, ch: string) => `\uE000${ch.codePointAt(0)}\uE001`);
 	return prose(parked)
@@ -338,19 +339,22 @@ function inline(text: string): string {
 		.replace(/[ \t]*\uE008|[\uE006\uE007]/g, "");
 }
 
-/** `before` is the text ahead of the span, so a branch or hash in it can tell what word precedes it. */
-function codeSpan(code: string, before: string): string {
+/**
+ * `before` and `after` are the text around the span, so a branch or hash in it can tell what word precedes it,
+ * and in English what noun follows it ("the `/read` command").
+ */
+function codeSpan(code: string, before: string, after: string): string {
 	// A code span holding one mark is spoken by name; a bare "." would also end a sentence in playback.
-	return Object.hasOwn(words.punctuation, code.trim()) ? words.punctuation[code.trim()] : speakable(code.trim(), before);
+	return Object.hasOwn(words.punctuation, code.trim()) ? words.punctuation[code.trim()] : speakable(code.trim(), before, after);
 }
 
 /** IDs, symbols, emoji and technical tokens a voice stumbles on, made speakable (prose and code spans alike). */
-function speakable(text: string, before = ""): string {
+function speakable(text: string, before = "", after = ""): string {
 	const urls: string[] = [];
 	let out = text.replace(/\S*:\/\/\S*/g, (url) => `\uE004${urls.push(url) - 1}\uE005`);
 	out = identifierSpaces(
 		out.replace(/\S+/g, (token: string, offset: number, whole: string) =>
-			tokenReading(token, previousWord(before + whole.slice(0, offset))),
+			tokenReading(token, previousWord(before + whole.slice(0, offset)), nextWord(whole.slice(offset + token.length) + after)),
 		),
 	);
 	out = out
@@ -409,26 +413,33 @@ function spokenAs(text: string, symbol: RegExp, word: string): string {
  * Leading and trailing punctuation stays outside, so "`README.md`." reads "README punto md.".
  * A dropped token leaves a \uE008 marker that takes the space before it along when removed.
  */
-function tokenReading(token: string, previous: string): string {
+function tokenReading(token: string, previous: string, next: string): string {
 	const [, lead, core, trail] = /^([("'“«[]*)(.*?)([)"'”»\].,;:!?]*)$/u.exec(token) ?? [];
 	if (!core || /[\uE000-\uE008]/u.test(token) || !/[\p{L}\p{N}]/u.test(core)) return token;
-	const reading = classified(core, previous.toLowerCase());
+	// English puts the noun after the token ("the `/read` command"); punctuation in between ends the phrase.
+	const noun = words === ENGLISH && trail === "" ? next.toLowerCase() : "";
+	const reading = classified(core, previous.toLowerCase(), noun);
 	if (reading === undefined) return token;
 	if (reading === "") return `\uE008${trail}`;
 	// A dot between digits in a reading ("a punto ts, en 1.2") is the token's own; (h1) leaves it.
 	return `${lead}${reading.replace(/(?<=\d)\.(?=\d)/g, "\uE009")}${trail}`;
 }
 
-function classified(core: string, previous: string): string | undefined {
+/** `noun` is the English noun right after the token, which the reading then leaves out ("the read command"). */
+function classified(core: string, previous: string, noun: string): string | undefined {
 	if (previous === "rama" || previous === "branch") return nameWords(core);
 	const line = /^(.+):(\d+)$/.exec(core);
 	const file = line && (pathReading(line[1], previous) ?? fileName(line[1]));
 	if (line && file) return `${file}, ${words.line} ${line[2]}`;
-	if (BRANCH.test(core) && !/\.\p{L}+$/u.test(core)) return `${words.branch} ${nameWords(core)}`;
+	if (BRANCH.test(core) && !/\.\p{L}+$/u.test(core)) return noun === "branch" ? nameWords(core) : `${words.branch} ${nameWords(core)}`;
+	if (noun === "folder") {
+		const folder = folderName(core);
+		if (folder !== undefined) return folder;
+	}
 	return (
 		alternatives(core) ??
 		pathReading(core, previous) ??
-		command(core, previous) ??
+		command(core, previous, noun) ??
 		fileName(core) ??
 		commitHash(core, previous) ??
 		slashWords(core)
@@ -489,11 +500,20 @@ function fileReading(part: string): string | undefined {
 const SYSTEM_FOLDERS = new Set(["bin", "boot", "dev", "etc", "home", "lib", "media", "mnt", "opt", "proc", "root", "run", "srv", "sys", "tmp", "usr", "var"]);
 
 /** `/reload` reads as "el comando reload", or just "reload" right after "comando"; `/tmp` reads as "la carpeta tmp". */
-function command(core: string, previous: string): string | undefined {
+function command(core: string, previous: string, noun: string): string | undefined {
 	const name = /^\/(\p{L}[\p{L}\p{N}_:-]*)$/u.exec(core)?.[1]?.replace(/[-_:]+/g, " ");
 	if (!name) return undefined;
 	if (SYSTEM_FOLDERS.has(name)) return previous === "carpeta" || previous === "folder" ? name : `${words.folder} ${name}`;
-	return previous === "comando" || previous === "command" ? name : `${words.command} ${name}`;
+	return previous === "comando" || previous === "command" || noun === "command" ? name : `${words.command} ${name}`;
+}
+
+/** "the `/tmp/a/b/` folder" and "the `src/` folder" read as "the b folder" and "the src folder"; files are not folders. */
+function folderName(core: string): string | undefined {
+	if (!PATH.test(core) || !core.includes("/")) return undefined;
+	const last = core.split("/").filter((part) => part !== "").at(-1) ?? "";
+	if (!core.endsWith("/") && fileReading(last)) return undefined;
+	const name = partName(last);
+	return /\p{L}/u.test(name) ? name : undefined;
 }
 
 /** A bare `README.md`; versions, numbers, hosts, `a..b` ranges and abbreviations such as `e.g` are not file names. */
@@ -519,6 +539,11 @@ function slashWords(core: string): string | undefined {
 /** The word right before a token, across spaces, opening quotes and emphasis markers. */
 function previousWord(text: string): string {
 	return /(?<![\p{L}\p{N}])(\p{L}+)[ \t*_`"'“«(]*$/u.exec(text)?.[1] ?? "";
+}
+
+/** The word right after a token, across closing emphasis or quotes and spaces, but not across punctuation. */
+function nextWord(text: string): string {
+	return /^[*_`"'”»]*[ \t]+[*_`"'“«]*(\p{L}+)(?![\p{L}\p{N}])/u.exec(text)?.[1] ?? "";
 }
 
 /** `auto_read` reads as "auto read", not "auto guion bajo read". */

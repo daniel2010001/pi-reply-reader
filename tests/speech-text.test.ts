@@ -423,6 +423,44 @@ describe("S7: language of the added words", () => {
 		expect(speechText("## 5.2. The title\nThis is the text.")).toBe("5 point 2: The title.\n\nThis is the text.");
 	});
 
+	it("reads Spanish thousands as a decimal in English", () => {
+		expect(speechText("The rate is 2.750 and the total is 1.500.000 for the run.")).toBe(
+			"The rate is 2 point 750 and the total is 1 point 500 point 000 for the run.",
+		);
+	});
+
+	it("does not double a command's noun when it follows the token in English", () => {
+		expect(speechText("Use the `/read` command, then the **`/reload`** command and /usage command in the terminal.")).toBe(
+			"Use the read command, then the reload command and usage command in the terminal.",
+		);
+		// Only the noun right after the token counts, not one after a comma.
+		expect(speechText("Run `/read`, and the command for the rest.")).toBe("Run the command read, and the command for the rest.");
+	});
+
+	it("does not double a branch's noun when it follows the token in English", () => {
+		expect(speechText("Merge the `feat/x` branch and the origin/main branch into the release.")).toBe(
+			"Merge the feat x branch and the origin main branch into the release.",
+		);
+	});
+
+	it("does not double a folder's noun when it follows the token in English", () => {
+		expect(speechText("Open the `src/` folder, the `/tmp` folder and the `/tmp/a/b/` folder for the files.")).toBe(
+			"Open the src folder, the tmp folder and the b folder for the files.",
+		);
+	});
+
+	it("keeps the commit drop rule in English", () => {
+		expect(speechText("It is the commit `abc1234`, and the `abc1234` commit is the same.")).toBe(
+			"It is the commit, and the a commit commit is the same.",
+		);
+	});
+
+	it("keeps the Spanish noun-before readings, with no doubling", () => {
+		expect(speechText("Usá el comando `/read`, la rama `feat/x` y la carpeta `/tmp/a/b/` con el commit `abc1234`.")).toBe(
+			"Usá el comando read, la rama feat x y la carpeta b, en a con el commit.",
+		);
+	});
+
 	it("keeps reply IDs as in Spanish", () => {
 		expect(speechText("This is in P11.R1.Q1 and the `P2.R10` reply.")).toBe("This is in P 11, R 1, Q 1 and the P 2, R 10 reply.");
 	});
