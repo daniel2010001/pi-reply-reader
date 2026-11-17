@@ -14,13 +14,60 @@ export type Language = "es" | "en";
  * of a larger text (a section, the closing questions), so the part follows the language of the whole.
  */
 export function speechReading(markdown: string, language: Language = detectLanguage(markdown)): { text: string; language: Language } {
-	const previous = words;
-	words = PHRASEBOOKS[language];
-	try {
-		return { text: cleaned(markdown, language), language };
-	} finally {
-		words = previous;
-	}
+	const { text } = speechNarration(markdown, language);
+	return { text, language };
+}
+
+/** (S12) What a block of the reply is, which a listener hears as its shape. */
+export type Role = "heading" | "paragraph" | "item" | "row" | "codeBlock";
+
+/** (S12) What follows a fragment: a sentence on the same line, a line, or a blank line (also after a heading). */
+export type Boundary = "sentence" | "line" | "paragraph";
+
+/**
+ * (S12) One block of the Markdown, in order, with its 1-based source line and still in Markdown: the plan adds no
+ * word of any language. A `break` is a blank line, a thematic break or a reference definition.
+ */
+export type PlanBlock =
+	| { role: "heading"; source: string; line: number }
+	| { role: "paragraph"; source: string; line: number }
+	| { role: "item"; number?: string; source: string; line: number }
+	| { role: "row"; cells: string[]; line: number }
+	| { role: "codeBlock"; line: number }
+	| { role: "break"; line: number };
+
+export interface NarrationPlan {
+	blocks: PlanBlock[];
+}
+
+/** (S12) One piece of speech, synthesized at once, with the boundary (and so the pause) after it. */
+export interface Fragment {
+	text: string;
+	role: Role;
+	after: Boundary;
+}
+
+/** (S12) A token no reading class claimed, though it holds characters a voice reads oddly. */
+/**
+ * (S12) A technical token no reading class claimed, read as written. Listed by source line; within a line,
+ * tokens in code spans come before those in prose. Never changes what is spoken.
+ */
+export interface Diagnostic {
+	line: number;
+	token: string;
+}
+
+export interface Narration {
+	/** The same text `speechText` returns. */
+	text: string;
+	language: Language;
+	fragments: Fragment[];
+	diagnostics: Diagnostic[];
+}
+
+/** (S12) `speechReading`, plus the fragments playback speaks and the tokens the cleanup could not classify. */
+export function speechNarration(markdown: string, language: Language = detectLanguage(markdown)): Narration {
+	return renderNarration(narrationPlan(markdown), language);
 }
 
 /**
@@ -52,11 +99,14 @@ const SPANISH_WORDS = new Set(
 	"el la los las de del al que y en un una unos unas es son era fue ser está están estar por para con sin se lo le les su sus este esta esto estos estas ese esa eso como más pero si sí ya hay cuando también porque sobre muy entre hasta desde todo todos cada qué cómo donde dónde o ni".split(" "),
 );
 
-/** The phrasebook of the text being cleaned; `speechReading` sets it around one synchronous run. */
+/** The phrasebook of the text being cleaned; `renderNarration` sets it around one synchronous run. */
 let words: Phrasebook;
+/** Where `renderNarration` collects diagnostics during its run, and the source line of the block being rendered. */
+let diagnosis: { diagnostics: Diagnostic[]; line: number } | undefined;
 
-function cleaned(markdown: string, language: Language): string {
-	const out: string[] = [];
+/** (S12) The blocks of `markdown`, language-free: fences, table rows and one block per other line. */
+export function narrationPlan(markdown: string): NarrationPlan {
+	const blocks: PlanBlock[] = [];
 	const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
 	let fence: { char: string; length: number } | undefined;
 
@@ -71,35 +121,98 @@ function cleaned(markdown: string, language: Language): string {
 		const open = /^\s{0,3}(`{3,}|~{3,})/.exec(raw);
 		if (open) {
 			fence = { char: open[1][0], length: open[1].length };
-			out.push(words.codeBlock);
+			blocks.push({ role: "codeBlock", line: i + 1 });
 			continue;
 		}
 
 		if (raw.includes("|") && TABLE_SEPARATOR.test(lines[i + 1] ?? "")) {
-			out.push(tableRow(raw));
+			blocks.push({ role: "row", cells: tableCells(raw), line: i + 1 });
 			i++;
 			while (i + 1 < lines.length && lines[i + 1].includes("|") && lines[i + 1].trim() !== "") {
-				out.push(tableRow(lines[++i]));
+				i++;
+				blocks.push({ role: "row", cells: tableCells(lines[i]), line: i + 1 });
 			}
 			continue;
 		}
 
-		const { text, section } = blockLine(raw);
-		out.push(text);
-		// A heading or bold-only line ends its section, so playback pauses as at a blank line; trim drops a last one.
-		if (section) out.push("");
+		blocks.push(lineBlock(raw, i + 1));
 	}
-
-	const joined = out.join("\n").replace(/[ \t]{2,}|\t/g, " ");
-	return (language === "es" ? contracted(joined) : joined)
-		// A numbered heading or bold line ("## 1. Estado", "## 5.2. Título") starts with "1." too; "1:" keeps playback
-		// from cutting there.
-		.replace(new RegExp(`^(\\d+(?: ${words.point} \\d+)*)\\. `, "gm"), "$1: ")
-		.replace(/\n{3,}/g, "\n\n")
-		.trim();
+	return { blocks };
 }
 
-/** Spanish only: the readings add "el comando", "la rama", "un commit" next to "de" and "a". */
+/**
+ * (S12) The words of `plan` in `language`: one line per block (and a blank one after a heading, so playback pauses
+ * as at a blank line), split into fragments, with the tokens no reading class claimed.
+ */
+export function renderNarration(plan: NarrationPlan, language: Language): Narration {
+	const previous = { words, diagnosis };
+	words = PHRASEBOOKS[language];
+	diagnosis = { diagnostics: [], line: 0 };
+	try {
+		const lines: SpokenLine[] = [];
+		for (const block of plan.blocks) {
+			diagnosis.line = block.line;
+			const role = block.role === "break" ? "paragraph" : block.role;
+			lines.push({ text: finished(blockText(block)), role });
+			// A heading or bold-only line ends its section, so playback pauses as at a blank line; trim drops a last one.
+			if (block.role === "heading") lines.push({ text: "", role });
+		}
+		const text = lines
+			.map((line) => line.text)
+			.join("\n")
+			.replace(/\n{3,}/g, "\n\n")
+			.trim();
+		return { text, language, fragments: fragmentsOf(lines), diagnostics: diagnosis.diagnostics };
+	} finally {
+		({ words, diagnosis } = previous);
+	}
+}
+
+/** (S12) Text already meant for speech, split as playback speaks it: every fragment a paragraph's. */
+export function spokenFragments(text: string): Fragment[] {
+	return fragmentsOf(text.split("\n").map((line) => ({ text: line, role: "paragraph" })));
+}
+
+interface SpokenLine {
+	text: string;
+	role: Role;
+}
+
+/**
+ * Sentences and lines, in order, each with the boundary after it; Supertonic only calls back once per
+ * 300 characters, so we split first. Never at ":" or ";", where a pause would sound like a full stop.
+ * A line with no sentence (blank, or emoji only) ends a paragraph.
+ */
+function fragmentsOf(lines: readonly SpokenLine[]): Fragment[] {
+	const result: Fragment[] = [];
+	let blank = false;
+	for (const { text, role } of lines) {
+		const sentences = text
+			.split(/(?<=[.!?…])\s+/)
+			.map((sentence) => sentence.trim())
+			.filter((sentence) => sentence !== "");
+		if (sentences.length === 0) {
+			blank = true;
+			continue;
+		}
+		const previous = result.at(-1);
+		if (previous) previous.after = blank ? "paragraph" : "line";
+		blank = false;
+		for (const sentence of sentences) result.push({ text: sentence, role, after: "sentence" });
+	}
+	return result;
+}
+
+/** The passes that once ran over the whole text; none of them crosses a line break, so they run per line. */
+function finished(line: string): string {
+	const spaced = line.replace(/[ \t]{2,}|\t/g, " ");
+	return (words.contracts ? contracted(spaced) : spaced)
+		// A numbered heading or bold line ("## 1. Estado", "## 5.2. Título") starts with "1." too; "1:" keeps playback
+		// from cutting there.
+		.replace(new RegExp(`^(\\d+(?: ${words.point} \\d+)*)\\. `), "$1: ");
+}
+
+/** Spanish: the readings add "el comando", "la rama", "un commit" next to "de" and "a". */
 function contracted(text: string): string {
 	return (
 		text
@@ -118,6 +231,10 @@ function contracted(text: string): string {
 interface Phrasebook {
 	/** Said in place of a fenced block, so a sentence like "run this:" does not hang. */
 	codeBlock: string;
+	/** Said for the English closing heading "Needs your decision", which this language's voice would mangle. */
+	needsYourDecision?: string;
+	/** "de el" and "a el" contract, as in Spanish. */
+	contracts: boolean;
 	command: string;
 	folder: string;
 	branch: string;
@@ -144,6 +261,8 @@ interface Phrasebook {
 
 const SPANISH: Phrasebook = {
 	codeBlock: "Bloque de código.",
+	needsYourDecision: "Decisiones pendientes",
+	contracts: true,
 	command: "el comando",
 	folder: "la carpeta",
 	branch: "la rama",
@@ -207,6 +326,7 @@ const SPANISH: Phrasebook = {
 
 const ENGLISH: Phrasebook = {
 	codeBlock: "Code block.",
+	contracts: false,
 	command: "the command",
 	folder: "the folder",
 	branch: "the branch",
@@ -276,45 +396,63 @@ const WORD = String.raw`\p{L}\p{N}_`;
 /** A line wrapped whole in one emphasis (`**Qué cambió**`, `*Nota*`, `__X__`), read like a heading. */
 const EMPHASIS_LINE = /^(?:\*\*(?=\S)(?:(?!\*\*).)+(?<=\S)\*\*|__(?=\S)(?:(?!__).)+(?<=\S)__|\*(?=\S)[^*]+(?<=\S)\*|_(?=\S)[^_]+(?<=\S)_)$/;
 
-/** One line of text; `section` marks a heading or bold-only line, which a section break follows. */
-function blockLine(raw: string): { text: string; section?: boolean } {
-	let line = raw.trim();
-	while (/^>\s?/.test(line)) line = line.replace(/^>\s?/, "").trim();
+/** One line outside fences and tables, as a block; `line` is its 1-based source line. */
+function lineBlock(raw: string, line: number): PlanBlock {
+	let text = raw.trim();
+	while (/^>\s?/.test(text)) text = text.replace(/^>\s?/, "").trim();
 
-	if (/^([-*_])(\s*\1){2,}$/.test(line)) return { text: "" };
-	if (/^\[[^\]]+\]:\s*\S+/.test(line)) return { text: "" };
+	if (text === "" || /^([-*_])(\s*\1){2,}$/.test(text) || /^\[[^\]]+\]:\s*\S+/.test(text)) return { role: "break", line };
 
-	const heading = /^#{1,6}\s+(.*?)(\s+#+)?$/.exec(line);
-	if (heading) {
-		const text = inline(heading[1]);
-		return { text: closeSentence(spokenHeading(text)), section: true };
+	const heading = /^#{1,6}\s+(.*?)(\s+#+)?$/.exec(text);
+	if (heading) return { role: "heading", source: heading[1], line };
+	if (EMPHASIS_LINE.test(text)) return { role: "heading", source: text, line };
+
+	const bullet = /^[-*+]\s+(?:\[[ xX]\]\s+)?(.*)$/.exec(text);
+	if (bullet) return { role: "item", source: bullet[1], line };
+
+	const numbered = /^(\d+)[.)]\s+(.*)$/.exec(text);
+	if (numbered) return { role: "item", number: numbered[1], source: numbered[2], line };
+
+	return { role: "paragraph", source: text, line };
+}
+
+/** One block in the words of the current phrasebook, before the per-line passes. */
+function blockText(block: PlanBlock): string {
+	switch (block.role) {
+		case "break":
+			return "";
+		case "codeBlock":
+			return words.codeBlock;
+		case "heading":
+			return closeSentence(spokenHeading(inline(block.source)));
+		case "item":
+			// "1:" rather than "1.", which playback would cut at, reading the number alone.
+			return closeSentence(block.number === undefined ? inline(block.source) : `${block.number}: ${inline(block.source)}`);
+		case "row":
+			return closeSentence(
+				block.cells
+					.map((cell) => inline(cell))
+					.filter((cell) => cell !== "")
+					.join(", "),
+			);
+		case "paragraph":
+			return inline(block.source);
 	}
-	if (EMPHASIS_LINE.test(line)) return { text: closeSentence(spokenHeading(inline(line))), section: true };
-
-	const bullet = /^[-*+]\s+(?:\[[ xX]\]\s+)?(.*)$/.exec(line);
-	if (bullet) return { text: closeSentence(inline(bullet[1])) };
-
-	const numbered = /^(\d+)[.)]\s+(.*)$/.exec(line);
-	// "1:" rather than "1.", which playback would cut at, reading the number alone.
-	if (numbered) return { text: closeSentence(`${numbered[1]}: ${inline(numbered[2])}`) };
-
-	return { text: inline(line) };
 }
 
 /** Every reply here closes with the English heading "Needs your decision"; a Spanish voice would mangle it. */
 function spokenHeading(text: string): string {
-	return words === SPANISH && /^needs your decision:?$/i.test(text) ? "Decisiones pendientes" : text;
+	return words.needsYourDecision !== undefined && /^needs your decision:?$/i.test(text) ? words.needsYourDecision : text;
 }
 
-function tableRow(raw: string): string {
-	const cells = raw
+/** A table row's cells, trimmed and still in Markdown; escaped pipes stay inside their cell. */
+function tableCells(raw: string): string[] {
+	return raw
 		.trim()
 		.replace(/^\|/, "")
 		.replace(/(?<!\\)\|$/, "")
 		.split(/(?<!\\)\|/)
-		.map((cell) => inline(cell.trim()))
-		.filter((cell) => cell !== "");
-	return closeSentence(cells.join(", "));
+		.map((cell) => cell.trim());
 }
 
 function closeSentence(text: string): string {
@@ -421,11 +559,18 @@ function tokenReading(token: string, previous: string, next: string): string {
 	// English puts the noun after the token ("the `/read` command"); punctuation in between ends the phrase.
 	const noun = words === ENGLISH && trail === "" ? next.toLowerCase() : "";
 	const reading = classified(core, previous.toLowerCase(), noun);
-	if (reading === undefined) return token;
+	if (reading === undefined) {
+		if (diagnosis && UNCLASSIFIED.test(core) && !NUMERIC.test(core)) diagnosis.diagnostics.push({ line: diagnosis.line, token: core });
+		return token;
+	}
 	if (reading === "") return `\uE008${trail}`;
 	// A dot between digits in a reading ("a punto ts, en 1.2") is the token's own; (h1) leaves it.
 	return `${lead}${reading.replace(/(?<=\d)\.(?=\d)/g, "\uE009")}${trail}`;
 }
+
+/** (S12) Characters a voice reads oddly in a token no class claimed; numbers such as `1/2` or `10:30` are fine. */
+const UNCLASSIFIED = /[/\\=<>|*{}$^@#+]|\.\./;
+const NUMERIC = /^~?[\d.,:/]+$/;
 
 /** `noun` is the English noun right after the token, which the reading then leaves out ("the read command"). */
 function classified(core: string, previous: string, noun: string): string | undefined {

@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import type { Output } from "./outputs.ts";
 import { PLAYER_MARK } from "./reading-lock.ts";
 import { DEFAULT_SPEED } from "./settings.ts";
+import type { Boundary, Fragment } from "./speech-text.ts";
 import { onPath, type Speaker, type Voice } from "./voice.ts";
 
 /** What one segment asks of Supertonic; the real loader wraps `generationConfig` in sherpa's GenerationConfig. */
@@ -34,7 +35,7 @@ const PAPLAY_MISSING =
 const SEED = 42;
 
 /**
- * Speaks `text` with `speaker` at `speed` (Supertonic's voice speed, 1.1 by default; our pauses do not
+ * Speaks `fragments` (from `speechNarration`, or `spokenFragments` for plain text) with `speaker` at `speed` (Supertonic's voice speed, 1.1 by default; our pauses do not
  * change with it) on `output`. Supertonic synthesizes one sentence at a time, so the first
  * audio comes after one sentence instead of the whole reply, and the next sentence is synthesized while the
  * current one plays (at most LOOKAHEAD wait for the player); each sentence loses its own leading and
@@ -45,7 +46,8 @@ const SEED = 42;
 export function startReading(options: {
 	voice: Voice;
 	speaker: Speaker;
-	text: string;
+	/** Spoken in order, each followed by the pause for its own boundary; their text is never split again. */
+	fragments: readonly Fragment[];
 	output: Output;
 	env: NodeJS.ProcessEnv;
 	loadSherpa?: (voice: Voice) => Promise<SherpaTts>;
@@ -53,7 +55,7 @@ export function startReading(options: {
 	/** Told the player's pid once it starts, so another session can stop this reading (T21). */
 	onPlayer?: (pid: number) => void;
 }): Reading {
-	const { voice, speaker, text, output, env, loadSherpa = loadSherpaTts, speed = DEFAULT_SPEED, onPlayer } = options;
+	const { voice, speaker, fragments: list, output, env, loadSherpa = loadSherpaTts, speed = DEFAULT_SPEED, onPlayer } = options;
 	let player: ChildProcess | undefined;
 	let stopped = false;
 
@@ -99,7 +101,6 @@ export function startReading(options: {
 			});
 		};
 
-		const list = fragments(text);
 		// Samples of pause already written after the last audible fragment; undefined before the first one.
 		let paused: number | undefined;
 		for (const [index, fragment] of list.entries()) {
@@ -122,7 +123,7 @@ export function startReading(options: {
 			if (stopped || playerGone) break;
 			const speech = trimSilence(samples, speaker.gain, tts.sampleRate);
 			// The last fragment's pause is never written.
-			const after = index === list.length - 1 ? 0 : Math.round(PAUSES[fragment.boundary] * tts.sampleRate);
+			const after = index === list.length - 1 ? 0 : Math.round(PAUSES[fragment.after] * tts.sampleRate);
 			// A silent fragment is dropped, but a stronger boundary it ends still counts: top up the pause written.
 			if (!speech) {
 				if (paused !== undefined && after > paused) {
@@ -179,37 +180,11 @@ export function startReading(options: {
  */
 const LOOKAHEAD = 2;
 
-type Boundary = "sentence" | "line" | "paragraph";
-
 /**
  * Seconds of silence after a fragment, by what follows it: a sentence on the same line, a line, a blank line
  * (also after a heading or bold-only line). Longer than the voice's own 0.08-0.26 s at `,`, `;` and `:` (L39).
  */
 const PAUSES: Record<Boundary, number> = { sentence: 0.35, line: 0.5, paragraph: 0.75 };
-
-/**
- * Sentences and lines, in order, each with the boundary after it; Supertonic only calls back once per
- * 300 characters, so we split first. Never at ":" or ";", where a pause would sound like a full stop.
- */
-function fragments(text: string): { text: string; boundary: Boundary }[] {
-	const result: { text: string; boundary: Boundary }[] = [];
-	let blank = false;
-	for (const line of text.split("\n")) {
-		const sentences = line
-			.split(/(?<=[.!?…])\s+/)
-			.map((sentence) => sentence.trim())
-			.filter((sentence) => sentence !== "");
-		if (sentences.length === 0) {
-			blank = true;
-			continue;
-		}
-		const previous = result.at(-1);
-		if (previous) previous.boundary = blank ? "paragraph" : "line";
-		blank = false;
-		for (const sentence of sentences) result.push({ text: sentence, boundary: "sentence" });
-	}
-	return result;
-}
 
 /** Windows quieter than this, after the speaker's gain, count as silence (-45 dBFS RMS over 10 ms). */
 const SILENCE = 10 ** (-45 / 20);

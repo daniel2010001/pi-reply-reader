@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectLanguage, speechReading, speechText } from "../src/speech-text.ts";
+import { detectLanguage, narrationPlan, renderNarration, speechNarration, speechReading, speechText, spokenFragments } from "../src/speech-text.ts";
 
 describe("speechText", () => {
 	it("leaves plain prose untouched", () => {
@@ -473,5 +473,106 @@ describe("S7: language of the added words", () => {
 		expect(speechText("I said a el and de el in the text of the page for the user.")).toBe(
 			"I said a el and de el in the text of the page for the user.",
 		);
+	});
+});
+
+describe("S12: narration plan, renderer and diagnostics", () => {
+	const markdown = [
+		"# Estado",
+		"Hola, mundo. ¿Seguimos?",
+		"",
+		"- Un ítem",
+		"2. Segundo",
+		"> Citado.",
+		"",
+		"| A | B |",
+		"|---|---|",
+		"| 1 | 2 |",
+		"```sh",
+		"ls",
+		"```",
+		"**Nota**",
+		"---",
+		"Fin.",
+	].join("\n");
+
+	it("plans roles and the Markdown each block holds, with no words of any language added", () => {
+		expect(narrationPlan(markdown).blocks).toEqual([
+			{ role: "heading", source: "Estado", line: 1 },
+			{ role: "paragraph", source: "Hola, mundo. ¿Seguimos?", line: 2 },
+			{ role: "break", line: 3 },
+			{ role: "item", source: "Un ítem", line: 4 },
+			{ role: "item", number: "2", source: "Segundo", line: 5 },
+			{ role: "paragraph", source: "Citado.", line: 6 },
+			{ role: "break", line: 7 },
+			{ role: "row", cells: ["A", "B"], line: 8 },
+			{ role: "row", cells: ["1", "2"], line: 10 },
+			{ role: "codeBlock", line: 11 },
+			{ role: "heading", source: "**Nota**", line: 14 },
+			{ role: "break", line: 15 },
+			{ role: "paragraph", source: "Fin.", line: 16 },
+		]);
+	});
+
+	it("renders one plan in either language, each fragment with its role and the boundary after it", () => {
+		const plan = narrationPlan(markdown);
+		const spanish = renderNarration(plan, "es");
+		expect(spanish.fragments).toEqual([
+			{ text: "Estado.", role: "heading", after: "paragraph" },
+			{ text: "Hola, mundo.", role: "paragraph", after: "sentence" },
+			{ text: "¿Seguimos?", role: "paragraph", after: "paragraph" },
+			{ text: "Un ítem.", role: "item", after: "line" },
+			{ text: "2: Segundo.", role: "item", after: "line" },
+			{ text: "Citado.", role: "paragraph", after: "paragraph" },
+			{ text: "A, B.", role: "row", after: "line" },
+			{ text: "1, 2.", role: "row", after: "line" },
+			{ text: "Bloque de código.", role: "codeBlock", after: "line" },
+			{ text: "Nota.", role: "heading", after: "paragraph" },
+			{ text: "Fin.", role: "paragraph", after: "sentence" },
+		]);
+		expect(spanish.language).toBe("es");
+		expect(spanish.text).toBe(speechText(markdown, "es"));
+		const english = renderNarration(plan, "en");
+		expect(english.fragments.find((fragment) => fragment.role === "codeBlock")?.text).toBe("Code block.");
+		expect(english.text).toBe(speechText(markdown, "en"));
+	});
+
+	it("speechNarration follows the text's own language unless one is given, as speechReading does", () => {
+		const english = "The tests pass and the build is clean.\n```\nls\n```";
+		expect(speechNarration(english).language).toBe("en");
+		expect(speechNarration(english).text).toBe(speechText(english));
+		expect(speechNarration(english, "es").text).toBe(speechText(english, "es"));
+	});
+
+	it("an emoji-only line ends a paragraph, as a blank line does", () => {
+		expect(speechNarration("Uno.\n🎉\nDos.", "es").fragments).toEqual([
+			{ text: "Uno.", role: "paragraph", after: "paragraph" },
+			{ text: "Dos.", role: "paragraph", after: "sentence" },
+		]);
+	});
+
+	it("spokenFragments splits text already meant for speech at . ! ? … and line breaks, never at : or ;", () => {
+		expect(spokenFragments("Hola, mundo. ¿Qué tal?  Bien!\n\nSigue: uno; dos… tres\n \n")).toEqual([
+			{ text: "Hola, mundo.", role: "paragraph", after: "sentence" },
+			{ text: "¿Qué tal?", role: "paragraph", after: "sentence" },
+			{ text: "Bien!", role: "paragraph", after: "paragraph" },
+			{ text: "Sigue: uno; dos…", role: "paragraph", after: "sentence" },
+			{ text: "tres", role: "paragraph", after: "sentence" },
+		]);
+	});
+
+	it("reports each token no reading class claimed, with its line (per line, code spans before prose)", () => {
+		const text = [
+			"Mirá `foo=bar` y #122.",
+			"Leé `src/x.ts`, `/reload`, README.md, 1.1, P1.R1, `1/2`, `y/o`, snake_case y https://a.com/x?y=1.",
+			"`jd-*` y a..HEAD",
+		].join("\n");
+		expect(speechNarration(text, "es").diagnostics).toEqual([
+			{ line: 1, token: "foo=bar" },
+			{ line: 1, token: "#122" },
+			{ line: 3, token: "jd-*" },
+			{ line: 3, token: "a..HEAD" },
+		]);
+		expect(speechNarration("Todo claro: `README.md` en la rama `feat/x`.", "es").diagnostics).toEqual([]);
 	});
 });

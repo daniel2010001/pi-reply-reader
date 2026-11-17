@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Internal: the cleanup now builds a narration plan (blocks with a role: heading, paragraph, item, row, code
+  block) and renders it in the reading's language; playback speaks the rendered fragments with each one's own
+  pause instead of splitting the text again. `speechNarration(markdown, language?)` returns the text, the
+  fragments and diagnostics: technical tokens no reading rule claimed, with their line. What is spoken and
+  played is byte-identical to 0.1.0.
+- `npm run build` removes `dist/` before compiling, so a packed tarball never carries stale files.
+
 ## 0.1.0 — 2026-11-17
 
 First release.

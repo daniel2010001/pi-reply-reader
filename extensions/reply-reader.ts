@@ -11,7 +11,7 @@ import { type Claim, openReadingLock } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { sectionFrom } from "../src/sections.ts";
 import { formatSpeed, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSpeed } from "../src/settings.ts";
-import { detectLanguage, type Language, speechText } from "../src/speech-text.ts";
+import { detectLanguage, type Language, speechNarration } from "../src/speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
 
 const STATUS = "reply-reader";
@@ -146,8 +146,8 @@ export function createReplyReader(
 		 * `name` is what the footer names, `label` what the "nothing to read" message names.
 		 */
 		const readAloud = async (ctx: ExtensionContext, name: string, label: string, markdown: string, language?: Language): Promise<void> => {
-			const text = speechText(markdown, language);
-			if (!text) {
+			const narration = speechNarration(markdown, language);
+			if (!narration.text) {
 				ctx.ui.notify(`${label} has nothing to read.`, "info");
 				return;
 			}
@@ -186,7 +186,7 @@ export function createReplyReader(
 			const reading = startReading({
 				voice,
 				speaker: SPEAKERS[speaker],
-				text,
+				fragments: narration.fragments,
 				output,
 				env,
 				loadSherpa: deps.loadSherpa,

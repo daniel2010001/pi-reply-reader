@@ -5,7 +5,7 @@ import { loadOutputs } from "./outputs.ts";
 import { type SherpaTts, startReading } from "./playback.ts";
 import { openReadingLock } from "./reading-lock.ts";
 import { loadSpeed, parseSpeed, SPEED_HINT } from "./settings.ts";
-import { speechText } from "./speech-text.ts";
+import { speechNarration } from "./speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice, VOICE_ARCHIVE, type VoiceArchive } from "./voice.ts";
 
 /** What `reply-reader --help` prints (S6). */
@@ -140,8 +140,8 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 		say(`Cannot read "${parsed.file}": ${readProblem(error as NodeJS.ErrnoException)}.`);
 		return FAILED;
 	}
-	const text = speechText(markdown);
-	if (!text) {
+	const narration = speechNarration(markdown);
+	if (!narration.text) {
 		say(`${fromStdin ? "Standard input" : parsed.file} has nothing to read.`);
 		return OK;
 	}
@@ -186,7 +186,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 	const reading = startReading({
 		voice,
 		speaker,
-		text,
+		fragments: narration.fragments,
 		output,
 		env,
 		loadSherpa: deps.loadSherpa,
