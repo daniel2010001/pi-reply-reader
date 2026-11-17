@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- English replies and files are read with English connecting words ("the command", "Code block.", "1 point 1",
+  units and marks), detected from the text itself; Spanish text reads as before.
 - `/read` reads a reply aloud on request only: the latest reply of the branch, or one by ID with
   `/read P12.R1` (any case, a `.Q<n>` suffix accepted, numbered like `pi-reply-thread`'s `/replies`) or by
   its entry ID. Nothing plays by itself. A new reading stops the one playing, and Esc stops it; the footer

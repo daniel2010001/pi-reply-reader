@@ -120,6 +120,13 @@ else says `Speed must be a number from 0.5 to 2.0.` and changes nothing.
 
 The cleanup is deterministic and needs no model, so the same reply always sounds the same.
 
+The reader detects whether a reply or file is English or Spanish from its own words (no model; Spanish
+wins ties), and every word the cleanup adds follows it. `/reload` reads as "the command reload" in English
+text and "el comando reload" in Spanish; likewise "Code block." / "Bloque de código.", "AGENTS dot md, in
+agent", "the branch origin main", "a commit", ", line 42", "1 point 1", "approximately", "seconds",
+"percent", and marks by name ("period", "comma", "tilde"…). A token followed by its own noun is not doubled
+("the `/read` command" reads "the read command"). The voice itself still speaks with Spanish pronunciation.
+
 - **Markdown**: emphasis, headings, bullets, numbered items, blockquotes, links and rules lose their syntax
   and keep their words. Headings and list items end as sentences. Inline code is read without backticks.
   A heading or a line that is all bold is read like a title, followed by a longer pause. A numbered item or
