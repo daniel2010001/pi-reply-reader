@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { Output } from "./outputs.ts";
+import { PLAYER_MARK } from "./reading-lock.ts";
 import { DEFAULT_SPEED } from "./settings.ts";
 import { onPath, type Speaker, type Voice } from "./voice.ts";
 
@@ -48,8 +49,10 @@ export function startReading(options: {
 	env: NodeJS.ProcessEnv;
 	loadSherpa?: (voice: Voice) => Promise<SherpaTts>;
 	speed?: number;
+	/** Told the player's pid once it starts, so another session can stop this reading (T21). */
+	onPlayer?: (pid: number) => void;
 }): Reading {
-	const { voice, speaker, text, output, env, loadSherpa = loadSherpaTts, speed = DEFAULT_SPEED } = options;
+	const { voice, speaker, text, output, env, loadSherpa = loadSherpaTts, speed = DEFAULT_SPEED, onPlayer } = options;
 	let player: ChildProcess | undefined;
 	let stopped = false;
 
@@ -66,12 +69,13 @@ export function startReading(options: {
 		if (stopped) return;
 
 		const playerEnv = output.pulseServer ? { ...env, PULSE_SERVER: output.pulseServer } : env;
-		const args = ["--raw", "--format=s16le", `--rate=${tts.sampleRate}`, "--channels=1", "--client-name=pi-reply-reader", "--stream-name=reply"];
+		const args = ["--raw", "--format=s16le", `--rate=${tts.sampleRate}`, "--channels=1", PLAYER_MARK, "--stream-name=reply"];
 		const child = spawn(paplay, args, { env: playerEnv, stdio: ["pipe", "ignore", "pipe"] });
 		player = child;
 		// A player that quits early closes its stdin; writing to it must not crash Pi.
 		child.stdin?.on("error", () => {});
 		const playback = finished(child, `Playback on "${output.name}" failed`);
+		if (child.pid !== undefined) onPlayer?.(child.pid);
 		let playerGone = false;
 		const gone = playback.then(
 			() => {},

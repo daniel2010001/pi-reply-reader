@@ -413,6 +413,60 @@ describe("reply-reader extension", () => {
 		await waitFor(() => !alive(Number(read("play-2.pid"))));
 	});
 
+	it("with a shared XDG_RUNTIME_DIR, Esc, a new /read, /read-stop and the settings commands behave as before", async () => {
+		env.XDG_RUNTIME_DIR = join(root, "run");
+		mkdirSync(env.XDG_RUNTIME_DIR);
+		installVoice("sleep 30;");
+		const reader = load();
+		await reader.run("read-stop");
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-0.pid")));
+		expect(reader.key("\x1b")).toEqual({ consume: true });
+		await waitFor(() => !alive(Number(read("play-0.pid"))));
+		expect(reader.key("\x1b")).toBeUndefined();
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-1.pid")));
+		await reader.run("read", "P1.R1");
+		await waitFor(() => !alive(Number(read("play-1.pid"))));
+		await waitFor(() => existsSync(log("play-2.pid")));
+		// The reading that replaced this session's own one keeps playing past the lock's checks.
+		await new Promise((resolve) => setTimeout(resolve, 600));
+		expect(alive(Number(read("play-2.pid")))).toBe(true);
+		await reader.run("read-stop");
+		await waitFor(() => !alive(Number(read("play-2.pid"))));
+		await reader.run("read-stop");
+		await reader.run("read-output", "local");
+		await reader.run("read-voice", "female");
+		await reader.run("read-speed", "1.2");
+		expect(reader.notes).toEqual([
+			["Nothing is being read.", "info"],
+			["Reading stopped.", "info"],
+			["Nothing is being read.", "info"],
+			["Readings will sound on local (hs-node).", "info"],
+			["Readings will use the female voice.", "info"],
+			["Readings will use speed 1.2.", "info"],
+		]);
+		expect(reader.statuses).toEqual([
+			"Reading P2.R1 on local · Esc stops",
+			undefined,
+			"Reading P2.R1 on local · Esc stops",
+			undefined,
+			"Reading P1.R1 on local · Esc stops",
+			undefined,
+		]);
+	});
+
+	it("with a shared XDG_RUNTIME_DIR, a player that fails on its own still shows its error", async () => {
+		env.XDG_RUNTIME_DIR = join(root, "run");
+		mkdirSync(env.XDG_RUNTIME_DIR);
+		installVoice();
+		script("paplay", 'cat > /dev/null; echo "Connection refused" >&2; exit 1');
+		const reader = load();
+		await reader.run("read");
+		await reader.settled();
+		expect(reader.notes).toEqual([['Playback on "local" failed: Connection refused', "error"]]);
+	});
+
 	it("ending the session stops the reading", async () => {
 		installVoice("sleep 30;");
 		const reader = load();

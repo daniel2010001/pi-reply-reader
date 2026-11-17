@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { loadOutputs, type Output } from "../src/outputs.ts";
 import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
+import { type Claim, openReadingLock } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { formatSpeed, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSpeed } from "../src/settings.ts";
 import { speechText } from "../src/speech-text.ts";
@@ -17,6 +18,8 @@ const ASK_SPEED = "Which speed should readings use?";
 const SPEAKER_NAMES = Object.keys(SPEAKERS) as SpeakerName[];
 /** An argument naming a Markdown file rather than a reply (S6). */
 const MARKDOWN_FILE = /\.(md|markdown)$/i;
+/** How often a reading checks whether a newer one, or /read-stop, in another session took over (T21). */
+const WATCH_MS = 250;
 
 /** Why a Markdown file could not be read, in the user's words. */
 function readProblem(error: NodeJS.ErrnoException): string {
@@ -30,6 +33,8 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * Reads replies aloud on request only (S1): `/read` speaks the latest reply or one by ID, a new reading,
  * Esc or `/read-stop` stops the one playing, `/read-output` picks where it sounds (S4) and `/read-voice` picks the male
  * or female voice (S3), `/read-speed` the voice speed, saved in settings.json (S3). `/read <file.md>` reads a Markdown file the same way (S6). Nothing plays by itself.
+ * One reading per machine (S1, T21): through `$XDG_RUNTIME_DIR/pi-reply-reader/`, a new reading in any session
+ * stops the one playing in another, `/read-stop` stops it too, and the session stopped that way just clears its footer.
  */
 export function createReplyReader(
 	deps: { env?: NodeJS.ProcessEnv; hostname?: string; loadSherpa?: (voice: Voice) => Promise<SherpaTts> } = {},
@@ -38,7 +43,7 @@ export function createReplyReader(
 	const hostname = deps.hostname ?? osHostname();
 
 	return (pi: ExtensionAPI): void => {
-		let current: { reading: Reading; ctx: ExtensionContext } | undefined;
+		let current: { reading: Reading; ctx: ExtensionContext; claim?: Claim; watch?: ReturnType<typeof setInterval> } | undefined;
 		/** The output chosen in this session, by name; asked on the first reading. */
 		let chosen: string | undefined;
 		/** The voice for the next reading in this session (S3: male unless changed). */
@@ -51,11 +56,15 @@ export function createReplyReader(
 		let speedWarned = false;
 		let unsubscribe: (() => void) | undefined;
 
+		/** Ends this session's reading and clears its footer; another session's reading is left alone. */
 		const stop = (): void => {
 			if (!current) return;
-			current.reading.stop();
-			current.ctx.ui.setStatus(STATUS, undefined);
+			const { reading, ctx, claim, watch } = current;
 			current = undefined;
+			clearInterval(watch);
+			reading.stop();
+			claim?.release();
+			ctx.ui.setStatus(STATUS, undefined);
 		};
 
 		/** All outputs, telling the user about any entry of outputs.json that was skipped. */
@@ -153,30 +162,51 @@ export function createReplyReader(
 
 				stop();
 				const speed = speedForReading(ctx);
-				const reading = startReading({ voice, speaker: SPEAKERS[speaker], text, output, env, loadSherpa: deps.loadSherpa, speed });
-				current = { reading, ctx };
+				// Without a usable XDG_RUNTIME_DIR there is no claim, and only this session's readings stop each other.
+				const claim = openReadingLock(env)?.claim();
+				/** Stopped by another session: no message, just the footer. */
+				const stoppedElsewhere = (): void => {
+					if (current?.reading === reading) stop();
+				};
+				const reading = startReading({
+					voice,
+					speaker: SPEAKERS[speaker],
+					text,
+					output,
+					env,
+					loadSherpa: deps.loadSherpa,
+					speed,
+					onPlayer: (pid) => {
+						if (claim && !claim.setPlayer(pid)) stoppedElsewhere();
+					},
+				});
+				const watch = claim
+					? setInterval(() => {
+							if (claim.lost()) stoppedElsewhere();
+						}, WATCH_MS)
+					: undefined;
+				watch?.unref();
+				current = { reading, ctx, claim, watch };
 				ctx.ui.setStatus(STATUS, `Reading ${name} on ${output.name} · Esc stops`);
 				reading.done
 					.catch((error: Error) => {
-						if (current?.reading === reading) ctx.ui.notify(error.message, "error");
+						// A player killed by a newer reading or /read-stop elsewhere fails; that is not an error here.
+						if (current?.reading === reading && !claim?.lost()) ctx.ui.notify(error.message, "error");
 					})
 					.finally(() => {
 						if (current?.reading !== reading) return;
-						ctx.ui.setStatus(STATUS, undefined);
-						current = undefined;
+						stop();
 					});
 			},
 		});
 
 		pi.registerCommand("read-stop", {
-			description: "Stop the reading playing (Esc or a new /read stop it too)",
+			description: "Stop the reading playing, in this or another Pi session (Esc or a new /read stop it too)",
 			handler: async (_args, ctx) => {
-				if (!current) {
-					ctx.ui.notify("Nothing is being read.", "info");
-					return;
-				}
+				const here = current !== undefined;
 				stop();
-				ctx.ui.notify("Reading stopped.", "info");
+				const elsewhere = openReadingLock(env)?.stopOthers() ?? false;
+				ctx.ui.notify(here || elsewhere ? "Reading stopped." : "Nothing is being read.", "info");
 			},
 		});
 

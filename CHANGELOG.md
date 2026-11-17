@@ -8,6 +8,11 @@
   shows `Reading P12.R1 on local · Esc stops` meanwhile.
 - `/read-stop` stops the reading playing and says "Reading stopped."; with nothing playing it says
   "Nothing is being read." and changes nothing.
+- One reading per machine: a new `/read` in any Pi session or process of your user stops a reading playing in
+  another, and `/read-stop` stops it too; the session whose reading was stopped clears its footer with no
+  error. Coordinated through `$XDG_RUNTIME_DIR/pi-reply-reader/reading.json`; an entry whose process is gone
+  is ignored, only a player started by the reader is ever signalled, and without a usable `XDG_RUNTIME_DIR`
+  each session stops only its own readings, as before.
 - `/read <file.md>` reads a Markdown file aloud (`.md` or `.markdown`, any case), resolved against the
   session's working directory (absolute and `~/` paths work too), with the same cleanup, voice, output,
   Esc and footer as a reply. A missing or unreadable file gets one warning naming it, and nothing plays.

@@ -6,8 +6,8 @@ Read a [Pi](https://github.com/earendil-works/pi) or Gentle Shell reply aloud, o
 "asterisco asterisco", and speaks it with a local Spanish voice. The output can be this machine's speakers or
 another machine you reach over SSH. `/read notes.md` reads a Markdown file the same way.
 
-- **Nothing plays by itself.** A reading starts only with `/read`. A new reading stops the one playing, so
-  two never overlap, and `/read-stop` or Esc stops it.
+- **Nothing plays by itself.** A reading starts only with `/read`. A new reading stops the one playing, even
+  in another Pi session on the same machine, so two never overlap, and `/read-stop` or Esc stops it.
 - **Local and offline after setup.** Speech is synthesized on the machine that runs Pi, on the CPU, with no
   API key. Your replies never leave the machine (except as audio to an output you configured).
 - **Nothing enters the model context.**
@@ -53,7 +53,7 @@ sentence is synthesized, about 1-2 s.
 | `/read` | Read a reply aloud: the latest, or one by ID (P12.R1); or a Markdown file (notes.md) | Reads the latest reply of the current branch. |
 | `/read <id>` | | Reads one reply by ID (see below). |
 | `/read <file.md>` | | Reads a Markdown file (see below). |
-| `/read-stop` | Stop the reading playing (Esc or a new /read stop it too) | Stops the reading playing and says `Reading stopped.`; with nothing playing, says `Nothing is being read.` |
+| `/read-stop` | Stop the reading playing, in this or another Pi session (Esc or a new /read stop it too) | Stops the reading playing, in any Pi session of yours on this machine, and says `Reading stopped.`; with nothing playing anywhere, says `Nothing is being read.` |
 | `/read-output [name]` | Choose where readings sound: local or an output from outputs.json | With a name, switches to that output; without one, asks. See [Outputs](#outputs). |
 | `/read-voice [male\|female]` | Choose the voice for the next readings: male (default) or female | With a name, switches the voice; without one, asks. |
 | `/read-speed [n]` | Choose the voice speed for the next readings, 0.5 to 2.0 (default 1.1); saved for later sessions | With a number, sets that speed; without one, offers 0.8 to 1.5. See [Speed](#speed). |
@@ -66,6 +66,12 @@ While a reading plays, the footer shows `Reading P12.R1 on local · Esc stops` (
 - **`/read-stop`** stops the reading and says `Reading stopped.`; with nothing playing it says
   `Nothing is being read.` and changes nothing.
 - **A new `/read`** stops the reading that is playing and starts the new one.
+- **One reading per machine.** The last reading wins across every Pi or Gentle Shell session of your user on
+  the machine: a new `/read` in one session stops a reading playing in another, and `/read-stop` stops it
+  too. The session whose reading was stopped just clears its footer, with no error. Sessions find each other
+  through a small file in `$XDG_RUNTIME_DIR/pi-reply-reader/` (an entry left by a session that is gone is
+  ignored). Without a usable `XDG_RUNTIME_DIR`, each session only stops its own readings. Esc only stops the
+  reading of the session you press it in.
 - The output and the voice last for the session. A new session starts with the male voice and asks for the
   output again on its first reading (only when there is more than `local` to choose from).
 
