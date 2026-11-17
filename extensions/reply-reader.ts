@@ -6,6 +6,7 @@ import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { loadOutputs, type Output } from "../src/outputs.ts";
 import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
 import { questionsSection } from "../src/questions.ts";
+import { isPing, parseReadRequest, READER_EVENTS, READER_EVENTS_VERSION } from "../src/reader-events.ts";
 import { type Claim, openReadingLock } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { sectionFrom } from "../src/sections.ts";
@@ -51,6 +52,8 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * stops the one playing in another, `/read-stop` stops it too, and the session stopped that way just clears its footer.
  * `/read <target>#<section>` reads only the section under a matching heading, or on to the end with `rest` (S9). `/read-auto` (S8) reads each new reply, or only its
  * "Needs your decision" section, when the agent's turn ends; it is off at every session start.
+ * Other extensions (pi-reply-thread's Alt+R view) reach it over `pi.events` (S10, src/reader-events.ts): a ping is
+ * answered with ready, ready is also sent at each session start, and a read request reads its text like `/read`.
  */
 export function createReplyReader(
 	deps: { env?: NodeJS.ProcessEnv; hostname?: string; loadSherpa?: (voice: Voice) => Promise<SherpaTts> } = {},
@@ -77,6 +80,20 @@ export function createReplyReader(
 		let before: string | undefined;
 		/** Whether an agent run is between its first agent_start and agent_settled. */
 		let running = false;
+		/** The context of the latest session_start or command; bus events carry none (S10). Unset outside a session. */
+		let latest: ExtensionContext | undefined;
+		/** Ends this session's subscriptions on `pi.events`. */
+		let unsubscribeEvents: (() => void) | undefined;
+
+		/** Registers a command whose context becomes the one bus events read with. */
+		const command = (name: string, options: Parameters<ExtensionAPI["registerCommand"]>[1]): void =>
+			pi.registerCommand(name, {
+				...options,
+				handler: (args, ctx) => {
+					latest = ctx;
+					return options.handler(args, ctx);
+				},
+			});
 
 		/** Ends this session's reading and clears its footer; another session's reading is left alone. */
 		const stop = (): void => {
@@ -197,7 +214,7 @@ export function createReplyReader(
 				});
 		};
 
-		pi.registerCommand("read", {
+		command("read", {
 			description:
 				"Read a reply aloud: the latest, or one by ID (P12.R1); or a Markdown file (notes.md); add #section for one section (notes.md#install, #usage), then rest to read on to the end",
 			handler: async (args, ctx) => {
@@ -257,7 +274,7 @@ export function createReplyReader(
 			},
 		});
 
-		pi.registerCommand("read-stop", {
+		command("read-stop", {
 			description: "Stop the reading playing, in this or another Pi session (Esc or a new /read stop it too)",
 			handler: async (_args, ctx) => {
 				const here = current !== undefined;
@@ -267,7 +284,7 @@ export function createReplyReader(
 			},
 		});
 
-		pi.registerCommand("read-output", {
+		command("read-output", {
 			description: "Choose where readings sound: local or an output from outputs.json",
 			getArgumentCompletions: (prefix) =>
 				loadOutputs(env, hostname)
@@ -292,7 +309,7 @@ export function createReplyReader(
 			},
 		});
 
-		pi.registerCommand("read-voice", {
+		command("read-voice", {
 			description: "Choose the voice for the next readings: male (default) or female",
 			getArgumentCompletions: (prefix) =>
 				SPEAKER_NAMES.filter((name) => name.startsWith(prefix.trim())).map((name) => ({
@@ -317,7 +334,7 @@ export function createReplyReader(
 			},
 		});
 
-		pi.registerCommand("read-speed", {
+		command("read-speed", {
 			description: "Choose the voice speed for the next readings, 0.5 to 2.0 (default 1.1); saved for later sessions",
 			getArgumentCompletions: (prefix) =>
 				SPEED_CHOICES.filter((choice) => choice.startsWith(prefix.trim())).map((choice) => ({ value: choice, label: choice })),
@@ -345,7 +362,7 @@ export function createReplyReader(
 			},
 		});
 
-		pi.registerCommand("read-auto", {
+		command("read-auto", {
 			description:
 				'Read each new reply aloud when the agent finishes, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles',
 			getArgumentCompletions: (prefix) =>
@@ -384,7 +401,36 @@ export function createReplyReader(
 			readAloud(ctx, reply.id, reply.id, markdown, detectLanguage(reply.text)).catch((error: Error) => ctx.ui.notify(error.message, "error"));
 		});
 
+		/** Subscribes this session to the reader's channels (S10), replacing any earlier subscription, and says it is ready. */
+		const listen = (): void => {
+			unsubscribeEvents?.();
+			unsubscribeEvents = undefined;
+			// A host without an event bus (a bare test double) just has no integration; every command works as before.
+			const bus = pi.events as ExtensionAPI["events"] | undefined;
+			if (!bus) return;
+			const presence = { v: READER_EVENTS_VERSION };
+			const offPing = bus.on(READER_EVENTS.ping, (data) => {
+				// Synchronous, before any await: the view reads its flag right after its own emit returns.
+				if (latest && isPing(data)) bus.emit(READER_EVENTS.ready, { ...presence });
+			});
+			const offRead = bus.on(READER_EVENTS.read, (data) => {
+				const request = parseReadRequest(data);
+				const ctx = latest;
+				if (!request || !ctx) return;
+				// Not awaited: the sender gets no answer; a download confirm or the output question are the reader's.
+				readAloud(ctx, request.id, request.id, request.text, detectLanguage(request.text)).catch((error: Error) =>
+					ctx.ui.notify(error.message, "error"),
+				);
+			});
+			unsubscribeEvents = () => {
+				offPing();
+				offRead();
+			};
+			bus.emit(READER_EVENTS.ready, { ...presence });
+		};
+
 		pi.on("session_start", (_event, ctx) => {
+			latest = ctx;
 			auto = "off";
 			running = false;
 			before = undefined;
@@ -401,12 +447,16 @@ export function createReplyReader(
 						return { consume: true };
 					})
 				: undefined;
+			listen();
 		});
 
 		pi.on("session_shutdown", () => {
 			stop();
 			unsubscribe?.();
 			unsubscribe = undefined;
+			unsubscribeEvents?.();
+			unsubscribeEvents = undefined;
+			latest = undefined;
 		});
 	};
 }

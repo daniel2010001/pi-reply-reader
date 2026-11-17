@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import replyReader, { createReplyReader } from "../extensions/reply-reader.ts";
 import type { SherpaRequest, SherpaTts } from "../src/playback.ts";
+import { READER_EVENTS } from "../src/reader-events.ts";
 import { speechText } from "../src/speech-text.ts";
 
 let root: string;
@@ -96,15 +97,49 @@ const branch = [user("hola"), assistant("**Primera** respuesta."), user("otra"),
 
 type Handler = (...args: never[]) => unknown;
 
+/**
+ * An in-memory stand-in for Pi's shared event bus (`pi.events`), shaped like Pi's own: `emit` calls every handler
+ * synchronously (Node's EventEmitter), each wrapped so its errors are caught, and `on` returns an unsubscribe.
+ * `emitted` records every emit, in order, by any side.
+ */
+function createBus() {
+	const handlers = new Map<string, Set<(data: unknown) => void>>();
+	const emitted: [string, unknown][] = [];
+	return {
+		emitted,
+		emit: (channel: string, data: unknown) => {
+			emitted.push([channel, data]);
+			for (const handler of [...(handlers.get(channel) ?? [])]) handler(data);
+		},
+		on: (channel: string, handler: (data: unknown) => unknown) => {
+			const safe = async (data: unknown) => {
+				try {
+					await handler(data);
+				} catch (error) {
+					console.error(`Event handler error (${channel}):`, error);
+				}
+			};
+			const set = handlers.get(channel) ?? new Set();
+			handlers.set(channel, set);
+			set.add(safe);
+			return () => void set.delete(safe);
+		},
+		/** How many handlers listen on `channel` now. */
+		listeners: (channel: string) => handlers.get(channel)?.size ?? 0,
+	};
+}
+
 /** Loads the extension into a recording Pi and returns a driver for its commands, events and UI. */
 function load(answers: { select?: string; confirm?: boolean } = {}, start: unknown[] = branch) {
 	/** The session branch; a test appends to it to simulate a new turn. */
 	const entries = [...start];
 	const commands = new Map<string, { handler: Handler; getArgumentCompletions?: Handler }>();
 	const events = new Map<string, Handler>();
+	const bus = createBus();
 	const pi = {
 		registerCommand: (name: string, options: { handler: Handler; getArgumentCompletions?: Handler }) => commands.set(name, options),
 		on: (event: string, handler: Handler) => events.set(event, handler),
+		events: { emit: bus.emit, on: bus.on },
 	};
 	createReplyReader({ env, hostname: "hs-node", loadSherpa })(pi as never);
 
@@ -129,6 +164,7 @@ function load(answers: { select?: string; confirm?: boolean } = {}, start: unkno
 	(events.get("session_start") as (event: unknown, ctx: unknown) => void)({ reason: "startup" }, ctx);
 
 	return {
+		bus,
 		commands,
 		notes,
 		selects,
@@ -351,6 +387,175 @@ describe("reply-reader extension", () => {
 			const complete = reader.commands.get("read-auto")!.getArgumentCompletions as (prefix: string) => { value: string }[];
 			expect(complete("").map((item) => item.value)).toEqual(["on", "questions", "off"]);
 			expect(complete("o").map((item) => item.value)).toEqual(["on", "off"]);
+		});
+	});
+
+	describe("event contract v1 for other extensions (S10)", () => {
+		const { ping, ready, read: readEvent } = READER_EVENTS;
+		const texts = () => synthesized.map((request) => request.text);
+		/** Lets a reading that would start get as far as the engine. */
+		const pause = () => new Promise((resolve) => setTimeout(resolve, 150));
+		/** Counts every ready the reader sends, as pi-reply-thread's view would listen for it. */
+		const listen = (reader: ReturnType<typeof load>) => {
+			const seen = { ready: 0 };
+			reader.bus.on(ready, () => void seen.ready++);
+			return seen;
+		};
+
+		it("emits ready { v: 1 } at every session start", () => {
+			const reader = load();
+			expect(reader.bus.emitted).toEqual([[ready, { v: 1 }]]);
+			reader.restart();
+			expect(reader.bus.emitted).toEqual([
+				[ready, { v: 1 }],
+				[ready, { v: 1 }],
+			]);
+		});
+
+		it("answers a v1 ping with ready { v: 1 } before emit returns, and ignores any other ping", () => {
+			const reader = load();
+			const seen = listen(reader);
+			reader.bus.emit(ping, { v: 1 });
+			expect(seen.ready).toBe(1);
+			for (const data of [undefined, null, 1, "v1", [1], {}, { v: 2 }, { v: "1" }]) reader.bus.emit(ping, data);
+			expect(seen.ready).toBe(1);
+			expect(reader.bus.emitted.filter(([channel]) => channel === ready)).toEqual([
+				[ready, { v: 1 }],
+				[ready, { v: 1 }],
+			]);
+			expect(reader.notes).toEqual([]);
+		});
+
+		it("a valid read request reads its text like /read, naming its id in the footer, in the text's own language", async () => {
+			installVoice();
+			const reader = load();
+			reader.bus.emit(readEvent, { v: 1, id: "P3.R1.Q2", text: "## Hola\n\nHecho **ya**." });
+			await reader.settled();
+			reader.bus.emit(readEvent, { v: 1, id: "P4.R1", text: "The build is done and the tests pass for the new parser.\n\n```sh\npnpm test\n```" });
+			await waitFor(() => reader.statuses.filter((status) => status === undefined).length === 2);
+			expect(texts()).toEqual(["Hola.", "Hecho ya.", "The build is done and the tests pass for the new parser.", "Code block."]);
+			expect(reader.statuses).toEqual(["Reading P3.R1.Q2 on local · Esc stops", undefined, "Reading P4.R1 on local · Esc stops", undefined]);
+			expect(existsSync(log("play-1.audio"))).toBe(true);
+			expect(reader.notes).toEqual([]);
+		});
+
+		it("a request with nothing to read says so naming its id, and downloads nothing", async () => {
+			const reader = load({ confirm: true });
+			reader.bus.emit(readEvent, { v: 1, id: "P5.R1.Q1", text: "  \n" });
+			await pause();
+			expect(reader.notes).toEqual([["P5.R1.Q1 has nothing to read.", "info"]]);
+			expect(reader.confirms).toEqual([]);
+			expect(reader.statuses).toEqual([]);
+		});
+
+		it("ignores every invalid read payload silently, with nothing played, asked or said", async () => {
+			const reader = load({ confirm: false });
+			const invalid = [
+				undefined,
+				null,
+				"Hola.",
+				1,
+				[{ v: 1, id: "a", text: "Hola." }],
+				{},
+				{ id: "a", text: "Hola." },
+				{ v: 2, id: "a", text: "Hola." },
+				{ v: "1", id: "a", text: "Hola." },
+				{ v: 1, text: "Hola." },
+				{ v: 1, id: "a" },
+				{ v: 1, id: "", text: "Hola." },
+				{ v: 1, id: "a", text: "" },
+				{ v: 1, id: 7, text: "Hola." },
+				{ v: 1, id: "a", text: ["Hola."] },
+			];
+			for (const data of invalid) reader.bus.emit(readEvent, data);
+			await pause();
+			expect(reader.confirms).toEqual([]);
+			expect(reader.notes).toEqual([]);
+			expect(reader.statuses).toEqual([]);
+			expect(synthesized).toEqual([]);
+			// A valid request on the same bus does reach the reader: here it offers the voice download, declined.
+			reader.bus.emit(readEvent, { v: 1, id: "a", text: "Hola." });
+			await waitFor(() => reader.notes.length === 1);
+			expect(reader.confirms).toHaveLength(1);
+			expect(reader.notes).toEqual([["Reading cancelled: the voice was not downloaded.", "info"]]);
+		});
+
+		it("without a session (after session_shutdown) ignores read and ping, and a new session answers again", async () => {
+			installVoice();
+			const reader = load();
+			const seen = listen(reader);
+			reader.shutdown();
+			reader.bus.emit(ping, { v: 1 });
+			reader.bus.emit(readEvent, { v: 1, id: "P1.R1", text: "Hola." });
+			await pause();
+			expect(seen.ready).toBe(0);
+			expect(synthesized).toEqual([]);
+			expect(reader.statuses).toEqual([]);
+			expect(reader.notes).toEqual([]);
+			expect(existsSync(log("play-0.pid"))).toBe(false);
+			reader.restart();
+			reader.bus.emit(readEvent, { v: 1, id: "P1.R1", text: "Hola." });
+			await reader.settled();
+			expect(texts()).toEqual(["Hola."]);
+		});
+
+		it("a reading started by an event is stopped by Esc, /read-stop, a newer /read or event, and the session's end", async () => {
+			installVoice("sleep 30;");
+			const reader = load();
+			const pid = (n: number) => Number(read(`play-${n}.pid`));
+			reader.bus.emit(readEvent, { v: 1, id: "P1.R1", text: "Uno." });
+			await waitFor(() => existsSync(log("play-0.pid")));
+			expect(reader.key("\x1b")).toEqual({ consume: true });
+			await waitFor(() => !alive(pid(0)));
+			reader.bus.emit(readEvent, { v: 1, id: "P1.R1.Q1", text: "Dos." });
+			await waitFor(() => existsSync(log("play-1.pid")));
+			await reader.run("read-stop");
+			await waitFor(() => !alive(pid(1)));
+			reader.bus.emit(readEvent, { v: 1, id: "P1.R1.Q2", text: "Tres." });
+			await waitFor(() => existsSync(log("play-2.pid")));
+			await reader.run("read");
+			await waitFor(() => !alive(pid(2)));
+			await waitFor(() => existsSync(log("play-3.pid")));
+			reader.bus.emit(readEvent, { v: 1, id: "P1.R1.Q3", text: "Cuatro." });
+			await waitFor(() => !alive(pid(3)));
+			await waitFor(() => existsSync(log("play-4.pid")));
+			expect(alive(pid(4))).toBe(true);
+			reader.shutdown();
+			await waitFor(() => !alive(pid(4)));
+			expect(reader.notes).toEqual([["Reading stopped.", "info"]]);
+			expect(reader.statuses).toEqual([
+				"Reading P1.R1 on local · Esc stops",
+				undefined,
+				"Reading P1.R1.Q1 on local · Esc stops",
+				undefined,
+				"Reading P1.R1.Q2 on local · Esc stops",
+				undefined,
+				"Reading P2.R1 on local · Esc stops",
+				undefined,
+				"Reading P1.R1.Q3 on local · Esc stops",
+				undefined,
+			]);
+		});
+
+		it("keeps one handler per channel across session restarts, and none after session_shutdown", async () => {
+			installVoice();
+			const reader = load();
+			reader.restart();
+			reader.restart();
+			expect([reader.bus.listeners(ping), reader.bus.listeners(readEvent)]).toEqual([1, 1]);
+			reader.shutdown();
+			expect([reader.bus.listeners(ping), reader.bus.listeners(readEvent)]).toEqual([0, 0]);
+			reader.restart();
+			expect([reader.bus.listeners(ping), reader.bus.listeners(readEvent)]).toEqual([1, 1]);
+			const seen = listen(reader);
+			reader.bus.emit(ping, { v: 1 });
+			expect(seen.ready).toBe(1);
+			reader.bus.emit(readEvent, { v: 1, id: "P1.R1", text: "Hola." });
+			await reader.settled();
+			await pause();
+			expect(texts()).toEqual(["Hola."]);
+			expect(existsSync(log("play-1.pid"))).toBe(false);
+			expect(reader.statuses).toEqual(["Reading P1.R1 on local · Esc stops", undefined]);
 		});
 	});
 

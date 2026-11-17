@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Event contract v1 for other extensions over `pi.events`, for `pi-reply-thread`'s Alt+R `s` key:
+  `reply-reader:ping` `{ v: 1 }` is answered at once with `reply-reader:ready` `{ v: 1 }` (also sent at every
+  session start), and `reply-reader:read` `{ v: 1, id, text }` reads `text` aloud like `/read`, naming `id`
+  in the footer. Invalid payloads are ignored.
 - `/read-auto on|questions|off` (bare toggles): read each new reply, or only its "Needs your decision"
   section, when the agent's turn ends; off at every session start.
 - `/read <file|ID|empty>#<section>`: read only that section; add `rest` to read on to the end.

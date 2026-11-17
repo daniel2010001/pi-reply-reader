@@ -121,6 +121,35 @@ the reply's closing **Needs your decision** section (nothing when a reply has no
 session. Replies from before you turned it on are never read. Auto-readings use the same output, voice,
 speed, footer and stop keys (Esc, `/read-stop`) as `/read`, and still follow one reading per machine.
 
+### pi-reply-thread
+
+Once [`pi-reply-thread`](https://github.com/daniel2010001/pi-reply-thread) supports it, `s` in its Alt+R view
+reads the selected reply (Replies tab and the reply viewer) or only the selected question (Pending and
+Answered tabs). The key and its hint appear only when this reader is loaded. A reading started there is the
+same as `/read`: same cleanup, language, output question on first use, voice, speed, footer (naming the
+reply or question ID), Esc, `/read-stop` and one reading per machine. Neither package depends on the other.
+
+#### Event contract for other extensions
+
+Any extension can use the reader over Pi's shared event bus (`pi.events`). Contract v1:
+
+| Channel | Payload | Meaning |
+|---|---|---|
+| `reply-reader:ping` | `{ v: 1 }` | Is a reader there? Answered with `reply-reader:ready` synchronously, before your `emit` returns. |
+| `reply-reader:ready` | `{ v: 1 }` | The reader is there. Also sent at every session start. |
+| `reply-reader:read` | `{ v: 1, id: string, text: string }` | Read `text` (Markdown) aloud like `/read`, naming `id` in the footer and in `<id> has nothing to read.` |
+
+```ts
+let readerReady = false;
+pi.events.on("reply-reader:ready", () => (readerReady = true));
+pi.events.emit("reply-reader:ping", { v: 1 }); // readerReady is already set here when the reader is loaded
+if (readerReady) pi.events.emit("reply-reader:read", { v: 1, id: "P12.R1", text: "## Hello\n\nRead **this**." });
+```
+
+A payload that is not an object with `v: 1` and non-empty string `id` and `text` is ignored silently. There
+is no reply to a read request: messages such as a cancelled download are shown by the reader, in the session.
+The reader listens only while a session is running; after the session ends it ignores both requests.
+
 ### Standalone command
 
 `reply-reader <file.md>` reads a Markdown file aloud from a terminal, without Pi, with the same cleanup,
