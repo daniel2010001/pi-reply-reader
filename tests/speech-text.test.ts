@@ -301,8 +301,8 @@ describe("speechText", () => {
 	});
 
 	it("(h1) keeps IP addresses as they are", () => {
-		expect(speechText("El hs es 192.168.1.22 y el desktop `tcp:10.42.0.145:4713`, no 1.2.3 ni 300.1.1.1.")).toBe(
-			"El hs es 192.168.1.22 y el desktop tcp:10.42.0.145:4713, no 1 punto 2 punto 3 ni 300 punto 1 punto 1 punto 1.",
+		expect(speechText("El hs es 192.168.1.50 y el desktop `tcp:10.0.0.5:4713`, no 1.2.3 ni 300.1.1.1.")).toBe(
+			"El hs es 192.168.1.50 y el desktop tcp:10.0.0.5:4713, no 1 punto 2 punto 3 ni 300 punto 1 punto 1 punto 1.",
 		);
 	});
 

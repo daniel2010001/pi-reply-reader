@@ -808,15 +808,15 @@ describe("reply-reader extension", () => {
 
 	it("asks where to sound on the first /read only, and uses that output's PULSE_SERVER", async () => {
 		installVoice();
-		configureOutputs({ desktop: "tcp:192.168.1.22:4713" });
-		const reader = load({ select: "desktop (tcp:192.168.1.22:4713)" });
+		configureOutputs({ desktop: "tcp:192.168.1.50:4713" });
+		const reader = load({ select: "desktop (tcp:192.168.1.50:4713)" });
 		await reader.run("read");
 		await reader.settled();
 		await reader.run("read");
 		await waitFor(() => existsSync(log("play-1.server")));
-		expect(reader.selects).toEqual([["Where should readings sound?", ["local (hs-node)", "desktop (tcp:192.168.1.22:4713)"]]]);
-		expect(read("play-0.server").trim()).toBe("tcp:192.168.1.22:4713");
-		expect(read("play-1.server").trim()).toBe("tcp:192.168.1.22:4713");
+		expect(reader.selects).toEqual([["Where should readings sound?", ["local (hs-node)", "desktop (tcp:192.168.1.50:4713)"]]]);
+		expect(read("play-0.server").trim()).toBe("tcp:192.168.1.50:4713");
+		expect(read("play-1.server").trim()).toBe("tcp:192.168.1.50:4713");
 	});
 
 	it("cancels the reading when no output is chosen", async () => {
@@ -870,7 +870,7 @@ describe("reply-reader extension", () => {
 	it("warns once per session on /read about a broken outputs.json, even when only local is left", async () => {
 		installVoice();
 		mkdirSync(join(root, "config", "pi-reply-reader"), { recursive: true });
-		writeFileSync(join(root, "config", "pi-reply-reader", "outputs.json"), '{ "desktop": "tcp:192.168.1.22:4713", }');
+		writeFileSync(join(root, "config", "pi-reply-reader", "outputs.json"), '{ "desktop": "tcp:192.168.1.50:4713", }');
 		const reader = load();
 		await reader.run("read");
 		await reader.settled();

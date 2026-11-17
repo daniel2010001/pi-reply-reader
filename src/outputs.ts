@@ -10,7 +10,7 @@ export interface Output {
 }
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
-const VALUE_HINT = 'the value must be a PULSE_SERVER string such as "tcp:192.168.1.22:4713"';
+const VALUE_HINT = 'the value must be a PULSE_SERVER string such as "tcp:192.168.1.50:4713"';
 
 /**
  * `local` plus the outputs in `$XDG_CONFIG_HOME/pi-reply-reader/outputs.json`, an object mapping each

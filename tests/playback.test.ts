@@ -11,7 +11,7 @@ import { SPEAKERS, type Voice } from "../src/voice.ts";
 let root: string;
 let env: NodeJS.ProcessEnv;
 const local: Output = { name: "local", label: "local (hs-node)" };
-const desktop: Output = { name: "desktop", label: "desktop (tcp:192.168.1.22:4713)", pulseServer: "tcp:192.168.1.22:4713" };
+const desktop: Output = { name: "desktop", label: "desktop (tcp:192.168.1.50:4713)", pulseServer: "tcp:192.168.1.50:4713" };
 const male = SPEAKERS.male;
 
 beforeEach(() => {
@@ -212,7 +212,7 @@ describe("startReading with Supertonic 3", () => {
 		await startReading({ voice, speaker: male, text: "a", output: local, env, loadSherpa }).done;
 		expect(read("paplay.server").trim()).toBe("unset");
 		await startReading({ voice, speaker: male, text: "a", output: desktop, env, loadSherpa }).done;
-		expect(read("paplay.server").trim()).toBe("tcp:192.168.1.22:4713");
+		expect(read("paplay.server").trim()).toBe("tcp:192.168.1.50:4713");
 	});
 
 	it("(T26) synthesizes the next fragment while the current one is still waiting to play, without waiting for the player to drain", async () => {

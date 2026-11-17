@@ -26,11 +26,11 @@ describe("loadOutputs", () => {
 	});
 
 	it("adds each configured output after local, in file order", () => {
-		configure('{ "desktop": "tcp:192.168.1.22:4713", "laptop": "tcp:192.168.1.30" }');
+		configure('{ "desktop": "tcp:192.168.1.50:4713", "laptop": "tcp:192.168.1.30" }');
 		expect(loadOutputs(env, "hs-node")).toEqual({
 			outputs: [
 				local,
-				{ name: "desktop", label: "desktop (tcp:192.168.1.22:4713)", pulseServer: "tcp:192.168.1.22:4713" },
+				{ name: "desktop", label: "desktop (tcp:192.168.1.50:4713)", pulseServer: "tcp:192.168.1.50:4713" },
 				{ name: "laptop", label: "laptop (tcp:192.168.1.30)", pulseServer: "tcp:192.168.1.30" },
 			],
 			problems: [],
@@ -69,8 +69,8 @@ describe("loadOutputs", () => {
 			problems: [
 				`Ignored output "local" in ${file()}: that name is built in.`,
 				`Ignored output "bad name" in ${file()}: names use letters, digits and "-".`,
-				`Ignored output "empty" in ${file()}: the value must be a PULSE_SERVER string such as "tcp:192.168.1.22:4713".`,
-				`Ignored output "number" in ${file()}: the value must be a PULSE_SERVER string such as "tcp:192.168.1.22:4713".`,
+				`Ignored output "empty" in ${file()}: the value must be a PULSE_SERVER string such as "tcp:192.168.1.50:4713".`,
+				`Ignored output "number" in ${file()}: the value must be a PULSE_SERVER string such as "tcp:192.168.1.50:4713".`,
 			],
 		});
 	});

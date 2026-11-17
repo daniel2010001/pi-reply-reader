@@ -288,7 +288,7 @@ encryption. The unit is in [`examples/reply-reader-desktop-audio.service`](examp
 (it ships with the package, under `node_modules/pi-reply-reader/examples/` once installed).
 
 1. On the server, edit the copy for your desktop: `AUDIO_HOST` (the desktop's address), `AUDIO_UID` (your
-   user ID on the desktop, `id -u`) and the user in `danielblc@${AUDIO_HOST}`. The server must reach the
+   user ID on the desktop, `id -u`) and the user in `you@${AUDIO_HOST}`. The server must reach the
    desktop with `ssh` and a key, without a password prompt (`BatchMode=yes`).
 2. Install it (on the machine that runs Pi):
 
