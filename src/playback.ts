@@ -36,8 +36,9 @@ const SEED = 42;
 /**
  * Speaks `text` with `speaker` at `speed` (Supertonic's voice speed, 1.1 by default; our pauses do not
  * change with it) on `output`. Supertonic synthesizes one sentence at a time, so the first
- * audio comes after one sentence instead of the whole reply; each sentence loses its own leading and
- * trailing silence and is followed by our pause for its boundary, then goes to `paplay` as raw 16-bit
+ * audio comes after one sentence instead of the whole reply, and the next sentence is synthesized while the
+ * current one plays (at most LOOKAHEAD wait for the player); each sentence loses its own leading and
+ * trailing silence and is followed right away by our pause for its boundary, then goes to `paplay` as raw 16-bit
  * mono PCM, on this machine's default sink or, for a named output, on its PULSE_SERVER. Nothing here
  * throws: every failure ends in `done`, and `stop()` ends the player and settles `done` quietly.
  */
@@ -82,10 +83,30 @@ export function startReading(options: {
 			() => {},
 		);
 		gone.then(() => (playerGone = true));
+		// A player that exited takes nothing more, even before its pipes close.
+		child.once("exit", () => (playerGone = true));
 
-		// The pause owed to the last fragment played; none before the first, and the last one's is never written.
-		let pause: number | undefined;
-		for (const fragment of fragments(text)) {
+		// Fragments handed to stdin that the pipe has not taken yet; each write's callback fires once it has.
+		let queued = 0;
+		let taken: (() => void) | undefined;
+		const send = (audio: Float32Array): void => {
+			queued++;
+			child.stdin?.write(pcm16(audio, speaker.gain), (error) => {
+				// A write that fails means the player closed its input: it will take nothing more.
+				if (error) playerGone = true;
+				queued--;
+				taken?.();
+			});
+		};
+
+		const list = fragments(text);
+		// Samples of pause already written after the last audible fragment; undefined before the first one.
+		let paused: number | undefined;
+		for (const [index, fragment] of list.entries()) {
+			// Synthesize ahead, but stop while LOOKAHEAD fragments still wait for the player to take them.
+			while (queued >= LOOKAHEAD && !stopped && !playerGone) {
+				await Promise.race([new Promise<void>((resolve) => (taken = resolve)), gone]);
+			}
 			if (stopped || playerGone) break;
 			let samples: Float32Array;
 			try {
@@ -100,18 +121,19 @@ export function startReading(options: {
 			}
 			if (stopped || playerGone) break;
 			const speech = trimSilence(samples, speaker.gain, tts.sampleRate);
-			const after = Math.round(PAUSES[fragment.boundary] * tts.sampleRate);
-			// A silent fragment is dropped, but a stronger boundary it ends still counts.
+			// The last fragment's pause is never written.
+			const after = index === list.length - 1 ? 0 : Math.round(PAUSES[fragment.boundary] * tts.sampleRate);
+			// A silent fragment is dropped, but a stronger boundary it ends still counts: top up the pause written.
 			if (!speech) {
-				if (pause !== undefined) pause = Math.max(pause, after);
+				if (paused !== undefined && after > paused) {
+					send(new Float32Array(after - paused));
+					paused = after;
+				}
 				continue;
 			}
-			const audio = pause === undefined ? speech : concat(new Float32Array(pause), speech);
-			pause = after;
-			// Wait until the player takes this sentence, so a slow or stuck player does not buffer the whole reply.
-			if (!child.stdin?.write(pcm16(audio, speaker.gain))) {
-				await Promise.race([new Promise((resolve) => child.stdin?.once("drain", resolve)), gone]);
-			}
+			// Each pause goes right after its own fragment, so the next synthesis overlaps it too.
+			send(after ? concat(speech, new Float32Array(after)) : speech);
+			paused = after;
 		}
 		child.stdin?.end();
 		await playback;
@@ -148,6 +170,14 @@ export function startReading(options: {
 		});
 	}
 }
+
+/**
+ * Synthesized fragments that may wait for the player at once (T26): the one playing and the next one, ready.
+ * Synthesis is one call at a time and, under load, slower than real time (L70), so a deeper queue would rarely
+ * fill; when it is faster, one ready fragment already hides the next synthesis. Two keeps a long reply out of
+ * memory (a fragment is about 0.3-1 MB of PCM) and a stuck player stops synthesis after two fragments.
+ */
+const LOOKAHEAD = 2;
 
 type Boundary = "sentence" | "line" | "paragraph";
 

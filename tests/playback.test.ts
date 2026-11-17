@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -77,6 +78,9 @@ const tone = (n: number, level = 0.125) => new Array<number>(n).fill(level);
 const zeros = (n: number) => tone(n, 0);
 /** What `level` becomes in the PCM stream for `speaker`, below the knee. */
 const level16 = (level: number, gain = SPEAKERS.female.gain) => Math.round(level * gain * 32767);
+
+/** What the long reading wrote before T26 (pause in front of the next fragment, synthesis after drain). */
+const PREVIOUS_LONG_PCM = { bytes: 590058, sha256: "6a4337fb7873f125e37770c1030da17059d9470551e004d6a826300158fd2e6b" };
 
 const alive = (pid: number) => {
 	try {
@@ -211,17 +215,174 @@ describe("startReading with Supertonic 3", () => {
 		expect(read("paplay.server").trim()).toBe("tcp:192.168.1.22:4713");
 	});
 
-	it("waits for the player to take the audio before synthesizing the next segment", async () => {
+	it("(T26) synthesizes the next fragment while the current one is still waiting to play, without waiting for the player to drain", async () => {
 		stuckPaplay();
 		const seen: SherpaRequest[] = [];
 		const loadSherpa = fakeSherpa(() => new Float32Array(tone(500_000)), seen);
-		const reading = startReading({ voice, speaker: male, text: "Uno. Dos. Tres. Cuatro.", output: local, env, loadSherpa });
-		await waitFor(() => existsSync(log("paplay.pid")) && seen.length > 0);
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		expect(seen).toHaveLength(1);
-		reading.stop();
+		const reading = startReading({ voice, speaker: male, text: "Uno. Dos. Tres.", output: local, env, loadSherpa });
+		try {
+			// The player has not read a single byte of "Uno.", yet "Dos." is already being synthesized.
+			await waitFor(() => seen.length >= 2, 2000);
+			expect(seen.map((request) => request.text)).toEqual(["Uno.", "Dos."]);
+		} finally {
+			reading.stop();
+		}
 		await expect(reading.done).resolves.toBeUndefined();
 		await waitFor(() => !alive(Number(read("paplay.pid"))));
+	});
+
+	it("(T26) keeps at most 2 synthesized fragments waiting for a player that does not take them", async () => {
+		stuckPaplay();
+		const seen: SherpaRequest[] = [];
+		const loadSherpa = fakeSherpa(() => new Float32Array(tone(500_000)), seen);
+		const text = "Uno. Dos. Tres. Cuatro. Cinco. Seis.";
+		const reading = startReading({ voice, speaker: male, text, output: local, env, loadSherpa });
+		try {
+			await waitFor(() => existsSync(log("paplay.pid")) && seen.length >= 2, 2000);
+			await new Promise((resolve) => setTimeout(resolve, 300));
+			expect(seen.map((request) => request.text)).toEqual(["Uno.", "Dos."]);
+		} finally {
+			reading.stop();
+		}
+		await expect(reading.done).resolves.toBeUndefined();
+		await waitFor(() => !alive(Number(read("paplay.pid"))));
+		expect(seen).toHaveLength(2);
+	});
+
+	it("(T26) writes each pause right after its own fragment, before the next fragment is synthesized", async () => {
+		fakePaplay();
+		const arrived: number[] = [];
+		const loadSherpa = async (): Promise<SherpaTts> => ({
+			sampleRate: 44100,
+			async generateAsync(request) {
+				if (request.text === "Dos.") {
+					// "Uno." (441 samples) and its 0.35 s pause must reach the player while "Dos." is synthesized.
+					const size = () => (existsSync(log("paplay.audio")) ? readFileSync(log("paplay.audio")).length : 0);
+					await waitFor(() => size() >= (441 + 15435) * 2, 1000).catch(() => {});
+					arrived.push(size() / 2);
+				}
+				return { samples: new Float32Array(tone(441)) };
+			},
+		});
+		await startReading({ voice, speaker: SPEAKERS.female, text: "Uno. Dos.", output: local, env, loadSherpa }).done;
+		expect(arrived).toEqual([441 + 15435]);
+		const f = new Array(441).fill(level16(0.125));
+		expect(pcm("paplay.audio")).toEqual([...f, ...zeros(15435), ...f]);
+	});
+
+	it("(T26) writes the same PCM as before: samples, pause lengths and order, with silent fragments and a stronger boundary", async () => {
+		fakePaplay();
+		const a = level16(0.125);
+		const b = level16(-0.0625);
+		const c = level16(0.03125);
+		const sounds: Record<string, number[]> = {
+			"Cero.": zeros(500),
+			"Uno.": [...tone(441), ...tone(100, -0.0625)],
+			"Dos.": tone(4410, 0.001),
+			"Tres.": tone(300, 0.03125),
+			"Cuatro.": [...tone(200, -0.0625), ...zeros(50), ...tone(200)],
+			"Cinco.": tone(441, 0.03125),
+		};
+		const loadSherpa = fakeSherpa((text) => new Float32Array(sounds[text]));
+		// Cero is silent and first (no pause before Uno); Dos is silent and ends a paragraph, so Uno's pause is 0.75 s.
+		const text = "Cero.\nUno. Dos.\n\nTres. Cuatro.\nCinco.";
+		await startReading({ voice, speaker: SPEAKERS.female, text, output: local, env, loadSherpa }).done;
+		const fill = (n: number, v: number) => new Array<number>(n).fill(v);
+		expect(pcm("paplay.audio")).toEqual([
+			...fill(441, a),
+			...fill(100, b),
+			...zeros(33075),
+			...fill(300, c),
+			...zeros(15435),
+			...fill(200, b),
+			...zeros(50),
+			...fill(200, a),
+			...zeros(22050),
+			...fill(441, c),
+		]);
+	});
+
+	// The one byte difference T26 accepts: the pause is written before the next fragment is synthesized, so it is
+	// already sent when every fragment after it turns out silent (before T26 the reading ended with "Uno.").
+	it("(T26) keeps the pause already written when only silent fragments follow", async () => {
+		fakePaplay();
+		const sounds: Record<string, number[]> = { "Uno.": tone(441), "Dos.": zeros(500) };
+		const loadSherpa = fakeSherpa((text) => new Float32Array(sounds[text]));
+		await startReading({ voice, speaker: SPEAKERS.female, text: "Uno. Dos.", output: local, env, loadSherpa }).done;
+		expect(pcm("paplay.audio")).toEqual([...new Array(441).fill(level16(0.125)), ...zeros(15435)]);
+	});
+
+	it("(T26) writes the same bytes as before for a long reading with loud peaks (sha256 of the previous output)", async () => {
+		fakePaplay();
+		const loadSherpa = fakeSherpa((text) => {
+			// Deterministic speech-like samples per fragment: silence, a varying wave with peaks over the knee, silence.
+			let seed = [...text].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 7);
+			const body = Array.from({ length: 3000 + (seed % 2000) }, (_, i) => {
+				seed = (seed * 1103515245 + 12345) >>> 0;
+				return Math.sin(i / 7) * 0.4 + ((seed / 2 ** 32) - 0.5) * 0.8;
+			});
+			return new Float32Array(text.includes("silencio") ? zeros(2000) : [...zeros(3000), ...body, ...zeros(3000)]);
+		});
+		const text = speechText(
+			"## Estado\n\nPrimera frase. Segunda frase, con coma; y más.\n- Uno\n- Dos: silencio.\n\n**Nota**\nFin del texto? Sí! Tres… cuatro.\n\nÚltima.",
+		);
+		await startReading({ voice, speaker: male, text, output: local, env, loadSherpa }).done;
+		const audio = readFileSync(log("paplay.audio"));
+		expect({ bytes: audio.length, sha256: createHash("sha256").update(audio).digest("hex") }).toEqual(PREVIOUS_LONG_PCM);
+	});
+
+	it("(T26) stops during lookahead: no write after stop, no further synthesis, the player ends and done settles quietly", async () => {
+		// The player ignores SIGTERM and keeps recording, so anything written after stop() would show up.
+		fakePaplay(`trap '' TERM; echo > "${log("paplay.ready")}";`);
+		const seen: string[] = [];
+		const progress: boolean[] = [];
+		let reading: ReturnType<typeof startReading>;
+		const loadSherpa = async (): Promise<SherpaTts> => ({
+			sampleRate: 44100,
+			async generateAsync(request) {
+				seen.push(request.text);
+				if (request.text === "Dos.") {
+					await waitFor(() => existsSync(log("paplay.ready")));
+					reading.stop();
+					progress.push(request.onProgress({ samples: new Float32Array([0]), progress: 0.5 }));
+				}
+				return { samples: new Float32Array(tone(441)) };
+			},
+		});
+		reading = startReading({ voice, speaker: SPEAKERS.female, text: "Uno. Dos. Tres.", output: local, env, loadSherpa });
+		await expect(reading.done).resolves.toBeUndefined();
+		expect(seen).toEqual(["Uno.", "Dos."]);
+		expect(progress).toEqual([false]);
+		await waitFor(() => existsSync(log("paplay.pid")) && !alive(Number(read("paplay.pid"))));
+		expect(pcm("paplay.audio")).toEqual([...new Array(441).fill(level16(0.125)), ...zeros(15435)]);
+	});
+
+	it("(T26) a player that dies during lookahead ends the reading with its error and stops synthesis via onProgress", async () => {
+		stuckPaplay();
+		const seen: string[] = [];
+		const progress: boolean[] = [];
+		const loadSherpa = async (): Promise<SherpaTts> => ({
+			sampleRate: 44100,
+			async generateAsync(request) {
+				seen.push(request.text);
+				if (request.text === "Dos.") {
+					const pid = Number(read("paplay.pid"));
+					process.kill(pid);
+					await waitFor(() => !alive(pid));
+					progress.push(request.onProgress({ samples: new Float32Array([0]), progress: 0.5 }));
+				}
+				return { samples: new Float32Array(tone(500_000)) };
+			},
+		});
+		const reading = startReading({ voice, speaker: male, text: "Uno. Dos. Tres. Cuatro.", output: local, env, loadSherpa });
+		try {
+			await waitFor(() => existsSync(log("paplay.pid")) && seen.length >= 2, 2000);
+		} finally {
+			if (seen.length < 2) reading.stop();
+		}
+		await expect(reading.done).rejects.toThrow('Playback on "local" failed: killed by SIGTERM');
+		expect(seen).toEqual(["Uno.", "Dos."]);
+		expect(progress).toEqual([false]);
 	});
 
 	it("stops between segments, kills the player and settles quietly", async () => {
