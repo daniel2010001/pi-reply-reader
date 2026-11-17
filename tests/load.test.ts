@@ -97,7 +97,9 @@ const branch = [user("hola"), assistant("**Primera** respuesta."), user("otra"),
 type Handler = (...args: never[]) => unknown;
 
 /** Loads the extension into a recording Pi and returns a driver for its commands, events and UI. */
-function load(answers: { select?: string; confirm?: boolean } = {}) {
+function load(answers: { select?: string; confirm?: boolean } = {}, start: unknown[] = branch) {
+	/** The session branch; a test appends to it to simulate a new turn. */
+	const entries = [...start];
 	const commands = new Map<string, { handler: Handler; getArgumentCompletions?: Handler }>();
 	const events = new Map<string, Handler>();
 	const pi = {
@@ -115,7 +117,7 @@ function load(answers: { select?: string; confirm?: boolean } = {}) {
 		hasUI: true,
 		mode: "tui",
 		cwd: join(root, "work"),
-		sessionManager: { getBranch: () => branch },
+		sessionManager: { getBranch: () => entries },
 		ui: {
 			notify: (message: string, type?: string) => notes.push([message, type]),
 			select: async (title: string, options: string[]) => (selects.push([title, options]), answers.select),
@@ -136,6 +138,13 @@ function load(answers: { select?: string; confirm?: boolean } = {}) {
 		key: (data: string) => input?.(data),
 		shutdown: () => (events.get("session_shutdown") as (event: unknown, ctx: unknown) => void)({}, ctx),
 		restart: () => (events.get("session_start") as (event: unknown, ctx: unknown) => void)({ reason: "new" }, ctx),
+		entries,
+		/** One agent run: it starts, adds `added` to the branch, and settles. */
+		turn: (added: unknown[], aborted = false) => {
+			(events.get("agent_start") as ((event: unknown, ctx: unknown) => void) | undefined)?.({ type: "agent_start" }, ctx);
+			entries.push(...added);
+			(events.get("agent_settled") as ((event: unknown, ctx: unknown) => void) | undefined)?.({ type: "agent_settled", aborted }, ctx);
+		},
 		/** Waits until the reading in progress clears its status line. */
 		settled: () => waitFor(() => statuses.length > 0 && statuses.at(-1) === undefined),
 	};
@@ -145,7 +154,327 @@ describe("reply-reader extension", () => {
 	it("registers /read and /read-output by default", () => {
 		const names: string[] = [];
 		replyReader({ registerCommand: (name: string) => names.push(name), on: () => {} } as never);
-		expect(names).toEqual(["read", "read-stop", "read-output", "read-voice", "read-speed"]);
+		expect(names).toEqual(["read", "read-stop", "read-output", "read-voice", "read-speed", "read-auto"]);
+	});
+
+	describe("/read-auto (S8)", () => {
+		const texts = () => synthesized.map((request) => request.text);
+		/** Lets an auto-reading that would start get as far as the engine. */
+		const pause = () => new Promise((resolve) => setTimeout(resolve, 150));
+		const questions = "Hecho.\n\n## Needs your decision\n\n1. ¿Seguimos?\n2. ¿Publicamos?";
+
+		it("/read-auto on, questions and off say so, each as an info", async () => {
+			const reader = load();
+			await reader.run("read-auto", "on");
+			await reader.run("read-auto", "questions");
+			await reader.run("read-auto", "off");
+			expect(reader.notes).toEqual([
+				["Auto-read on: full replies.", "info"],
+				["Auto-read on: questions only.", "info"],
+				["Auto-read off.", "info"],
+			]);
+		});
+
+		it("/read-auto with anything else warns and changes nothing, whether off or on", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto", "full");
+			reader.turn([user("a"), assistant("Uno.")]);
+			await pause();
+			expect(synthesized).toEqual([]);
+			await reader.run("read-auto", "questions");
+			await reader.run("read-auto", "yes please");
+			reader.turn([user("b"), assistant(questions)]);
+			await reader.settled();
+			expect(reader.notes).toEqual([
+				["Use /read-auto on, questions or off.", "warning"],
+				["Auto-read on: questions only.", "info"],
+				["Use /read-auto on, questions or off.", "warning"],
+			]);
+			expect(texts()).toEqual(["Decisiones pendientes.", "1: ¿Seguimos?", "2: ¿Publicamos?"]);
+		});
+
+		it("bare /read-auto toggles: off to on in full, and any on to off", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto");
+			reader.turn([user("a"), assistant(questions)]);
+			await reader.settled();
+			expect(texts()).toEqual(["Hecho.", "Decisiones pendientes.", "1: ¿Seguimos?", "2: ¿Publicamos?"]);
+			await reader.run("read-auto");
+			await reader.run("read-auto", "questions");
+			await reader.run("read-auto");
+			reader.turn([user("b"), assistant("Dos.")]);
+			await pause();
+			expect(reader.notes).toEqual([
+				["Auto-read on: full replies.", "info"],
+				["Auto-read off.", "info"],
+				["Auto-read on: questions only.", "info"],
+				["Auto-read off.", "info"],
+			]);
+			expect(synthesized).toHaveLength(4);
+		});
+
+		it("is off by default and again at each session start", async () => {
+			installVoice();
+			const reader = load();
+			reader.turn([user("a"), assistant("Uno.")]);
+			await pause();
+			await reader.run("read-auto", "on");
+			reader.restart();
+			reader.turn([user("b"), assistant("Dos.")]);
+			await pause();
+			expect(synthesized).toEqual([]);
+			expect(reader.statuses).toEqual([]);
+			expect(existsSync(log("play-0.pid"))).toBe(false);
+		});
+
+		it("on: a turn that ends with a reply reads it in full, like /read, with its footer", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto", "on");
+			reader.turn([user("tercera"), assistant("## Tercera\n\nHecho **ya**.")]);
+			await reader.settled();
+			expect(texts()).toEqual(["Tercera.", "Hecho ya."]);
+			expect(reader.statuses).toEqual(["Reading P3.R1 on local · Esc stops", undefined]);
+			expect(existsSync(log("play-0.audio"))).toBe(true);
+		});
+
+		it("questions: reads only the closing Needs your decision section, heading or bold-only line", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto", "questions");
+			reader.turn([user("a"), assistant(questions)]);
+			await reader.settled();
+			reader.turn([user("b"), assistant("Listo.\n\n**Needs your decision:**\n- ¿A o B?")]);
+			await waitFor(() => reader.statuses.filter((status) => status === undefined).length === 2);
+			expect(texts()).toEqual(["Decisiones pendientes.", "1: ¿Seguimos?", "2: ¿Publicamos?", "Decisiones pendientes.", "¿A o B?"]);
+			expect(reader.statuses.filter(Boolean)).toEqual(["Reading P3.R1 on local · Esc stops", "Reading P4.R1 on local · Esc stops"]);
+		});
+
+		it("questions: a reply without that section reads nothing and says nothing", async () => {
+			installVoice();
+			const reader = load({ confirm: true });
+			await reader.run("read-auto", "questions");
+			reader.turn([user("a"), assistant("## Hecho\n\nTodo listo.")]);
+			await pause();
+			expect(synthesized).toEqual([]);
+			expect(reader.notes).toEqual([["Auto-read on: questions only.", "info"]]);
+			expect(reader.statuses).toEqual([]);
+			expect(reader.confirms).toEqual([]);
+			expect(existsSync(log("play-0.pid"))).toBe(false);
+		});
+
+		it("never reads earlier replies: not on switching on, nor after a turn with no new reply or an aborted one", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto", "on");
+			await pause();
+			reader.turn([user("a")]);
+			await pause();
+			reader.turn([user("b"), { ...assistant("A medias"), message: { role: "assistant", stopReason: "aborted", content: [{ type: "text", text: "A medias" }] } }], true);
+			await pause();
+			expect(synthesized).toEqual([]);
+			expect(reader.statuses).toEqual([]);
+			expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
+		});
+
+		it("reuses /read's output question on first use, voice, speed, and the download confirm", async () => {
+			script("paplay", "cat > /dev/null");
+			const declined = load({ confirm: false });
+			await declined.run("read-auto", "on");
+			declined.turn([user("a"), assistant("Uno.")]);
+			await waitFor(() => declined.notes.length === 2);
+			expect(declined.confirms).toHaveLength(1);
+			expect(declined.notes[1]).toEqual(["Reading cancelled: the voice was not downloaded.", "info"]);
+
+			installVoice();
+			configureOutputs({ desktop: "tcp:x" });
+			const reader = load({ select: "desktop (tcp:x)" });
+			await reader.run("read-auto", "on");
+			await reader.run("read-voice", "female");
+			await reader.run("read-speed", "1.3");
+			reader.turn([user("a"), assistant("Uno.")]);
+			await reader.settled();
+			reader.turn([user("b"), assistant("Dos.")]);
+			await waitFor(() => reader.statuses.filter((status) => status === undefined).length === 2);
+			expect(reader.selects).toEqual([["Where should readings sound?", ["local (hs-node)", "desktop (tcp:x)"]]]);
+			expect(read("play-0.server").trim()).toBe("tcp:x");
+			expect(read("play-1.server").trim()).toBe("tcp:x");
+			expect(synthesized.map((request) => [request.text, request.generationConfig.sid, request.generationConfig.speed])).toEqual([
+				["Uno.", 0, 1.3],
+				["Dos.", 0, 1.3],
+			]);
+			expect(reader.statuses.filter(Boolean)).toEqual(["Reading P3.R1 on desktop · Esc stops", "Reading P4.R1 on desktop · Esc stops"]);
+		});
+
+		it("an auto-reading stops the one playing, and Esc and /read-stop stop it", async () => {
+			installVoice("sleep 30;");
+			const reader = load();
+			await reader.run("read-auto", "on");
+			await reader.run("read");
+			await waitFor(() => existsSync(log("play-0.pid")));
+			reader.turn([user("a"), assistant("Uno.")]);
+			await waitFor(() => !alive(Number(read("play-0.pid"))));
+			await waitFor(() => existsSync(log("play-1.pid")));
+			expect(reader.key("\x1b")).toEqual({ consume: true });
+			await waitFor(() => !alive(Number(read("play-1.pid"))));
+			reader.turn([user("b"), assistant("Dos.")]);
+			await waitFor(() => existsSync(log("play-2.pid")));
+			await reader.run("read-stop");
+			await waitFor(() => !alive(Number(read("play-2.pid"))));
+			expect(reader.notes).toEqual([
+				["Auto-read on: full replies.", "info"],
+				["Reading stopped.", "info"],
+			]);
+			expect(reader.statuses).toEqual([
+				"Reading P2.R1 on local · Esc stops",
+				undefined,
+				"Reading P3.R1 on local · Esc stops",
+				undefined,
+				"Reading P4.R1 on local · Esc stops",
+				undefined,
+			]);
+		});
+
+		it("/read-auto completes on, questions and off", () => {
+			const reader = load();
+			const complete = reader.commands.get("read-auto")!.getArgumentCompletions as (prefix: string) => { value: string }[];
+			expect(complete("").map((item) => item.value)).toEqual(["on", "questions", "off"]);
+			expect(complete("o").map((item) => item.value)).toEqual(["on", "off"]);
+		});
+	});
+
+	describe("/read <target>#<section> (S9)", () => {
+		const texts = () => synthesized.map((request) => request.text);
+		const guide = "Intro.\n\n## 1. Instalación\n\nPaso uno.\n\n## Uso del lector\n\nPaso dos.";
+		const withGuide = [user("hola"), assistant(guide), user("otra"), assistant("## Segunda\n\nFin.\n\n## Otra cosa\n\nMás.")];
+
+		it("/read FILE.md#section reads only that section of the file, with its subsections, and names the file", async () => {
+			installVoice();
+			mkdirSync(join(root, "work"));
+			writeFileSync(join(root, "work", "notes.md"), "# Notas\n\n" + guide.replace("Paso uno.", "Paso uno.\n\n### Detalle\n\nSub."));
+			const reader = load();
+			await reader.run("read", "notes.md#instalacion");
+			await reader.settled();
+			expect(texts()).toEqual(["1: Instalación.", "Paso uno.", "Detalle.", "Sub."]);
+			expect(reader.statuses).toEqual(["Reading notes.md on local · Esc stops", undefined]);
+			expect(reader.notes).toEqual([]);
+		});
+
+		it("adding rest reads from the heading to the end, for a file and for the latest reply", async () => {
+			installVoice();
+			mkdirSync(join(root, "work"));
+			writeFileSync(join(root, "work", "notes.md"), "# Notas\n\n" + guide);
+			const reader = load({}, [user("a"), assistant(guide)]);
+			await reader.run("read", "notes.md#instalacion rest");
+			await reader.settled();
+			await reader.run("read", "#instalación rest");
+			await reader.settled();
+			await reader.run("read", "#instalacion");
+			await reader.settled();
+			const rest = ["1: Instalación.", "Paso uno.", "Uso del lector.", "Paso dos."];
+			expect(texts()).toEqual([...rest, ...rest, "1: Instalación.", "Paso uno."]);
+			expect(reader.statuses.filter(Boolean)).toEqual([
+				"Reading notes.md on local · Esc stops",
+				"Reading P1.R1 on local · Esc stops",
+				"Reading P1.R1 on local · Esc stops",
+			]);
+			expect(reader.notes).toEqual([]);
+		});
+
+		it("/read #section reads the latest reply from there, and /read ID#section that reply", async () => {
+			installVoice();
+			const reader = load({}, withGuide);
+			await reader.run("read", "#otra-cosa");
+			await reader.settled();
+			await reader.run("read", "P1.R1#USO");
+			await reader.settled();
+			expect(texts()).toEqual(["Otra cosa.", "Más.", "Uso del lector.", "Paso dos."]);
+			expect(reader.statuses.filter(Boolean)).toEqual(["Reading P2.R1 on local · Esc stops", "Reading P1.R1 on local · Esc stops"]);
+			expect(reader.notes).toEqual([]);
+		});
+
+		it("an exact heading wins over a prefix, and a unique prefix is accepted", async () => {
+			installVoice();
+			const reader = load({}, [user("a"), assistant("## Uso avanzado\n\nA.\n\n## Uso\n\nB.\n\n## Notas finales\n\nC.")]);
+			await reader.run("read", "#uso");
+			await reader.settled();
+			await reader.run("read", "#notas");
+			await reader.settled();
+			expect(texts()).toEqual(["Uso.", "B.", "Notas finales.", "C."]);
+		});
+
+		it("no match, or an ambiguous prefix, warns naming the section and the source, and plays and downloads nothing", async () => {
+			script("paplay", `echo $$ > "${root}/play-0.pid"; cat > /dev/null`);
+			mkdirSync(join(root, "work"));
+			writeFileSync(join(root, "work", "notes.md"), guide);
+			const reader = load({ confirm: true }, [user("a"), assistant("## Uso avanzado\n\nA.\n\n## Uso simple\n\nB.")]);
+			await reader.run("read", "notes.md#Nada aquí");
+			await reader.run("read", "#uso");
+			await reader.run("read", "P1.R1#zzz");
+			await reader.run("read", "#zzz rest");
+			expect(reader.notes).toEqual([
+				['No section "Nada aquí" in notes.md.', "warning"],
+				['No section "uso" in P1.R1.', "warning"],
+				['No section "zzz" in P1.R1.', "warning"],
+				['No section "zzz" in P1.R1.', "warning"],
+			]);
+			expect(reader.confirms).toEqual([]);
+			expect(reader.statuses).toEqual([]);
+			expect(synthesized).toEqual([]);
+			expect(existsSync(log("play-0.pid"))).toBe(false);
+		});
+
+		it("a missing file or an unknown reply with a section warns as before", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read", "missing.md#uso");
+			await reader.run("read", "P9.R9#uso");
+			expect(reader.notes).toEqual([
+				['Cannot read "missing.md": file not found.', "warning"],
+				['No reply matches "P9.R9".', "warning"],
+			]);
+			expect(synthesized).toEqual([]);
+		});
+
+		it("without # nothing changes: /read, /read P1.R1, /read FILE.md (even with # in its name), /read-speed, Esc and /read-stop", async () => {
+			installVoice("sleep 30;");
+			mkdirSync(join(root, "work"));
+			writeFileSync(join(root, "work", "notes.md"), "# Notas");
+			writeFileSync(join(root, "work", "a#b.md"), "Archivo.");
+			const reader = load();
+			await reader.run("read-speed", "1.2");
+			await reader.run("read");
+			await waitFor(() => existsSync(log("play-0.pid")) && synthesized.length === 2);
+			expect(reader.key("\x1b")).toEqual({ consume: true });
+			await reader.run("read", "P1.R1");
+			await waitFor(() => existsSync(log("play-1.pid")) && synthesized.length === 3);
+			await reader.run("read", "notes.md");
+			await waitFor(() => existsSync(log("play-2.pid")) && synthesized.length === 4);
+			await reader.run("read", "a#b.md");
+			await waitFor(() => existsSync(log("play-3.pid")) && synthesized.length === 5);
+			await reader.run("read-stop");
+			await reader.run("read-stop");
+			await waitFor(() => !alive(Number(read("play-3.pid"))));
+			expect(texts()).toEqual(["Segunda.", "auto read listo.", "Primera respuesta.", "Notas.", "Archivo."]);
+			expect(speeds()).toEqual([1.2, 1.2, 1.2, 1.2, 1.2]);
+			expect(reader.notes).toEqual([
+				["Readings will use speed 1.2.", "info"],
+				["Reading stopped.", "info"],
+				["Nothing is being read.", "info"],
+			]);
+			expect(reader.statuses).toEqual([
+				"Reading P2.R1 on local · Esc stops",
+				undefined,
+				"Reading P1.R1 on local · Esc stops",
+				undefined,
+				"Reading notes.md on local · Esc stops",
+				undefined,
+				"Reading a#b.md on local · Esc stops",
+				undefined,
+			]);
+		});
 	});
 
 	it("/read speaks the latest reply, cleaned for speech, and shows then clears its status", async () => {

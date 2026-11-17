@@ -5,8 +5,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { loadOutputs, type Output } from "../src/outputs.ts";
 import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
+import { questionsSection } from "../src/questions.ts";
 import { type Claim, openReadingLock } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
+import { sectionFrom } from "../src/sections.ts";
 import { formatSpeed, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSpeed } from "../src/settings.ts";
 import { speechText } from "../src/speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
@@ -20,6 +22,18 @@ const SPEAKER_NAMES = Object.keys(SPEAKERS) as SpeakerName[];
 const MARKDOWN_FILE = /\.(md|markdown)$/i;
 /** How often a reading checks whether a newer one, or /read-stop, in another session took over (T21). */
 const WATCH_MS = 250;
+/** What auto-read reads at the end of each agent turn (S8). */
+type AutoMode = "off" | "full" | "questions";
+const AUTO_CHOICES = [
+	{ value: "on", description: "read each new reply in full" },
+	{ value: "questions", description: 'read only its closing "Needs your decision" section' },
+	{ value: "off", description: "read nothing by itself" },
+];
+const AUTO_MESSAGES: Record<AutoMode, string> = {
+	full: "Auto-read on: full replies.",
+	questions: "Auto-read on: questions only.",
+	off: "Auto-read off.",
+};
 
 /** Why a Markdown file could not be read, in the user's words. */
 function readProblem(error: NodeJS.ErrnoException): string {
@@ -35,6 +49,8 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * or female voice (S3), `/read-speed` the voice speed, saved in settings.json (S3). `/read <file.md>` reads a Markdown file the same way (S6). Nothing plays by itself.
  * One reading per machine (S1, T21): through `$XDG_RUNTIME_DIR/pi-reply-reader/`, a new reading in any session
  * stops the one playing in another, `/read-stop` stops it too, and the session stopped that way just clears its footer.
+ * `/read <target>#<section>` reads only the section under a matching heading, or on to the end with `rest` (S9). `/read-auto` (S8) reads each new reply, or only its
+ * "Needs your decision" section, when the agent's turn ends; it is off at every session start.
  */
 export function createReplyReader(
 	deps: { env?: NodeJS.ProcessEnv; hostname?: string; loadSherpa?: (voice: Voice) => Promise<SherpaTts> } = {},
@@ -55,6 +71,12 @@ export function createReplyReader(
 		/** Whether this session already reported a problem in settings.json. */
 		let speedWarned = false;
 		let unsubscribe: (() => void) | undefined;
+		/** This session's auto-read mode (S8: off at session start). */
+		let auto: AutoMode = "off";
+		/** The entry ID of the latest reply when the current agent run started; a run's own reply differs from it. */
+		let before: string | undefined;
+		/** Whether an agent run is between its first agent_start and agent_settled. */
+		let running = false;
 
 		/** Ends this session's reading and clears its footer; another session's reading is left alone. */
 		const stop = (): void => {
@@ -101,10 +123,99 @@ export function createReplyReader(
 			return speed;
 		};
 
+		/**
+		 * Reads Markdown aloud: the voice (download confirm), the output (asked on first use), the speed and voice of this
+		 * session, the footer, Esc, /read-stop and one reading per machine. Used by /read and by auto-read.
+		 * `name` is what the footer names, `label` what the "nothing to read" message names.
+		 */
+		const readAloud = async (ctx: ExtensionContext, name: string, label: string, markdown: string): Promise<void> => {
+			const text = speechText(markdown);
+			if (!text) {
+				ctx.ui.notify(`${label} has nothing to read.`, "info");
+				return;
+			}
+
+			let voice = findVoice(env);
+			if (!voice) {
+				try {
+					voice = await downloadVoice({
+						env,
+						confirm: async (message) => ctx.hasUI && ctx.ui.confirm("Reply reader voice", message),
+					});
+				} catch (error) {
+					ctx.ui.notify((error as Error).message, "error");
+					return;
+				}
+				if (!voice) {
+					ctx.ui.notify("Reading cancelled: the voice was not downloaded.", "info");
+					return;
+				}
+			}
+
+			const output = await outputForReading(ctx);
+			if (!output) {
+				ctx.ui.notify("Reading cancelled: no output chosen.", "info");
+				return;
+			}
+
+			stop();
+			const speed = speedForReading(ctx);
+			// Without a usable XDG_RUNTIME_DIR there is no claim, and only this session's readings stop each other.
+			const claim = openReadingLock(env)?.claim();
+			/** Stopped by another session: no message, just the footer. */
+			const stoppedElsewhere = (): void => {
+				if (current?.reading === reading) stop();
+			};
+			const reading = startReading({
+				voice,
+				speaker: SPEAKERS[speaker],
+				text,
+				output,
+				env,
+				loadSherpa: deps.loadSherpa,
+				speed,
+				onPlayer: (pid) => {
+					if (claim && !claim.setPlayer(pid)) stoppedElsewhere();
+				},
+			});
+			const watch = claim
+				? setInterval(() => {
+						if (claim.lost()) stoppedElsewhere();
+					}, WATCH_MS)
+				: undefined;
+			watch?.unref();
+			current = { reading, ctx, claim, watch };
+			ctx.ui.setStatus(STATUS, `Reading ${name} on ${output.name} · Esc stops`);
+			reading.done
+				.catch((error: Error) => {
+					// A player killed by a newer reading or /read-stop elsewhere fails; that is not an error here.
+					if (current?.reading === reading && !claim?.lost()) ctx.ui.notify(error.message, "error");
+				})
+				.finally(() => {
+					if (current?.reading !== reading) return;
+					stop();
+				});
+		};
+
 		pi.registerCommand("read", {
-			description: "Read a reply aloud: the latest, or one by ID (P12.R1); or a Markdown file (notes.md)",
+			description:
+				"Read a reply aloud: the latest, or one by ID (P12.R1); or a Markdown file (notes.md); add #section for one section (notes.md#install, #usage), then rest to read on to the end",
 			handler: async (args, ctx) => {
-				const wanted = args.trim();
+				let wanted = args.trim();
+				/** The section to read (S9); a whole argument that is a Markdown path keeps any `#` in its name. */
+				let section: string | undefined;
+				/** `#section rest` reads from that heading to the end instead of that section only. */
+				let rest = false;
+				const hash = wanted.indexOf("#");
+				if (hash !== -1 && !MARKDOWN_FILE.test(wanted)) {
+					section = wanted.slice(hash + 1).trim();
+					wanted = wanted.slice(0, hash).trim();
+					const words = /^(.*\S)\s+rest$/.exec(section);
+					if (words) {
+						section = words[1];
+						rest = true;
+					}
+				}
 				/** What the status line names: the reply ID or the file name. */
 				let name: string;
 				/** What the "nothing to read" message names: the reply ID or the path as given. */
@@ -131,72 +242,15 @@ export function createReplyReader(
 					label = reply.id;
 					markdown = reply.text;
 				}
-				const text = speechText(markdown);
-				if (!text) {
-					ctx.ui.notify(`${label} has nothing to read.`, "info");
-					return;
-				}
-
-				let voice = findVoice(env);
-				if (!voice) {
-					try {
-						voice = await downloadVoice({
-							env,
-							confirm: async (message) => ctx.hasUI && ctx.ui.confirm("Reply reader voice", message),
-						});
-					} catch (error) {
-						ctx.ui.notify((error as Error).message, "error");
+				if (section) {
+					const from = sectionFrom(markdown, section, { rest });
+					if (from === undefined) {
+						ctx.ui.notify(`No section "${section}" in ${label}.`, "warning");
 						return;
 					}
-					if (!voice) {
-						ctx.ui.notify("Reading cancelled: the voice was not downloaded.", "info");
-						return;
-					}
+					markdown = from;
 				}
-
-				const output = await outputForReading(ctx);
-				if (!output) {
-					ctx.ui.notify("Reading cancelled: no output chosen.", "info");
-					return;
-				}
-
-				stop();
-				const speed = speedForReading(ctx);
-				// Without a usable XDG_RUNTIME_DIR there is no claim, and only this session's readings stop each other.
-				const claim = openReadingLock(env)?.claim();
-				/** Stopped by another session: no message, just the footer. */
-				const stoppedElsewhere = (): void => {
-					if (current?.reading === reading) stop();
-				};
-				const reading = startReading({
-					voice,
-					speaker: SPEAKERS[speaker],
-					text,
-					output,
-					env,
-					loadSherpa: deps.loadSherpa,
-					speed,
-					onPlayer: (pid) => {
-						if (claim && !claim.setPlayer(pid)) stoppedElsewhere();
-					},
-				});
-				const watch = claim
-					? setInterval(() => {
-							if (claim.lost()) stoppedElsewhere();
-						}, WATCH_MS)
-					: undefined;
-				watch?.unref();
-				current = { reading, ctx, claim, watch };
-				ctx.ui.setStatus(STATUS, `Reading ${name} on ${output.name} · Esc stops`);
-				reading.done
-					.catch((error: Error) => {
-						// A player killed by a newer reading or /read-stop elsewhere fails; that is not an error here.
-						if (current?.reading === reading && !claim?.lost()) ctx.ui.notify(error.message, "error");
-					})
-					.finally(() => {
-						if (current?.reading !== reading) return;
-						stop();
-					});
+				await readAloud(ctx, name, label, markdown);
 			},
 		});
 
@@ -288,7 +342,49 @@ export function createReplyReader(
 			},
 		});
 
+		pi.registerCommand("read-auto", {
+			description:
+				'Read each new reply aloud when the agent finishes, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles',
+			getArgumentCompletions: (prefix) =>
+				AUTO_CHOICES.filter((choice) => choice.value.startsWith(prefix.trim())).map((choice) => ({ ...choice, label: choice.value })),
+			handler: async (args, ctx) => {
+				const wanted = args.trim();
+				const modes: Record<string, AutoMode> = { on: "full", questions: "questions", off: "off", "": auto === "off" ? "full" : "off" };
+				if (!Object.hasOwn(modes, wanted)) {
+					ctx.ui.notify("Use /read-auto on, questions or off.", "warning");
+					return;
+				}
+				auto = modes[wanted];
+				ctx.ui.notify(AUTO_MESSAGES[auto], "info");
+			},
+		});
+
+		const latestReplyId = (ctx: ExtensionContext): string | undefined => latestReply(listReplies(ctx.sessionManager.getBranch()))?.entryId;
+
+		// A run can restart after agent_end (retries, compaction, queued messages); the first agent_start of a run takes
+		// the snapshot and agent_settled, once nothing else will run, compares against it (S8: never an earlier reply).
+		pi.on("agent_start", (_event, ctx) => {
+			if (running) return;
+			running = true;
+			before = latestReplyId(ctx);
+		});
+
+		pi.on("agent_settled", (event, ctx) => {
+			const started = running;
+			running = false;
+			if (!started || auto === "off" || event.aborted) return;
+			const reply = latestReply(listReplies(ctx.sessionManager.getBranch()));
+			if (!reply || reply.entryId === before) return;
+			const markdown = auto === "questions" ? questionsSection(reply.text) : reply.text;
+			if (markdown === undefined) return;
+			// Not awaited: a download confirm or the output question must not hold Pi's settlement.
+			readAloud(ctx, reply.id, reply.id, markdown).catch((error: Error) => ctx.ui.notify(error.message, "error"));
+		});
+
 		pi.on("session_start", (_event, ctx) => {
+			auto = "off";
+			running = false;
+			before = undefined;
 			chosen = undefined;
 			speaker = "male";
 			warned = false;
