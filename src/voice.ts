@@ -81,8 +81,10 @@ export async function downloadVoice(options: {
 	archive?: VoiceArchive;
 	/** Give up when the server sends nothing for this long. */
 	idleTimeoutMs?: number;
+	/** Cancels the download (Ctrl+C in the reply-reader command); it then fails with "cancelled" and keeps nothing. */
+	signal?: AbortSignal;
 }): Promise<Voice | undefined> {
-	const { env, confirm, archive = VOICE_ARCHIVE, idleTimeoutMs = 30_000 } = options;
+	const { env, confirm, archive = VOICE_ARCHIVE, idleTimeoutMs = 30_000, signal } = options;
 	const existing = findVoice(env);
 	if (existing) return existing;
 
@@ -100,7 +102,7 @@ export async function downloadVoice(options: {
 	const work = mkdtempSync(join(dir, ".download-"));
 	try {
 		const file = join(work, "voice.tar.bz2");
-		await fetchVerified(archive, file, idleTimeoutMs);
+		await fetchVerified(archive, file, idleTimeoutMs, signal);
 		await promisify(execFile)("tar", ["-xjf", file, "--no-same-owner", "-C", work]);
 		for (const name of BUNDLE_FILES) {
 			if (!existsSync(join(work, BUNDLE, name))) throw new Error(`the archive has no ${BUNDLE}/${name}`);
@@ -122,8 +124,9 @@ export async function downloadVoice(options: {
 }
 
 /** Streams the archive to `file`, failing on HTTP errors, silence, oversize and disk errors alike. */
-async function fetchVerified(archive: VoiceArchive, file: string, idleTimeoutMs: number): Promise<void> {
+async function fetchVerified(archive: VoiceArchive, file: string, idleTimeoutMs: number, cancel?: AbortSignal): Promise<void> {
 	const idle = new AbortController();
+	const signal = cancel ? AbortSignal.any([idle.signal, cancel]) : idle.signal;
 	let timer: NodeJS.Timeout | undefined;
 	const wait = () => {
 		clearTimeout(timer);
@@ -133,7 +136,7 @@ async function fetchVerified(archive: VoiceArchive, file: string, idleTimeoutMs:
 	let received = 0;
 	try {
 		wait();
-		const response = await fetch(archive.url, { signal: idle.signal });
+		const response = await fetch(archive.url, { signal });
 		if (!response.ok || !response.body) throw new Error(`HTTP ${response.status} from ${archive.url}`);
 		await pipeline(
 			// fetch's body is typed with the DOM stream; at runtime it is Node's web stream.
@@ -148,10 +151,11 @@ async function fetchVerified(archive: VoiceArchive, file: string, idleTimeoutMs:
 				}
 			},
 			createWriteStream(file),
-			{ signal: idle.signal },
+			{ signal },
 		);
 	} catch (error) {
-		throw idle.signal.aborted ? (idle.signal.reason as Error) : error;
+		if (idle.signal.aborted) throw idle.signal.reason as Error;
+		throw cancel?.aborted ? new Error("cancelled") : error;
 	} finally {
 		clearTimeout(timer);
 	}

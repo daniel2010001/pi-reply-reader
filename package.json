@@ -17,7 +17,11 @@
       "./extensions/reply-reader.ts"
     ]
   },
+  "bin": {
+    "reply-reader": "./bin/reply-reader.ts"
+  },
   "files": [
+    "bin",
     "extensions",
     "src",
     "examples",
