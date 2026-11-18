@@ -576,3 +576,30 @@ describe("S12: narration plan, renderer and diagnostics", () => {
 		expect(speechNarration("Todo claro: `README.md` en la rama `feat/x`.", "es").diagnostics).toEqual([]);
 	});
 });
+
+describe("S12: plan and renderer invariants (regression pins from the T30 verify)", () => {
+	const samples = [
+		"## 1. Estado\n**2. Engram**\n- item `/reload`.\n| a | `x/y` |\n|-|-|\n| 1.1 | 2 |\n```\nx\n",
+		"\r\n# T\r\nUno.\rDos.",
+		"Usa `foo=bar`. Fin\n\n\n\nOtro! `README.md`",
+	];
+
+	it("keeps the plan language-free: every source and cell comes from its own line", () => {
+		for (const markdown of samples) {
+			const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+			for (const block of narrationPlan(markdown).blocks) {
+				const pieces = block.role === "row" ? block.cells : "source" in block ? [block.source] : [];
+				for (const piece of pieces) expect(lines[block.line - 1]).toContain(piece);
+			}
+		}
+	});
+
+	it("gives playback the fragments the spoken text splits into, as v0.1.0 cut them", () => {
+		for (const markdown of samples) {
+			for (const language of [undefined, "es", "en"] as const) {
+				const narration = speechNarration(markdown, language);
+				expect(narration.fragments.map((f) => [f.text, f.after])).toEqual(spokenFragments(narration.text).map((f) => [f.text, f.after]));
+			}
+		}
+	});
+});

@@ -47,9 +47,9 @@ export interface Fragment {
 	after: Boundary;
 }
 
-/** (S12) A token no reading class claimed, though it holds characters a voice reads oddly. */
 /**
- * (S12) A technical token no reading class claimed, read as written. Listed by source line; within a line,
+ * (S12) A technical token no reading class claimed, read as written: one holding `/ \ = < > | * { } $ ^ @ # +`
+ * or `..`, other than a plain number. Listed by source line; within a line,
  * tokens in code spans come before those in prose. Never changes what is spoken.
  */
 export interface Diagnostic {
