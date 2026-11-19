@@ -3,6 +3,7 @@ import { homedir, hostname as osHostname } from "node:os";
 import { basename, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { createAutoQueue, type StartResult } from "../src/auto-queue.ts";
 import { loadOutputs, type Output } from "../src/outputs.ts";
 import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
 import { questionsSection } from "../src/questions.ts";
@@ -21,7 +22,10 @@ const ASK_SPEED = "Which speed should readings use?";
 const SPEAKER_NAMES = Object.keys(SPEAKERS) as SpeakerName[];
 /** An argument naming a Markdown file rather than a reply (S6). */
 const MARKDOWN_FILE = /\.(md|markdown)$/i;
-/** How often a reading checks whether a newer one, or /read-stop, in another session took over (T21). */
+/**
+ * How often a reading checks whether a newer one, or /read-stop, in another session took over (T21), and how often
+ * a waiting auto-read checks whether the machine is free (T32).
+ */
 const WATCH_MS = 250;
 /** What auto-read reads at the end of each agent turn (S8). */
 type AutoMode = "off" | "full" | "questions";
@@ -51,7 +55,10 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * One reading per machine (S1, T21): through `$XDG_RUNTIME_DIR/pi-reply-reader/`, a new reading in any session
  * stops the one playing in another, `/read-stop` stops it too, and the session stopped that way just clears its footer.
  * `/read <target>#<section>` reads only the section under a matching heading, or on to the end with `rest` (S9). `/read-auto` (S8) reads each new reply, or only its
- * "Needs your decision" section, when the agent's turn ends; it is off at every session start.
+ * "Needs your decision" section, when the agent's turn ends; it is off at every session start. Auto-read never
+ * interrupts (S8 Queue, T32): a reply due while a reading plays here or in another session waits, in order, and is read
+ * once the machine is free; an explicit /read (or read request), /read-stop or Esc drops every reply waiting on the
+ * machine, and /read-auto off or the session's end drops this session's.
  * Other extensions (pi-reply-thread's Alt+R view) reach it over `pi.events` (S10, src/reader-events.ts): a ping is
  * answered with ready, ready is also sent at each session start, and a read request reads its text like `/read`.
  */
@@ -85,6 +92,25 @@ export function createReplyReader(
 		/** Ends this session's subscriptions on `pi.events`. */
 		let unsubscribeEvents: (() => void) | undefined;
 
+		/** A reply due for auto-read, with the machine's waiting mark when it was queued (S8 Queue). */
+		interface Waiting {
+			ctx: ExtensionContext;
+			id: string;
+			markdown: string;
+			language: Language;
+			mark: string | undefined;
+		}
+		/** This session's waiting auto-reads; without a usable XDG_RUNTIME_DIR it only waits for this session's readings. */
+		const queue = createAutoQueue<Waiting>({
+			busy: () => current !== undefined || (openReadingLock(env)?.busy() ?? false),
+			start: (item, still) =>
+				readAloud(item.ctx, item.id, item.id, item.markdown, item.language, { mark: item.mark, still }).catch((error: Error) => {
+					item.ctx.ui.notify(error.message, "error");
+					return "done" as const;
+				}),
+			retryMs: WATCH_MS,
+		});
+
 		/** Registers a command whose context becomes the one bus events read with. */
 		const command = (name: string, options: Parameters<ExtensionAPI["registerCommand"]>[1]): void =>
 			pi.registerCommand(name, {
@@ -104,6 +130,8 @@ export function createReplyReader(
 			reading.stop();
 			claim?.release();
 			ctx.ui.setStatus(STATUS, undefined);
+			// A reply waiting for this reading may start now.
+			queue.kick();
 		};
 
 		/** All outputs, telling the user about any entry of outputs.json that was skipped. */
@@ -142,14 +170,23 @@ export function createReplyReader(
 
 		/**
 		 * Reads Markdown aloud: the voice (download confirm), the output (asked on first use), the speed and voice of this
-		 * session, the footer, Esc, /read-stop and one reading per machine. Used by /read and by auto-read.
+		 * session, the footer, Esc, /read-stop and one reading per machine. Used by /read, read requests and auto-read.
 		 * `name` is what the footer names, `label` what the "nothing to read" message names.
+		 * Explicit (no `auto`): stops the reading playing and drops every waiting auto-read on the machine. Auto: starts
+		 * only when nothing plays and its reply was not dropped (`still`, the waiting mark), else answers "busy" or "done".
 		 */
-		const readAloud = async (ctx: ExtensionContext, name: string, label: string, markdown: string, language?: Language): Promise<void> => {
+		const readAloud = async (
+			ctx: ExtensionContext,
+			name: string,
+			label: string,
+			markdown: string,
+			language?: Language,
+			auto?: { mark: string | undefined; still: () => boolean },
+		): Promise<StartResult> => {
 			const narration = speechNarration(markdown, language);
 			if (!narration.text) {
 				ctx.ui.notify(`${label} has nothing to read.`, "info");
-				return;
+				return "done";
 			}
 
 			let voice = findVoice(env);
@@ -161,24 +198,37 @@ export function createReplyReader(
 					});
 				} catch (error) {
 					ctx.ui.notify((error as Error).message, "error");
-					return;
+					return "done";
 				}
 				if (!voice) {
 					ctx.ui.notify("Reading cancelled: the voice was not downloaded.", "info");
-					return;
+					return "done";
 				}
 			}
 
 			const output = await outputForReading(ctx);
 			if (!output) {
 				ctx.ui.notify("Reading cancelled: no output chosen.", "info");
-				return;
+				return "done";
 			}
 
-			stop();
+			// Without a usable XDG_RUNTIME_DIR there is no claim: readings and the queue only see this session's.
+			const lock = openReadingLock(env);
+			let claim: Claim | undefined;
+			if (auto) {
+				// Dropped while asking (an explicit action, /read-auto off, the session's end): nothing plays.
+				if (!auto.still()) return "done";
+				if (current) return "busy";
+				const taken = lock?.claimIfFree(auto.mark);
+				if (taken === "dropped") return "done";
+				if (taken === "busy") return "busy";
+				claim = taken;
+			} else {
+				queue.clear();
+				stop();
+				claim = lock?.claim({ dropWaiting: true });
+			}
 			const speed = speedForReading(ctx);
-			// Without a usable XDG_RUNTIME_DIR there is no claim, and only this session's readings stop each other.
-			const claim = openReadingLock(env)?.claim();
 			/** Stopped by another session: no message, just the footer. */
 			const stoppedElsewhere = (): void => {
 				if (current?.reading === reading) stop();
@@ -212,6 +262,7 @@ export function createReplyReader(
 					if (current?.reading !== reading) return;
 					stop();
 				});
+			return "done";
 		};
 
 		command("read", {
@@ -278,7 +329,9 @@ export function createReplyReader(
 			description: "Stop the reading playing, in this or another Pi session (Esc or a new /read stop it too)",
 			handler: async (_args, ctx) => {
 				const here = current !== undefined;
+				queue.clear();
 				stop();
+				// Also drops every auto-read waiting on the machine (S8).
 				const elsewhere = openReadingLock(env)?.stopOthers() ?? false;
 				ctx.ui.notify(here || elsewhere ? "Reading stopped." : "Nothing is being read.", "info");
 			},
@@ -375,6 +428,8 @@ export function createReplyReader(
 					return;
 				}
 				auto = modes[wanted];
+				// Off drops this session's waiting replies (S8); other sessions' are theirs.
+				if (auto === "off") queue.clear();
 				ctx.ui.notify(AUTO_MESSAGES[auto], "info");
 			},
 		});
@@ -397,8 +452,9 @@ export function createReplyReader(
 			if (!reply || reply.entryId === before) return;
 			const markdown = auto === "questions" ? questionsSection(reply.text) : reply.text;
 			if (markdown === undefined) return;
-			// Not awaited: a download confirm or the output question must not hold Pi's settlement.
-			readAloud(ctx, reply.id, reply.id, markdown, detectLanguage(reply.text)).catch((error: Error) => ctx.ui.notify(error.message, "error"));
+			// Queued, never awaited: it waits for any reading playing here or on the machine (S8 Queue), and a download
+			// confirm or the output question must not hold Pi's settlement.
+			queue.push({ ctx, id: reply.id, markdown, language: detectLanguage(reply.text), mark: openReadingLock(env)?.waitingMark() });
 		});
 
 		/** Subscribes this session to the reader's channels (S10), replacing any earlier subscription, and says it is ready. */
@@ -432,6 +488,7 @@ export function createReplyReader(
 		pi.on("session_start", (_event, ctx) => {
 			latest = ctx;
 			auto = "off";
+			queue.clear();
 			running = false;
 			before = undefined;
 			chosen = undefined;
@@ -443,7 +500,10 @@ export function createReplyReader(
 			unsubscribe = ctx.hasUI
 				? ctx.ui.onTerminalInput((data) => {
 						if (!current || !matchesKey(data, Key.escape)) return undefined;
+						// Esc stops this session's reading and drops every auto-read waiting on the machine (S8).
+						queue.clear();
 						stop();
+						openReadingLock(env)?.dropWaiting();
 						return { consume: true };
 					})
 				: undefined;
@@ -451,6 +511,8 @@ export function createReplyReader(
 		});
 
 		pi.on("session_shutdown", () => {
+			// The session's end drops its waiting replies (S8), before its reading ends and would start one.
+			queue.clear();
 			stop();
 			unsubscribe?.();
 			unsubscribe = undefined;

@@ -353,33 +353,195 @@ describe("reply-reader extension", () => {
 			expect(reader.statuses.filter(Boolean)).toEqual(["Reading P3.R1 on desktop · Esc stops", "Reading P4.R1 on desktop · Esc stops"]);
 		});
 
-		it("an auto-reading stops the one playing, and Esc and /read-stop stop it", async () => {
+		it("Esc and /read-stop stop an auto-reading", async () => {
 			installVoice("sleep 30;");
 			const reader = load();
 			await reader.run("read-auto", "on");
-			await reader.run("read");
-			await waitFor(() => existsSync(log("play-0.pid")));
 			reader.turn([user("a"), assistant("Uno.")]);
-			await waitFor(() => !alive(Number(read("play-0.pid"))));
-			await waitFor(() => existsSync(log("play-1.pid")));
+			await waitFor(() => existsSync(log("play-0.pid")));
 			expect(reader.key("\x1b")).toEqual({ consume: true });
-			await waitFor(() => !alive(Number(read("play-1.pid"))));
+			await waitFor(() => !alive(Number(read("play-0.pid"))));
 			reader.turn([user("b"), assistant("Dos.")]);
-			await waitFor(() => existsSync(log("play-2.pid")));
+			await waitFor(() => existsSync(log("play-1.pid")));
 			await reader.run("read-stop");
-			await waitFor(() => !alive(Number(read("play-2.pid"))));
+			await waitFor(() => !alive(Number(read("play-1.pid"))));
 			expect(reader.notes).toEqual([
 				["Auto-read on: full replies.", "info"],
 				["Reading stopped.", "info"],
 			]);
-			expect(reader.statuses).toEqual([
-				"Reading P2.R1 on local · Esc stops",
-				undefined,
-				"Reading P3.R1 on local · Esc stops",
-				undefined,
-				"Reading P4.R1 on local · Esc stops",
-				undefined,
-			]);
+			expect(reader.statuses).toEqual(["Reading P3.R1 on local · Esc stops", undefined, "Reading P4.R1 on local · Esc stops", undefined]);
+		});
+
+		describe("queue: auto-read never interrupts (T32)", () => {
+			/** A player that plays until `hold` is removed; one that played through leaves its .audio file. */
+			const holding = () => {
+				writeFileSync(log("hold"), "");
+				installVoice(`while [ -e "${root}/hold" ]; do sleep 0.02; done;`);
+			};
+			const pid = (n: number) => Number(read(`play-${n}.pid`));
+			const played = (n: number) => existsSync(log(`play-${n}.audio`));
+			/** Longer than two of the reader's 250 ms checks. */
+			const wait = () => new Promise((resolve) => setTimeout(resolve, 700));
+			const ended = (reader: ReturnType<typeof load>, n: number) => waitFor(() => reader.statuses.filter((status) => status === undefined).length === n);
+
+			it("a reply due while this session reads waits, then the waiting replies are read in order, none cut", async () => {
+				holding();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				await reader.run("read");
+				await waitFor(() => existsSync(log("play-0.pid")));
+				reader.turn([user("a"), assistant("Uno.")]);
+				reader.turn([user("b"), assistant("Dos.")]);
+				await wait();
+				expect(alive(pid(0))).toBe(true);
+				expect(existsSync(log("play-1.pid"))).toBe(false);
+				rmSync(log("hold"));
+				await ended(reader, 3);
+				expect(texts().slice(-2)).toEqual(["Uno.", "Dos."]);
+				expect([played(0), played(1), played(2)]).toEqual([true, true, true]);
+				expect(reader.statuses).toEqual([
+					"Reading P2.R1 on local · Esc stops",
+					undefined,
+					"Reading P3.R1 on local · Esc stops",
+					undefined,
+					"Reading P4.R1 on local · Esc stops",
+					undefined,
+				]);
+				expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
+			});
+
+			it("a reply due while an auto-reading plays waits for it too", async () => {
+				holding();
+				const reader = load();
+				await reader.run("read-auto", "questions");
+				reader.turn([user("a"), assistant(questions)]);
+				await waitFor(() => existsSync(log("play-0.pid")));
+				reader.turn([user("b"), assistant("Listo.\n\n**Needs your decision:**\n- ¿A o B?")]);
+				await wait();
+				expect(alive(pid(0))).toBe(true);
+				expect(existsSync(log("play-1.pid"))).toBe(false);
+				rmSync(log("hold"));
+				await ended(reader, 2);
+				expect([played(0), played(1)]).toEqual([true, true]);
+				expect(reader.statuses.filter(Boolean)).toEqual(["Reading P3.R1 on local · Esc stops", "Reading P4.R1 on local · Esc stops"]);
+			});
+
+			it("a manual /read stops the reading and drops the waiting replies; a later reply is read", async () => {
+				holding();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				await reader.run("read");
+				await waitFor(() => existsSync(log("play-0.pid")));
+				reader.turn([user("a"), assistant("Uno.")]);
+				reader.turn([user("b"), assistant("Dos.")]);
+				await wait();
+				await reader.run("read", "P1.R1");
+				await waitFor(() => !alive(pid(0)));
+				await waitFor(() => existsSync(log("play-1.pid")));
+				rmSync(log("hold"));
+				await ended(reader, 2);
+				await wait();
+				expect(existsSync(log("play-2.pid"))).toBe(false);
+				expect(texts()).not.toContain("Uno.");
+				expect(texts()).not.toContain("Dos.");
+				reader.turn([user("c"), assistant("Tres.")]);
+				await ended(reader, 3);
+				expect(texts().at(-1)).toBe("Tres.");
+				expect(reader.statuses).toEqual([
+					"Reading P2.R1 on local · Esc stops",
+					undefined,
+					"Reading P1.R1 on local · Esc stops",
+					undefined,
+					"Reading P5.R1 on local · Esc stops",
+					undefined,
+				]);
+				expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
+			});
+
+			it("a read request from another extension is manual too: it drops the waiting replies", async () => {
+				holding();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				await reader.run("read");
+				await waitFor(() => existsSync(log("play-0.pid")));
+				reader.turn([user("a"), assistant("Uno.")]);
+				await wait();
+				reader.bus.emit(READER_EVENTS.read, { v: 1, id: "P9.R1", text: "Nueve." });
+				await waitFor(() => !alive(pid(0)));
+				await waitFor(() => existsSync(log("play-1.pid")));
+				rmSync(log("hold"));
+				await ended(reader, 2);
+				await wait();
+				expect(existsSync(log("play-2.pid"))).toBe(false);
+				expect(texts()).not.toContain("Uno.");
+				expect(reader.statuses.filter(Boolean)).toEqual(["Reading P2.R1 on local · Esc stops", "Reading P9.R1 on local · Esc stops"]);
+			});
+
+			it("/read-stop and Esc stop the reading and drop the waiting replies", async () => {
+				holding();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				await reader.run("read");
+				await waitFor(() => existsSync(log("play-0.pid")));
+				reader.turn([user("a"), assistant("Uno.")]);
+				await wait();
+				await reader.run("read-stop");
+				await waitFor(() => !alive(pid(0)));
+				await wait();
+				expect(existsSync(log("play-1.pid"))).toBe(false);
+				await reader.run("read", "P2.R1");
+				await waitFor(() => existsSync(log("play-1.pid")));
+				reader.turn([user("b"), assistant("Dos.")]);
+				await wait();
+				expect(reader.key("\x1b")).toEqual({ consume: true });
+				await waitFor(() => !alive(pid(1)));
+				rmSync(log("hold"));
+				await wait();
+				expect(existsSync(log("play-2.pid"))).toBe(false);
+				expect(texts()).not.toContain("Uno.");
+				expect(texts()).not.toContain("Dos.");
+				expect(reader.notes).toEqual([
+					["Auto-read on: full replies.", "info"],
+					["Reading stopped.", "info"],
+				]);
+				expect(reader.statuses).toEqual(["Reading P2.R1 on local · Esc stops", undefined, "Reading P2.R1 on local · Esc stops", undefined]);
+			});
+
+			it("/read-auto off and the session's end drop this session's waiting replies", async () => {
+				holding();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				await reader.run("read");
+				await waitFor(() => existsSync(log("play-0.pid")));
+				reader.turn([user("a"), assistant("Uno.")]);
+				await wait();
+				await reader.run("read-auto", "off");
+				rmSync(log("hold"));
+				await ended(reader, 1);
+				await wait();
+				expect(existsSync(log("play-1.pid"))).toBe(false);
+				expect(played(0)).toBe(true);
+
+				writeFileSync(log("hold"), "");
+				await reader.run("read-auto", "on");
+				await reader.run("read", "P2.R1");
+				await waitFor(() => existsSync(log("play-1.pid")));
+				reader.turn([user("b"), assistant("Dos.")]);
+				await wait();
+				reader.shutdown();
+				await waitFor(() => !alive(pid(1)));
+				reader.restart();
+				rmSync(log("hold"));
+				await wait();
+				expect(existsSync(log("play-2.pid"))).toBe(false);
+				expect(texts()).not.toContain("Uno.");
+				expect(texts()).not.toContain("Dos.");
+				expect(reader.notes).toEqual([
+					["Auto-read on: full replies.", "info"],
+					["Auto-read off.", "info"],
+					["Auto-read on: full replies.", "info"],
+				]);
+			});
 		});
 
 		it("/read-auto completes on, questions and off", () => {

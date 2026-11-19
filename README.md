@@ -121,6 +121,14 @@ the reply's closing **Needs your decision** section (nothing when a reply has no
 session. Replies from before you turned it on are never read. Auto-readings use the same output, voice,
 speed, footer and stop keys (Esc, `/read-stop`) as `/read`, and still follow one reading per machine.
 
+Auto-read never interrupts. A reply that is due while a reading plays, in this session or in any other Pi or
+Gentle Shell session or `reply-reader` command on the machine, waits and is read once nothing plays; one
+session's replies are read in order. Nothing shows while a reply waits. Explicit actions still win: a manual
+`/read` (or a read from pi-reply-thread's Alt+R view), `/read-stop` and Esc stop the reading playing, as
+always, and also drop every auto-read waiting on the machine at that moment; replies due after that are read
+as usual. `/read-auto off` and the end of the session drop that session's waiting replies. Without a usable
+`XDG_RUNTIME_DIR`, a reply only waits for its own session's readings.
+
 ### pi-reply-thread
 
 Once [`pi-reply-thread`](https://github.com/daniel2010001/pi-reply-thread) supports it, `s` in its Alt+R view

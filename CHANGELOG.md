@@ -15,6 +15,12 @@
 - Counts such as `100+` read "100 o más" ("100 or more"); a dot file with no extension inside a path reads as
   a file: `ckan-docker/.gitignore` "gitignore, en ckan docker".
 - `npm run build` removes `dist/` before compiling, so a packed tarball never carries stale files.
+- Auto-read no longer interrupts: a reply due while a reading plays, in this or any other session on the
+  machine, waits and is read once nothing plays, one session's replies in order. A manual `/read` (or a read
+  request from another extension), `/read-stop` and Esc stop the reading playing and drop every auto-read
+  waiting on the machine; `/read-auto off` and the session's end drop that session's. Sessions coordinate
+  through `$XDG_RUNTIME_DIR/pi-reply-reader/` as before (`waiting.json` and a short `reading.lock` mutex);
+  without it a reply only waits for its own session.
 
 ## 0.1.0 — 2026-11-17
 
