@@ -12,6 +12,8 @@
   "número 43"), key combinations (`Ctrl+Shift+P` "Control más Shift más P") and minimum versions (`v1+` "v1 o
   superior", `1.4+` "1 punto 4 o superior"), with "number", "plus" and "or later" in English. Diagnostics no
   longer report these tokens.
+- Counts such as `100+` read "100 o más" ("100 or more"); a dot file with no extension inside a path reads as
+  a file: `ckan-docker/.gitignore` "gitignore, en ckan docker".
 - `npm run build` removes `dist/` before compiling, so a packed tarball never carries stale files.
 
 ## 0.1.0 — 2026-11-17

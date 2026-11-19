@@ -244,16 +244,20 @@ agent", "the branch origin main", "a commit", ", line 42", "1 point 1", "approxi
   - an issue or PR number: `el PR #43` becomes "el PR número 43" ("number 43" in English);
   - a key combination: `Ctrl+Shift+P` becomes "Control más Shift más P" ("plus" in English), `Alt+R` "Alt más R";
   - a minimum version: `v1+` becomes "v1 o superior" ("or later" in English), `v2.0+` "v2 punto 0 o superior",
-    `1.4+` "1 punto 4 o superior".
+    `1.4+` "1 punto 4 o superior";
+  - a count: `100+` becomes "100 o más" ("100 or more" in English), `300+ líneas` "300 o más líneas".
 
-  Fractions like `1/2`, versions, dates, counts like `100+` and short pairs like `y/o` stay as they are.
+  Fractions like `1/2`, versions, dates and short pairs like `y/o` stay as they are.
 
 ### Known limits
 
 - Kinds are guessed from the text alone, so some names are misread: two-word paths such as `odd/tasks`
   or MIME types such as `application/json` read as alternatives ("odd o tasks"), web routes such as
-  `/users` read as commands, files without an extension read as folders (`ckan-docker/.gitignore` becomes
-  "la carpeta gitignore, en ckan docker"), and some hosts or code names
+  `/users` read as commands, files without an extension read as folders (`ckan-docker/Makefile` becomes
+  "la carpeta Makefile, en ckan docker"; a dot file such as `ckan-docker/.gitignore` reads as a file,
+  "gitignore, en ckan docker", but a lone `~/.gitignore` reads as a folder, like `~/.ssh`), dot folders
+  written without a final `/` inside a longer path read as files (`/home/.snapshots` becomes "snapshots, en
+  home"), browser versions written without `v` read as counts ("Chrome 123 o más"), and some hosts or code names
   read as file names (`org.bluez` becomes "org punto bluez").
 - The voice speaks with Spanish pronunciation, also for English text (only the words the cleanup adds
   switch to English there).
