@@ -221,7 +221,7 @@ function contracted(text: string): string {
 			// The reverse for a contraction already written before the token: "del el comando" → "del comando",
 			// "del la rama" → "de la rama", "al un commit" → "a un commit".
 			.replace(
-				/(?<![\p{L}\p{N}])([dD]e|[aA])l (el|la|un) (comando|carpeta|rama|commit)(?![\p{L}\p{N}])/gu,
+				/(?<![\p{L}\p{N}])([dD]e|[aA])l (el|la|un) (comando|carpeta|rama|commit|etiqueta)(?![\p{L}\p{N}])/gu,
 				(_m, word: string, article: string, noun: string) => (article === "el" ? `${word}l ${noun}` : `${word} ${article} ${noun}`),
 			)
 	);
@@ -273,8 +273,22 @@ interface Phrasebook {
 	minus: string;
 	/** (j1) A whole number from 0 to 999.999.999.999 in words. */
 	cardinal: (n: number) => string;
-	/** (j1) Spanish only: "un"/"una" by the word after a number ending in 1. */
+	/** (j1) Spanish only: "un"/"una" by the word after a number ending in 1; (k1) feminine hundreds. */
 	agreement?: { feminine: Set<string>; keepsUno: Set<string> };
+	/** (k2) A time with minutes 00, after its hour: "siete en punto". */
+	oClock: string;
+	/** (k3) Month names, January first. */
+	months: readonly string[];
+	/** (k3) A date from its parts, already in words. */
+	date: (day: string, month: string, year: string) => string;
+	/** (k4) A glob's leading `*`: "cualquier hs punto lan". */
+	any: string;
+	/** (k4) A glob's trailing `/*`: "todo lo de bin". */
+	everythingIn: string;
+	/** (k4) Any other `*` in a glob: "lab algo". */
+	something: string;
+	/** (k5) An HTML tag by its name: "la etiqueta iframe". */
+	tag: (name: string) => string;
 }
 
 const SPANISH_UNITS = "cero uno dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce quince dieciséis diecisiete dieciocho diecinueve veinte veintiuno veintidós veintitrés veinticuatro veinticinco veintiséis veintisiete veintiocho veintinueve".split(" ");
@@ -406,6 +420,13 @@ const SPANISH: Phrasebook = {
 	minus: "menos",
 	cardinal: spanishCardinal,
 	agreement: { feminine: FEMININE, keepsUno: KEEPS_UNO },
+	oClock: "en punto",
+	months: "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre".split(" "),
+	date: (day, month, year) => `${day} de ${month} de ${year}`,
+	any: "cualquier",
+	everythingIn: "todo lo de",
+	something: "algo",
+	tag: (name) => `la etiqueta ${name}`,
 };
 
 const ENGLISH: Phrasebook = {
@@ -478,6 +499,13 @@ const ENGLISH: Phrasebook = {
 	comma: "comma",
 	minus: "minus",
 	cardinal: englishCardinal,
+	oClock: "o'clock",
+	months: "January February March April May June July August September October November December".split(" "),
+	date: (day, month, year) => `${month} ${day}, ${year}`,
+	any: "any",
+	everythingIn: "everything in",
+	something: "something",
+	tag: (name) => `the ${name} tag`,
 };
 
 const PHRASEBOOKS: Record<Language, Phrasebook> = { es: SPANISH, en: ENGLISH };
@@ -586,14 +614,23 @@ function numbersInWords(line: string): string {
 		// A decimal part ("2 punto 1 segundos") keeps "uno", as a decimal run does, and so does a name such as "T1".
 		const decimalPart = new RegExp(`(?:^|\\s)(?:${words.point}|${words.comma}) $`).test(before);
 		const glued = sign === "" && space(before.at(-1) ?? "") !== "";
-		const next = /^[ \t]+(\p{L}+)/u.exec(after)?.[1];
-		const reading = digitRun(run, decimalPart || glued ? undefined : next);
+		const following = /^[ \t]+(\p{L}+)(?:[ \t]+(\p{L}+))?/u.exec(after);
+		const next = following?.[1];
+		// (k1) "200 mil líneas": the hundreds agree with the noun after "mil".
+		const noun = next?.toLowerCase() === "mil" ? following?.[2] : next;
+		const reading = digitRun(run, decimalPart || glued ? undefined : { next: next ?? "", noun });
 		return `${sign === "" ? space(before.at(-1) ?? "") : ""}${sign}${reading}${space(after[0] ?? "")}`;
 	});
 }
 
-/** One run of digit groups; `next` is the word right after it, which a whole number agrees with (Spanish). */
-function digitRun(run: string, next: string | undefined): string {
+/** The word right after a number, and the noun it counts (the word after "mil" when that word is "mil"). */
+interface Following {
+	next: string;
+	noun: string | undefined;
+}
+
+/** One run of digit groups; `following` holds the words after it, which a whole number agrees with (Spanish). */
+function digitRun(run: string, following: Following | undefined): string {
 	const thousands = words.thousands
 		? /^([1-9]\d{0,2}(?:\.\d{3})+)(?:,(\d+))?$/.exec(run)
 		: words.commaThousands
@@ -601,11 +638,11 @@ function digitRun(run: string, next: string | undefined): string {
 			: null;
 	if (thousands && !IP_ADDRESS.test(run)) {
 		const whole = words.cardinal(Number(thousands[1].replace(/[.,]/g, "")));
-		return thousands[2] === undefined ? whole : `${whole} ${words.comma} ${digitGroup(thousands[2])}`;
+		return thousands[2] === undefined ? agreed(whole, following) : `${whole} ${words.comma} ${digitGroup(thousands[2])}`;
 	}
 	if (/^\d+$/.test(run)) {
 		const reading = digitGroup(run);
-		return run.length > 1 && (run.startsWith("0") || run.length > 9) ? reading : agreed(reading, next);
+		return run.length > 1 && (run.startsWith("0") || run.length > 9) ? reading : agreed(reading, following);
 	}
 	return run
 		.split(/([.,])/)
@@ -622,13 +659,26 @@ function digitGroup(digits: string): string {
 	return words.cardinal(Number(digits));
 }
 
-/** "uno" becomes "un" before a word, "una" before a listed feminine noun; it stays before a function word. */
-function agreed(reading: string, next: string | undefined): string {
+/**
+ * "uno" becomes "un" before a word, "una" before a listed feminine noun; it stays before a function word. (k1) Before
+ * a listed feminine noun, right after the number or after "mil", the hundreds below the millions are feminine too.
+ */
+function agreed(reading: string, following: Following | undefined): string {
 	const agreement = words.agreement;
-	if (!agreement || next === undefined || !/uno$/.test(reading)) return reading;
-	const word = next.toLowerCase();
-	if (agreement.feminine.has(word)) return reading.replace(/uno$/, "una");
-	return agreement.keepsUno.has(word) ? reading : apocope(reading);
+	if (!agreement || following === undefined || following.next === "") return reading;
+	const feminine = following.noun !== undefined && agreement.feminine.has(following.noun.toLowerCase());
+	const agreeing = feminine ? feminineHundreds(reading) : reading;
+	if (!/uno$/.test(agreeing)) return agreeing;
+	const word = following.next.toLowerCase();
+	if (agreement.feminine.has(word)) return agreeing.replace(/uno$/, "una");
+	return agreement.keepsUno.has(word) ? agreeing : apocope(agreeing);
+}
+
+/** (k1) "doscientos mil" → "doscientas mil"; "millón" and "millones" are masculine, so hundreds before them stay. */
+function feminineHundreds(reading: string): string {
+	const parts = reading.split(/(?<=millón |millones )/);
+	const last = parts.pop() ?? "";
+	return `${parts.join("")}${last.replace(/ientos(?![\p{L}])/gu, "ientas")}`;
 }
 
 /**
@@ -752,6 +802,8 @@ const NUMERIC = /^~?[\d.,:/]+$/;
 /** `noun` is the English noun right after the token, which the reading then leaves out ("the read command"). */
 function classified(core: string, previous: string, noun: string): string | undefined {
 	if (previous === "rama" || previous === "branch") return nameWords(core);
+	const moment = clockTime(core) ?? calendarDate(core) ?? htmlTag(core, previous, noun);
+	if (moment !== undefined) return moment;
 	const line = /^(.+):(\d+)$/.exec(core);
 	const file = line && (pathReading(line[1], previous) ?? fileName(line[1]));
 	if (line && file) return `${file}, ${words.line} ${line[2]}`;
@@ -769,8 +821,70 @@ function classified(core: string, previous: string, noun: string): string | unde
 		command(core, previous, noun) ??
 		fileName(core) ??
 		commitHash(core, previous) ??
+		glob(core) ??
 		slashWords(core)
 	);
+}
+
+/**
+ * (k2) A standalone `H:MM` or `HH:MM`, optionally `:SS`, reads like a digital clock, already in words: `21:02`
+ * "veintiuno cero dos", `07:30` "siete treinta", `07:00` "siete en punto". With seconds, minutes 00 read "cero cero".
+ */
+function clockTime(core: string): string | undefined {
+	const time = /^([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/.exec(core);
+	if (!time) return undefined;
+	const [, hour, minutes, seconds] = time;
+	const said = words.cardinal(Number(hour));
+	if (seconds === undefined && minutes === "00") return `${said} ${words.oClock}`;
+	return [said, digitGroup(minutes), ...(seconds === undefined ? [] : [digitGroup(seconds)])].join(" ");
+}
+
+/** (k3) `2026-10-27` and day-first `27/10/2026`, valid only: "veintisiete de octubre de dos mil veintiséis". */
+function calendarDate(core: string): string | undefined {
+	const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(core);
+	const dayFirst = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(core);
+	const [year, month, day] = iso ? [iso[1], iso[2], iso[3]] : dayFirst ? [dayFirst[3], dayFirst[2], dayFirst[1]] : [];
+	if (year === undefined || month === undefined || day === undefined) return undefined;
+	const [y, m, d] = [Number(year), Number(month), Number(day)];
+	// Day 0 of the next month is the last day of this one.
+	if (m < 1 || m > 12 || d < 1 || d > new Date(Date.UTC(y, m, 0)).getUTCDate()) return undefined;
+	return words.date(words.cardinal(d), words.months[m - 1], words.cardinal(y));
+}
+
+/** (k5) `<iframe>`, `</a>` and `<br/>` read "la etiqueta iframe" ("the iframe tag"); only the name after "etiqueta"/"tag". */
+function htmlTag(core: string, previous: string, noun: string): string | undefined {
+	const tag = /^<(\/?)(\p{L}[\p{L}\p{N}-]*)(\/?)>$/u.exec(core);
+	if (!tag || (tag[1] !== "" && tag[3] !== "")) return undefined;
+	const name = tag[2].replace(/-+/g, " ");
+	return previous === "etiqueta" || previous === "tag" || noun === "tag" ? name : words.tag(name);
+}
+
+/**
+ * (k4) A glob with a letter: a leading `*` reads "cualquier" (`*.hs.lan` "cualquier hs punto lan"), a trailing `/*`
+ * "todo lo de" plus the folder (`bin/*` "todo lo de bin"), any other `*` "algo" (`lab-*` "lab algo").
+ */
+function glob(core: string): string | undefined {
+	if (!core.includes("*") || !/^[\p{L}\p{N}._~/*-]+$/u.test(core) || !/\p{L}/u.test(core)) return undefined;
+	const folder = /^(.*[^/*])\/\*+$/.exec(core)?.[1];
+	if (folder !== undefined && !folder.includes("*")) return `${words.everythingIn} ${pathReading(`${folder}/`, "carpeta") ?? nameWords(folder)}`;
+	if (!core.startsWith("*")) return globWords(core);
+	const rest = globWords(core.replace(/^\*+/, ""));
+	return rest === "" ? undefined : `${words.any} ${rest}`;
+}
+
+/** A glob's parts as words, each `*` (or `**`) as "algo": `TEST_CKAN_*` "TEST CKAN algo". */
+function globWords(text: string): string {
+	return text
+		.split(/\*+/)
+		.map((part) =>
+			part
+				.replace(/^[._~/-]+|[._~/-]+$/g, "")
+				.replace(/(?<=[\p{L}\p{N}])\.(?=[\p{L}\p{N}])/gu, ` ${words.dot} `)
+				.replace(/[._~/-]+/g, " "),
+		)
+		.join(` ${words.something} `)
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 const BRANCH = /^(?:feat|fix|docs|chore|refactor|test|release|origin|upstream)\/[\p{L}\p{N}][\p{L}\p{N}._/-]*$/u;

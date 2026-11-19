@@ -37,7 +37,7 @@ describe("speechText", () => {
 	});
 
 	it("keeps emphasis markers inside inline code out of the emphasis rule", () => {
-		expect(speechText("Probá `a*b*c` ahora.")).toBe("Probá a*b*c ahora.");
+		expect(speechText("Probá `a*b*c` ahora.")).toBe("Probá a algo b algo c ahora.");
 	});
 
 	it("unwraps emphasis that contains inline code", () => {
@@ -168,7 +168,7 @@ describe("speechText", () => {
 
 	it("keeps plain numbers, dates and tagged versions unchanged; (h1) reads dotted numbers with 'punto'", () => {
 		expect(speechText("Son 1,044 respuestas, 42 tests y 3.5 s.")).toBe("Son uno coma cero cuatro cuatro respuestas, cuarenta y dos tests y tres punto cinco segundos.");
-		expect(speechText("El 2026-10-27 y `2026-10-27`.")).toBe("El dos mil veintiséis-diez-veintisiete y dos mil veintiséis-diez-veintisiete.");
+		expect(speechText("El 2026-10-27 y `2026-10-27`.")).toBe("El veintisiete de octubre de dos mil veintiséis y veintisiete de octubre de dos mil veintiséis.");
 		expect(speechText("Versiones 1.13.8, v2.0.1 y `sherpa-onnx-node@2.0.1`.")).toBe(
 			"Versiones uno punto trece punto ocho, v dos punto cero punto uno y sherpa-onnx-node@2.0.1.",
 		);
@@ -192,7 +192,7 @@ describe("speechText", () => {
 	it("(f1) speaks ~ right before a number as 'aproximadamente', whatever the noun's gender", () => {
 		expect(speechText("~1,2 s")).toBe("aproximadamente uno coma dos segundos");
 		expect(speechText("~99%")).toBe("aproximadamente noventa y nueve por ciento");
-		expect(speechText("Pasa las ~400 líneas en ~1 ms.")).toBe("Pasa las aproximadamente cuatrocientos líneas en aproximadamente un milisegundo.");
+		expect(speechText("Pasa las ~400 líneas en ~1 ms.")).toBe("Pasa las aproximadamente cuatrocientas líneas en aproximadamente un milisegundo.");
 		expect(speechText("| Pausa | ~0,33 s |\n|---|---|\n| Total | ~24 s (~5 min) |")).toBe(
 			"Pausa, aproximadamente cero coma treinta y tres segundos.\nTotal, aproximadamente veinticuatro segundos (aproximadamente cinco minutos).",
 		);
@@ -210,7 +210,7 @@ describe("speechText", () => {
 
 	it("(f1)/(f2) leave versions, dates, ~/ paths, URLs and unit-like words without a number alone", () => {
 		expect(speechText("Versión 1.13.8, el 2026-10-28, en `~/.gentle-shell` y ~/x/y.md.")).toBe(
-			"Versión uno punto trece punto ocho, el dos mil veintiséis-diez-veintiocho, en la carpeta gentle shell y y punto md, en x.",
+			"Versión uno punto trece punto ocho, el veintiocho de octubre de dos mil veintiséis, en la carpeta gentle shell y y punto md, en x.",
 		);
 		expect(speechText("Ver https://x.dev/a?b=~1&c=5%20s y los s, 3 semanas, 2 minas, v2 s, R1 ms.")).toBe(
 			"Ver x.dev y los s, tres semanas, dos minas, v dos s, R uno ms.",
@@ -269,7 +269,7 @@ describe("speechText", () => {
 			"Versión uno punto uno y cero punto ocho punto cero, con tres punto cinco segundos y aproximadamente uno punto cinco megabytes.",
 		);
 		expect(speechText("Usá `1.13.8` (o 2.1).")).toBe("Usá uno punto trece punto ocho (o dos punto uno).");
-		expect(speechText("Un contraste de 4.5:1, a las 22:48.")).toBe("Un contraste de cuatro punto cinco:uno, a las veintidós:cuarenta y ocho.");
+		expect(speechText("Un contraste de 4.5:1, a las 22:48.")).toBe("Un contraste de cuatro punto cinco:uno, a las veintidós cuarenta y ocho.");
 	});
 
 	it("(h1) turns the period after a dotted number ending a numbered heading, bold line or item into ':'", () => {
@@ -280,7 +280,7 @@ describe("speechText", () => {
 
 	it("(h1) keeps Spanish thousands as they are", () => {
 		expect(speechText("Son 2.750 respuestas y 1.500.000 bytes, no 0.750 ni 2.75.")).toBe(
-			"Son dos mil setecientos cincuenta respuestas y un millón quinientos mil bytes, no cero punto setecientos cincuenta ni dos punto setenta y cinco.",
+			"Son dos mil setecientas cincuenta respuestas y un millón quinientos mil bytes, no cero punto setecientos cincuenta ni dos punto setenta y cinco.",
 		);
 	});
 
@@ -556,7 +556,7 @@ describe("S2 (i1)-(i4): pending readings, round 1", () => {
 describe("S2 (j1): numbers in words", () => {
 	it("(j1) reads integers and Spanish thousands as words", () => {
 		expect(speechText("Hay 51 en 2026 y 11.457 respuestas.")).toBe(
-			"Hay cincuenta y uno en dos mil veintiséis y once mil cuatrocientos cincuenta y siete respuestas.",
+			"Hay cincuenta y uno en dos mil veintiséis y once mil cuatrocientas cincuenta y siete respuestas.",
 		);
 		expect(speechText("Son 15, 16, 22, 100, 101, 115, 500, 999, 1000, 1001, 21000, 100000, 1000000, 2500000 y 999999999.")).toBe(
 			"Son quince, dieciséis, veintidós, cien, ciento uno, ciento quince, quinientos, novecientos noventa y nueve, mil, mil uno, veintiún mil, cien mil, un millón, dos millones quinientos mil y novecientos noventa y nueve millones novecientos noventa y nueve mil novecientos noventa y nueve.",
@@ -586,7 +586,7 @@ describe("S2 (j1): numbers in words", () => {
 	});
 
 	it("(j1) reads a leading minus as menos/minus, not a hyphen between numbers", () => {
-		expect(speechText("Bajá a -16 dB y -3, el 2026-10-27.")).toBe("Bajá a menos dieciséis decibeles y menos tres, el dos mil veintiséis-diez-veintisiete.");
+		expect(speechText("Bajá a -16 dB y -3, el 2026-10-27.")).toBe("Bajá a menos dieciséis decibeles y menos tres, el veintisiete de octubre de dos mil veintiséis.");
 		expect(speechText("Set -16 dB and -3 for the run.", "en")).toBe("Set minus sixteen decibels and minus three for the run.");
 	});
 
@@ -741,7 +741,6 @@ describe("S12: narration plan, renderer and diagnostics", () => {
 		expect(speechNarration(text, "es").diagnostics).toEqual([
 			{ line: 1, token: "foo=bar" },
 			{ line: 1, token: "a+b" },
-			{ line: 3, token: "jd-*" },
 			{ line: 3, token: "a..HEAD" },
 		]);
 		expect(speechNarration("Todo claro: `README.md` en la rama `feat/x`.", "es").diagnostics).toEqual([]);
@@ -781,5 +780,87 @@ describe("S2 (j1): agreement lists tuned from real replies (L109)", () => {
 		expect(speechText("El paso 1 no corre, el 1 ya está, el 1 se borra, el 1 lo usa, el 1 está listo y el 1 sigue.", "es")).toBe(
 			"El paso uno no corre, el uno ya está, el uno se borra, el uno lo usa, el uno está listo y el uno sigue.",
 		);
+	});
+});
+
+describe("S2 (k1)-(k5): readings, round 3 (L112)", () => {
+	it("(k1) hundreds agree with a listed feminine noun right after the number or after mil, Spanish only", () => {
+		expect(speechText("Son 400 líneas, 500 respuestas, 221 líneas y 200.000 líneas.")).toBe(
+			"Son cuatrocientas líneas, quinientas respuestas, doscientas veintiuna líneas y doscientas mil líneas.",
+		);
+		expect(speechText("Hay 2.750 respuestas, 1.200.000 líneas, 300 mil preguntas y 901 horas.")).toBe(
+			"Hay dos mil setecientas cincuenta respuestas, un millón doscientas mil líneas, trescientas mil preguntas y novecientas una horas.",
+		);
+		// Masculine nouns, function words and the end keep the masculine.
+		expect(speechText("Son 400 tests, 200.000 bytes, 400 de las líneas y 500.")).toBe(
+			"Son cuatrocientos tests, doscientos mil bytes, cuatrocientos de las líneas y quinientos.",
+		);
+		expect(speechText("There are 400 lines and 221 lines for the run.", "en")).toBe(
+			"There are four hundred lines and two hundred twenty one lines for the run.",
+		);
+	});
+
+	it("(k2) reads a standalone H:MM or HH:MM[:SS] time like a digital clock, minutes 00 as en punto/o'clock", () => {
+		expect(speechText("A las `21:02`, `07:30` y `21:02:15`; luego `07:00`.")).toBe(
+			"A las veintiuno cero dos, siete treinta y veintiuno cero dos quince; luego siete en punto.",
+		);
+		expect(speechText("Entre 9:05, 0:00, 23:59 y (10:30).")).toBe("Entre nueve cero cinco, cero en punto, veintitrés cincuenta y nueve y (diez treinta).");
+		// With seconds, minutes 00 read as written (my call).
+		expect(speechText("A las 07:00:15.")).toBe("A las siete cero cero quince.");
+		expect(speechText("It starts at `07:30` and ends at 21:02, or 07:00 for the run.", "en")).toBe(
+			"It starts at seven thirty and ends at twenty one zero two, or seven o'clock for the run.",
+		);
+		// Anything else with ":" between digits keeps today's reading.
+		expect(speechText("Un contraste de 4.5:1, el 25:61, el 24:00 y `tcp:10.0.0.5:4713`.")).toBe(
+			"Un contraste de cuatro punto cinco:uno, el veinticinco:sesenta y uno, el veinticuatro:cero cero y tcp:diez punto cero punto cero punto cinco:cuatro mil setecientos trece.",
+		);
+	});
+
+	it("(k3) reads ISO and day-first dates with a year as '27 de octubre de 2026' / 'October 27, 2026'", () => {
+		expect(speechText("El 2026-10-27, el `27/10/2026`, el 2026-01-01 y el 1/1/2026.")).toBe(
+			"El veintisiete de octubre de dos mil veintiséis, el veintisiete de octubre de dos mil veintiséis, el uno de enero de dos mil veintiséis y el uno de enero de dos mil veintiséis.",
+		);
+		expect(speechText("It shipped on 2026-10-27 and 1/1/2026 for the run.", "en")).toBe(
+			"It shipped on October twenty seven, two thousand twenty six and January one, two thousand twenty six for the run.",
+		);
+		// Invalid months and days, and dates without a year, keep today's reading.
+		expect(speechText("El 2026-13-01, el 2026-02-30, el 31/04/2026, el 17/10 y 1/2.")).toBe(
+			"El dos mil veintiséis-trece-cero uno, el dos mil veintiséis-cero dos-treinta, el treinta y uno/cero cuatro/dos mil veintiséis, el diecisiete/diez y uno/dos.",
+		);
+		expect(speechText("Es el 2024-02-29.")).toBe("Es el veintinueve de febrero de dos mil veinticuatro.");
+	});
+
+	it("(k3) every month has its name in both languages", () => {
+		const spanish = "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre".split(" ");
+		const english = "January February March April May June July August September October November December".split(" ");
+		for (let month = 1; month <= 12; month++) {
+			const iso = `2026-${String(month).padStart(2, "0")}-15`;
+			expect(speechText(`El ${iso}.`, "es")).toBe(`El quince de ${spanish[month - 1]} de dos mil veintiséis.`);
+			expect(speechText(`On ${iso}.`, "en")).toBe(`On ${english[month - 1]} fifteen, two thousand twenty six.`);
+		}
+	});
+
+	it("(k4) reads globs: a leading * as cualquier/any, a trailing /* as todo lo de/everything in, any other * as algo/something", () => {
+		expect(speechText("Usá `*.hs.lan`, `bin/*`, `lab-*` y `TEST_CKAN_*`.")).toBe("Usá cualquier hs punto lan, todo lo de bin, lab algo y TEST CKAN algo.");
+		expect(speechText("Match `*.hs.lan`, `bin/*`, `lab-*` and `TEST_CKAN_*` in the list.", "en")).toBe(
+			"Match any hs dot lan, everything in bin, lab something and TEST CKAN something in the list.",
+		);
+		// A product with no letters and a lone mark are not globs (my call for the first).
+		expect(speechText("Probá `2*3`, 2 * 3 y `*`.")).toBe("Probá 2*3, dos * tres y asterisco.");
+		const narration = speechNarration("Usá `*.hs.lan`, `bin/*`, `lab-*`, `TEST_CKAN_*` y `a+b`.", "es");
+		expect(narration.diagnostics).toEqual([{ line: 1, token: "a+b" }]);
+	});
+
+	it("(k5) reads an HTML tag as 'la etiqueta name' / 'the name tag', only the name right after etiqueta/tag", () => {
+		expect(speechText("Usá `<iframe>`, `</a>` y `<br/>`, y la etiqueta `<div>`.")).toBe(
+			"Usá la etiqueta iframe, la etiqueta a y la etiqueta br, y la etiqueta div.",
+		);
+		expect(speechText("Dentro del `<iframe>` va <my-el>.")).toBe("Dentro de la etiqueta iframe va la etiqueta my el.");
+		expect(speechText("Use the `<iframe>` tag, then `</a>` and the tag `<h1>` in the page.", "en")).toBe(
+			"Use the iframe tag, then the a tag and the tag h one in the page.",
+		);
+		// Autolinks and markup glued to other text are not tags.
+		expect(speechText("Ver <https://x.dev/a> y `a<b>c`.")).toBe("Ver x.dev y a<b>c.");
+		expect(speechNarration("Usá `<iframe>` y `</a>`.", "es").diagnostics).toEqual([]);
 	});
 });

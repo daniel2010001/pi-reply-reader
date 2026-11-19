@@ -5,6 +5,12 @@
 - Numbers are spoken as words in the text's language (Supertonic mispronounced digits): "51" "cincuenta y
   uno", with Spanish "un"/"una" agreement by the next word, decimals, versions and IP addresses group by group,
   and numbers over 9 digits or starting with 0 digit by digit.
+- More readings: Spanish hundreds agree with a feminine noun (`400 líneas` "cuatrocientas líneas", `200.000
+  líneas` "doscientas mil líneas"); times read like a clock (`21:02` "veintiuno cero dos", `07:00` "siete en
+  punto"); dates with a year read in full (`2026-10-27` and `27/10/2026` "veintisiete de octubre de dos mil
+  veintiséis", "October twenty seven, two thousand twenty six"); globs (`*.hs.lan` "cualquier hs punto lan",
+  `bin/*` "todo lo de bin", `lab-*` "lab algo"); HTML tags (`<iframe>` "la etiqueta iframe", "the iframe
+  tag"). Diagnostics no longer report globs and tags.
 - Internal: the cleanup now builds a narration plan (blocks with a role: heading, paragraph, item, row, code
   block) and renders it in the reading's language; playback speaks the rendered fragments with each one's own
   pause instead of splitting the text again. `speechNarration(markdown, language?)` returns the text, the

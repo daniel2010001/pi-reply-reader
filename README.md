@@ -265,11 +265,20 @@ agent", "the branch origin main", "a commit", ", line 42", "1 point 1", "approxi
   - a key combination: `Ctrl+Shift+P` becomes "Control más Shift más P" ("plus" in English), `Alt+R` "Alt más R";
   - a minimum version: `v1+` becomes "v1 o superior" ("or later" in English), `v2.0+` "v2 punto 0 o superior",
     `1.4+` "1 punto 4 o superior";
-  - a count: `100+` becomes "100 o más" ("100 or more" in English), `300+ líneas` "300 o más líneas".
+  - a count: `100+` becomes "100 o más" ("100 or more" in English), `300+ líneas` "300 o más líneas";
+  - a time: `21:02` becomes "veintiuno cero dos", `07:30` "siete treinta" ("seven thirty"), `21:02:15`
+    "veintiuno cero dos quince" and `07:00` "siete en punto" ("seven o'clock"); hours 0-23 and minutes 00-59 only;
+  - a date with a year, `2026-10-27` or day first `27/10/2026`: "veintisiete de octubre de dos mil veintiséis"
+    ("October twenty seven, two thousand twenty six"); `17/10` and `1/2` stay as they are;
+  - a glob: `*.hs.lan` becomes "cualquier hs punto lan" ("any"), `bin/*` "todo lo de bin" ("everything in"),
+    `lab-*` "lab algo" ("something");
+  - an HTML tag: `<iframe>`, `</a>` or `<br/>` becomes "la etiqueta iframe" ("the iframe tag"; after
+    "etiqueta" or "tag", only the name);
   - numbers, last, in the text's language: `51` becomes "cincuenta y uno" ("fifty one"), `11.457` "once mil
     cuatrocientos cincuenta y siete", `1,2` "uno coma dos", `1.4` "uno punto cuatro", `-16` "menos dieciséis".
     In Spanish the number agrees with the next word: `1 segundo` "un segundo", `21 líneas` "veintiuna líneas",
-    `de 1 a 5` "de uno a cinco". Numbers of more than 9 digits, or starting with 0, are read digit by digit
+    `de 1 a 5` "de uno a cinco", and hundreds too: `400 líneas` "cuatrocientas líneas", `200.000 líneas`
+    "doscientas mil líneas". Numbers of more than 9 digits, or starting with 0, are read digit by digit
     (`007` "cero cero siete"). Digits in URLs, hosts and unrecognized technical tokens stay as written.
 
   Fractions like `1/2` keep their slash ("uno/dos") and short pairs like `y/o` stay as they are.
@@ -284,10 +293,14 @@ agent", "the branch origin main", "a commit", ", line 42", "1 point 1", "approxi
   written without a final `/` inside a longer path read as files (`/home/.snapshots` becomes "snapshots, en
   home"), browser versions written without `v` read as counts ("Chrome 123 o más"), and some hosts or code names
   read as file names (`org.bluez` becomes "org punto bluez").
-- Numbers: hundreds do not agree with a feminine noun ("cuatrocientos líneas"), the feminine list is
-  short (an unlisted feminine noun gets "un"), times and dates keep their separators ("veintiuno:cero dos",
-  "diecisiete/diez"), eight-digit stamps such as `20261026` are read as one number, and an English thousands
-  comma in Spanish text (`1,044`) reads as a decimal.
+- Numbers: the feminine list is short (an unlisted feminine noun gets "un" and masculine hundreds), a count
+  with `+` keeps the masculine ("trescientos o más líneas"), a date without a year or written month first
+  keeps its slashes ("diecisiete/diez"), eight-digit stamps such as `20261026` are read as one number, and an
+  English thousands comma in Spanish text (`1,044`) reads as a decimal.
+- Times, globs and tags are guessed from their shape: a ratio such as `1:30` reads as a time, a placeholder
+  such as `<archivo>` reads as a tag ("la etiqueta archivo"), a tag after an article doubles it ("un
+  `<iframe>`" reads "un la etiqueta iframe"), and Markdown written as code (`**negrita**`) reads as a glob
+  ("cualquier negrita algo").
 - The voice speaks with Spanish pronunciation, also for English text (only the words the cleanup adds
   switch to English there).
 
