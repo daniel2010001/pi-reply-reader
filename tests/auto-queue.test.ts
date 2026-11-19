@@ -90,6 +90,40 @@ describe("auto-read queue (T32, S8)", () => {
 		expect(state.started).toEqual(["P3", "P5"]);
 	});
 
+	it("clear(keep) drops only what keep rejects, the one being started too, and the kept ones still wait their turn in order (T33)", async () => {
+		let release!: () => void;
+		const { queue, state } = make((item) => (item === "auto-1" ? new Promise<StartResult>((done) => (release = () => done("done"))) : "done"));
+		queue.push("auto-1");
+		state.busy = true;
+		queue.push("manual-1");
+		queue.push("auto-2");
+		queue.push("manual-2");
+		await tick();
+		queue.clear((item) => item.startsWith("manual"));
+		expect(state.current[0]()).toBe(false);
+		expect(queue.size).toBe(2);
+		release();
+		await tick(80);
+		expect(state.started).toEqual(["auto-1"]);
+		state.busy = false;
+		await tick(80);
+		expect(state.started).toEqual(["auto-1", "manual-1", "manual-2"]);
+	});
+
+	it("clear(keep) leaves a kept reply being started current", async () => {
+		let release!: () => void;
+		const { queue, state } = make((item) => (item === "manual-1" ? new Promise<StartResult>((done) => (release = () => done("done"))) : "done"));
+		queue.push("manual-1");
+		queue.push("auto-1");
+		await tick();
+		queue.clear((item) => item.startsWith("manual"));
+		expect(state.current[0]()).toBe(true);
+		expect(queue.size).toBe(0);
+		release();
+		await tick(50);
+		expect(state.started).toEqual(["manual-1"]);
+	});
+
 	it("a failing start counts as done and the line goes on", async () => {
 		const { queue, state } = make((item) => {
 			if (item === "P3") throw new Error("boom");

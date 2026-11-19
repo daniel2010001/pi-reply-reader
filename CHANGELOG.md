@@ -21,6 +21,15 @@
   waiting on the machine; `/read-auto off` and the session's end drop that session's. Sessions coordinate
   through `$XDG_RUNTIME_DIR/pi-reply-reader/` as before (`waiting.json` and a short `reading.lock` mutex);
   without it a reply only waits for its own session.
+- A manual `/read` or a read request (pi-reply-thread's Alt+R `s`) while something is being read anywhere on
+  the machine asks first: `Something is being read.` with **Stop it and read now** (as before: stop, drop the
+  waiting auto-reads, read) and **Read after it** (it waits like an auto-read, after the session's waiting
+  replies; `/read-stop`, Esc and another manual reading drop it, `/read-auto off` keeps it). Dismissing the
+  question changes nothing. In Pi's TUI the question is a small overlay of its own, so it shows above the Alt+R
+  view; elsewhere it uses the host's selector. With nothing playing, or without a UI, it reads at once as
+  before. `/read-stop` and Esc never ask.
+- The `reply-reader` command now drops the auto-reads waiting in Pi sessions when it starts reading, as a
+  manual `/read` does; it never asks.
 
 ## 0.1.0 — 2026-11-17
 

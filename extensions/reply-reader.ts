@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir, hostname as osHostname } from "node:os";
 import { basename, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { type Component, Key, matchesKey, SelectList } from "@earendil-works/pi-tui";
 import { createAutoQueue, type StartResult } from "../src/auto-queue.ts";
 import { loadOutputs, type Output } from "../src/outputs.ts";
 import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
@@ -39,6 +39,57 @@ const AUTO_MESSAGES: Record<AutoMode, string> = {
 	questions: "Auto-read on: questions only.",
 	off: "Auto-read off.",
 };
+/** Asked when a manual /read or a read request comes while something plays (S8 Ask before cutting, T33). */
+const ASK_CUT = "Something is being read.";
+const CUT_NOW = "Stop it and read now";
+const CUT_AFTER = "Read after it";
+const CUT_CHOICES = [CUT_NOW, CUT_AFTER];
+/** Just the question, centred over whatever is open (pi-reply-thread's Alt+R view is a capturing overlay too). */
+const CUT_OVERLAY = { anchor: "center", width: 48 } as const;
+
+/** The part of Pi's theme the question uses. */
+interface QuestionTheme {
+	fg(color: "accent" | "border" | "dim" | "muted", text: string): string;
+	bold(text: string): string;
+}
+
+/**
+ * The "Something is being read." question as a small overlay of its own: a plain `ctx.ui.select` is drawn in the
+ * editor area, under any overlay open at the time (Alt+R), where it takes the keys unseen. Enter picks, Esc (or
+ * Ctrl+C) dismisses with undefined.
+ */
+function cutQuestion(theme: QuestionTheme, done: (choice: string | undefined) => void): Component {
+	const list = new SelectList(
+		CUT_CHOICES.map((value) => ({ value, label: value })),
+		CUT_CHOICES.length,
+		{
+			selectedPrefix: (text) => theme.fg("accent", text),
+			selectedText: (text) => theme.fg("accent", text),
+			description: (text) => theme.fg("muted", text),
+			scrollInfo: (text) => theme.fg("dim", text),
+			noMatch: (text) => theme.fg("dim", text),
+		},
+	);
+	list.onSelect = (item) => done(item.value);
+	list.onCancel = () => done(undefined);
+	return {
+		render: (width) => {
+			const border = theme.fg("border", "─".repeat(Math.max(1, width)));
+			const inner = Math.max(1, width - 1);
+			return [
+				border,
+				` ${theme.fg("accent", theme.bold(ASK_CUT))}`,
+				"",
+				...list.render(inner).map((line) => ` ${line}`),
+				"",
+				` ${theme.fg("dim", "↑↓ navigate  enter select  esc cancel")}`,
+				border,
+			];
+		},
+		handleInput: (data) => list.handleInput(data),
+		invalidate: () => list.invalidate(),
+	};
+}
 
 /** Why a Markdown file could not be read, in the user's words. */
 function readProblem(error: NodeJS.ErrnoException): string {
@@ -59,6 +110,9 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * interrupts (S8 Queue, T32): a reply due while a reading plays here or in another session waits, in order, and is read
  * once the machine is free; an explicit /read (or read request), /read-stop or Esc drops every reply waiting on the
  * machine, and /read-auto off or the session's end drops this session's.
+ * Ask before cutting (S8, T33): a manual /read or read request while a reading plays anywhere asks "Something is being
+ * read.": "Stop it and read now" (the above), "Read after it" (it waits like an auto-read, after this session's waiting
+ * replies, and explicit actions drop it), or dismissed (nothing changes). Without a UI, or with nothing playing, it reads.
  * Other extensions (pi-reply-thread's Alt+R view) reach it over `pi.events` (S10, src/reader-events.ts): a ping is
  * answered with ready, ready is also sent at each session start, and a read request reads its text like `/read`.
  */
@@ -92,19 +146,29 @@ export function createReplyReader(
 		/** Ends this session's subscriptions on `pi.events`. */
 		let unsubscribeEvents: (() => void) | undefined;
 
-		/** A reply due for auto-read, with the machine's waiting mark when it was queued (S8 Queue). */
+		/** How many "Something is being read." questions are open; Esc belongs to them meanwhile. */
+		let asking = 0;
+
+		/**
+		 * A reply due for auto-read, or a manual request answered "Read after it" (T33), with the machine's waiting mark
+		 * when it was queued (S8 Queue). `name` and `label` are as for readAloud.
+		 */
 		interface Waiting {
 			ctx: ExtensionContext;
-			id: string;
+			name: string;
+			label: string;
 			markdown: string;
-			language: Language;
+			language: Language | undefined;
 			mark: string | undefined;
+			manual?: true;
 		}
+		/** Whether a reading plays (or is starting) in this session or anywhere on the machine. */
+		const playing = (): boolean => current !== undefined || (openReadingLock(env)?.busy() ?? false);
 		/** This session's waiting auto-reads; without a usable XDG_RUNTIME_DIR it only waits for this session's readings. */
 		const queue = createAutoQueue<Waiting>({
-			busy: () => current !== undefined || (openReadingLock(env)?.busy() ?? false),
+			busy: playing,
 			start: (item, still) =>
-				readAloud(item.ctx, item.id, item.id, item.markdown, item.language, { mark: item.mark, still }).catch((error: Error) => {
+				readAloud(item.ctx, item.name, item.label, item.markdown, item.language, { mark: item.mark, still }).catch((error: Error) => {
 					item.ctx.ui.notify(error.message, "error");
 					return "done" as const;
 				}),
@@ -265,6 +329,43 @@ export function createReplyReader(
 			return "done";
 		};
 
+		/**
+		 * Asks "Something is being read." (T33): as an overlay of its own in Pi's TUI, so it shows above another overlay
+		 * (Alt+R); elsewhere (RPC, a host without overlays) through ctx.ui.select. Undefined when dismissed.
+		 */
+		const askCut = async (ctx: ExtensionContext): Promise<"now" | "after" | undefined> => {
+			asking++;
+			try {
+				const choice =
+					ctx.mode === "tui" && typeof ctx.ui.custom === "function"
+						? await ctx.ui.custom<string | undefined>((_tui, theme, _keybindings, done) => cutQuestion(theme, done), {
+								overlay: true,
+								overlayOptions: CUT_OVERLAY,
+							})
+						: await ctx.ui.select(ASK_CUT, CUT_CHOICES);
+				return choice === CUT_NOW ? "now" : choice === CUT_AFTER ? "after" : undefined;
+			} finally {
+				asking--;
+			}
+		};
+
+		/**
+		 * A manual /read or a read request (S8 Ask before cutting): with a UI and a reading playing anywhere, asks first.
+		 * The answer is acted on as things are then: "Read after it" joins the line, which starts it at once if the
+		 * reading ended meanwhile; "Stop it and read now" stops whatever plays by then.
+		 */
+		const readRequested = async (ctx: ExtensionContext, name: string, label: string, markdown: string, language?: Language): Promise<void> => {
+			if (ctx.hasUI && playing() && speechNarration(markdown, language).text) {
+				const answer = await askCut(ctx);
+				if (!answer) return;
+				if (answer === "after") {
+					queue.push({ ctx, name, label, markdown, language, mark: openReadingLock(env)?.waitingMark(), manual: true });
+					return;
+				}
+			}
+			await readAloud(ctx, name, label, markdown, language);
+		};
+
 		command("read", {
 			description:
 				"Read a reply aloud: the latest, or one by ID (P12.R1); or a Markdown file (notes.md); add #section for one section (notes.md#install, #usage), then rest to read on to the end",
@@ -321,7 +422,7 @@ export function createReplyReader(
 					}
 					markdown = from;
 				}
-				await readAloud(ctx, name, label, markdown, language);
+				await readRequested(ctx, name, label, markdown, language);
 			},
 		});
 
@@ -428,8 +529,9 @@ export function createReplyReader(
 					return;
 				}
 				auto = modes[wanted];
-				// Off drops this session's waiting replies (S8); other sessions' are theirs.
-				if (auto === "off") queue.clear();
+				// Off drops this session's waiting replies (S8); other sessions' are theirs. A request the user chose to read
+				// after the current one is not an auto-read and stays (T33).
+				if (auto === "off") queue.clear((item) => item.manual === true);
 				ctx.ui.notify(AUTO_MESSAGES[auto], "info");
 			},
 		});
@@ -454,7 +556,7 @@ export function createReplyReader(
 			if (markdown === undefined) return;
 			// Queued, never awaited: it waits for any reading playing here or on the machine (S8 Queue), and a download
 			// confirm or the output question must not hold Pi's settlement.
-			queue.push({ ctx, id: reply.id, markdown, language: detectLanguage(reply.text), mark: openReadingLock(env)?.waitingMark() });
+			queue.push({ ctx, name: reply.id, label: reply.id, markdown, language: detectLanguage(reply.text), mark: openReadingLock(env)?.waitingMark() });
 		});
 
 		/** Subscribes this session to the reader's channels (S10), replacing any earlier subscription, and says it is ready. */
@@ -473,8 +575,9 @@ export function createReplyReader(
 				const request = parseReadRequest(data);
 				const ctx = latest;
 				if (!request || !ctx) return;
-				// Not awaited: the sender gets no answer; a download confirm or the output question are the reader's.
-				readAloud(ctx, request.id, request.id, request.text, detectLanguage(request.text)).catch((error: Error) =>
+				// Not awaited: the sender gets no answer; the "Something is being read." question, a download confirm or the
+				// output question are the reader's.
+				readRequested(ctx, request.id, request.id, request.text, detectLanguage(request.text)).catch((error: Error) =>
 					ctx.ui.notify(error.message, "error"),
 				);
 			});
@@ -499,7 +602,8 @@ export function createReplyReader(
 			unsubscribe?.();
 			unsubscribe = ctx.hasUI
 				? ctx.ui.onTerminalInput((data) => {
-						if (!current || !matchesKey(data, Key.escape)) return undefined;
+						// While the "Something is being read." question is open, Esc dismisses it and stops nothing (T33).
+						if (asking > 0 || !current || !matchesKey(data, Key.escape)) return undefined;
 						// Esc stops this session's reading and drops every auto-read waiting on the machine (S8): dropped first,
 						// so no waiter can take the machine between the reading ending and the drop.
 						queue.clear();

@@ -18,7 +18,8 @@ const LOCK = pathToFileURL(resolve(import.meta.dirname, "..", "src", "reading-lo
  * then stays until its reading clears the footer (or 20 s), and keeps `<out>` up to date with what the user saw.
  * When `<root>/hold-<name>` exists at start, loading the voice waits until it is removed.
  * Besides commands: `turn <text>` is an agent run that ends with that reply (T32), `await <file>` waits until
- * `<root>/<file>` exists, and `esc` presses Esc.
+ * `<root>/<file>` exists, and `esc` presses Esc. The "Something is being read." question (T33) is answered as Pi's TUI
+ * would, with the keys of `answer now|after|dismiss` (default now, today's behaviour), and recorded in `asked`.
  */
 const DRIVER = `
 import { existsSync, renameSync, writeFileSync } from "node:fs";
@@ -26,7 +27,9 @@ const [extension, envJson, root, name, ...commands] = process.argv.slice(2);
 const { createReplyReader } = await import(extension);
 const env = JSON.parse(envJson);
 const out = root + "/" + name + ".json";
-const state = { pid: process.pid, notes: [], statuses: [], ran: false, consumedEsc: [] };
+const state = { pid: process.pid, notes: [], statuses: [], ran: false, consumedEsc: [], asked: [] };
+const KEYS = { now: ["\\r"], after: ["\\x1b[B", "\\r"], dismiss: ["\\x1b"] };
+let answer = "now";
 const save = () => { writeFileSync(out + ".tmp", JSON.stringify(state)); renameSync(out + ".tmp", out); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const hold = root + "/hold-" + name;
@@ -52,6 +55,12 @@ const ctx = {
 		confirm: async () => false,
 		setStatus: (_key, text) => { state.statuses.push(text ?? null); save(); },
 		onTerminalInput: (handler) => ((input = handler), () => (input = undefined)),
+		custom: (factory) => new Promise((resolve) => {
+			const component = factory({ requestRender() {} }, { fg: (_color, text) => text, bold: (text) => text }, undefined, resolve);
+			state.asked.push(component.render(60).map((line) => line.trim()).filter((line) => line && !/^─+$/.test(line)).slice(0, 3));
+			save();
+			for (const key of KEYS[answer]) if (!input?.(key)?.consume) component.handleInput(key);
+		}),
 	},
 };
 events.get("session_start")({ reason: "startup" }, ctx);
@@ -64,6 +73,8 @@ for (const command of commands) {
 		events.get("agent_settled")({ type: "agent_settled", aborted: false }, ctx);
 	} else if (cmd === "await") {
 		while (!existsSync(root + "/" + rest)) await sleep(20);
+	} else if (cmd === "answer") {
+		answer = rest;
 	} else if (cmd === "esc") {
 		state.notes.push(["esc", input?.("\\x1b") ?? null]);
 		save();
@@ -131,6 +142,7 @@ interface Seen {
 	statuses: (string | null)[];
 	ran: boolean;
 	consumedEsc: unknown[];
+	asked: string[][];
 }
 
 /** Starts a session process named `name` that runs `commands`, with `sessionEnv` as the extension's env. */
@@ -539,6 +551,63 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		expect((await ran(b)).notes).toEqual([["Auto-read on: full replies.", "info"]]);
 		await a.exited;
 		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc stops", null] });
+	});
+
+	describe("ask before cutting (T33, S8)", () => {
+		const QUESTION = ["Something is being read.", "→ Stop it and read now", "Read after it"];
+
+		it("a manual /read in another process while one plays asks; Read after it waits for it, then plays", async () => {
+			const a = start("a", ["read"]);
+			const playerA = await playerOf(a.child);
+			const b = start("b", ["answer after", "read P1.R1", "await go-b"]);
+			await waitFor(() => existsSync(join(root, "b.json")) && b.seen().asked.length === 1);
+			expect(b.seen().asked).toEqual([QUESTION]);
+			await wait();
+			expect([alive(playerA), hasPlayer(b)]).toEqual([true, false]);
+			finish(playerA);
+			await playThrough(() => b.seen().statuses.includes(null));
+			go("go-b");
+			await Promise.all([a.exited, b.exited]);
+			expect(lines()).toEqual([`start ${a.child.pid}`, `end ${a.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`]);
+			expect(b.seen()).toMatchObject({ notes: [], statuses: ["Reading P1.R1 on local · Esc stops", null] });
+		});
+
+		it("dismissing it in another process changes nothing: the reading plays on, the waiting auto-reads stay, nothing else plays", async () => {
+			const a = start("a", ["read"]);
+			const playerA = await playerOf(a.child);
+			const c = auto("c", ["Uno."]);
+			await noted(c);
+			const b = start("b", ["answer dismiss", "read P1.R1", "await go-b"]);
+			await waitFor(() => existsSync(join(root, "b.json")) && b.seen().asked.length === 1);
+			expect(b.seen().asked).toEqual([QUESTION]);
+			await wait();
+			expect([alive(playerA), hasPlayer(b), hasPlayer(c)]).toEqual([true, false, false]);
+			finish(playerA);
+			await playThrough(() => c.seen().statuses.includes(null));
+			await wait();
+			go("go-b");
+			go("go-c");
+			await Promise.all([a.exited, b.exited, c.exited]);
+			expect(lines()).toEqual([`start ${a.child.pid}`, `end ${a.child.pid}`, `start ${c.child.pid}`, `end ${c.child.pid}`]);
+			expect(b.seen()).toMatchObject({ notes: [], statuses: [] });
+		});
+
+		it("a request waiting after Read after it is dropped by a third session's /read-stop", async () => {
+			const a = start("a", ["read"]);
+			const playerA = await playerOf(a.child);
+			const b = start("b", ["answer after", "read P1.R1", "await go-b"]);
+			await waitFor(() => existsSync(join(root, "b.json")) && b.seen().asked.length === 1);
+			const c = start("c", ["read-stop"]);
+			await c.exited;
+			await waitFor(() => !alive(playerA));
+			await wait();
+			expect(hasPlayer(b)).toBe(false);
+			go("go-b");
+			await Promise.all([a.exited, b.exited]);
+			expect(lines()).toEqual([`start ${a.child.pid}`, `term ${a.child.pid}`]);
+			expect(c.seen().notes).toEqual([["Reading stopped.", "info"]]);
+			expect([a.seen().asked, c.seen().asked]).toEqual([[], []]);
+		});
 	});
 
 	it("without a usable XDG_RUNTIME_DIR the queue is per session: another session's reading is not waited for", async () => {

@@ -489,7 +489,69 @@ describe("reply-reader command (S6)", () => {
 		expect((await finished(["notes.md"])).code).toBe(0);
 		expect(await exited).toBe("SIGTERM");
 	});
+
+	it("drops the auto-reads waiting in Pi sessions when it starts reading, as a manual /read does, and never asks (S8)", async () => {
+		installVoice();
+		note("notes.md", "Hola.");
+		// Another reader's reading holds the machine; its player carries the mark the lock checks.
+		const otherPlayer = spawn("/bin/sh", ["-c", "sleep 30; :", "paplay", PLAYER_MARK], { stdio: "ignore" });
+		spawned.push(otherPlayer);
+		const other = openReadingLock(env)!.claim();
+		expect(other.setPlayer(otherPlayer.pid!)).toBe(true);
+		writeFileSync(join(root, "pi.mjs"), PI_SESSION);
+		const pi = spawn(process.execPath, [join(root, "pi.mjs"), EXTENSION, JSON.stringify(env), root], { stdio: "ignore" });
+		spawned.push(pi);
+		const seen = () => JSON.parse(readFileSync(join(root, "pi.json"), "utf8")) as { statuses: unknown[]; notes: unknown[]; asked: unknown[]; waiting: boolean };
+		await waitFor(() => existsSync(join(root, "pi.json")) && seen().waiting, 10000);
+		await sleep(600);
+		expect(seen().statuses).toEqual([]);
+		expect(await finished(["notes.md"])).toEqual({ code: 0, out: "", err: "", asked: [] });
+		expect(texts()).toEqual(["Hola."]);
+		// Free now: a reply still waiting would start within the reader's 250 ms checks.
+		await sleep(900);
+		expect(seen()).toEqual({ statuses: [], notes: [["Auto-read on: full replies.", "info"]], asked: [], waiting: true });
+	}, 20000);
 });
+
+const EXTENSION = pathToFileURL(resolve(import.meta.dirname, "..", "extensions", "reply-reader.ts")).href;
+
+/**
+ * A Pi session in its own process (as in tests/reading-lock.test.ts): loads the extension with a fake engine, turns
+ * auto-read on, ends a turn with a reply, and keeps `<root>/pi.json` up to date with its footer, messages and every
+ * question it was asked, until it is killed.
+ */
+const PI_SESSION = `
+import { renameSync, writeFileSync } from "node:fs";
+const [extension, envJson, root] = process.argv.slice(2);
+const { createReplyReader } = await import(extension);
+const state = { statuses: [], notes: [], asked: [], waiting: false };
+const save = () => { writeFileSync(root + "/pi.json.tmp", JSON.stringify(state)); renameSync(root + "/pi.json.tmp", root + "/pi.json"); };
+const commands = new Map();
+const events = new Map();
+const loadSherpa = async () => ({ sampleRate: 44100, async generateAsync() { return { samples: new Float32Array(1).fill(0.125) }; } });
+createReplyReader({ env: JSON.parse(envJson), hostname: "hs-node", loadSherpa })({ registerCommand: (n, o) => commands.set(n, o), on: (e, h) => events.set(e, h) });
+const message = (id, role, text) => ({ type: "message", id, timestamp: "t", message: role === "user" ? { role, content: text } : { role, stopReason: "stop", content: [{ type: "text", text }] } });
+const branch = [message("u1", "user", "hola"), message("a1", "assistant", "Primera respuesta.")];
+const ctx = {
+	hasUI: true, mode: "tui", cwd: root, sessionManager: { getBranch: () => branch },
+	ui: {
+		notify: (text, type) => { state.notes.push([text, type]); save(); },
+		select: async (title) => { state.asked.push(title); save(); return undefined; },
+		confirm: async () => false,
+		custom: async () => { state.asked.push("custom"); save(); return undefined; },
+		setStatus: (_key, text) => { state.statuses.push(text ?? null); save(); },
+		onTerminalInput: () => () => {},
+	},
+};
+events.get("session_start")({ reason: "startup" }, ctx);
+await commands.get("read-auto").handler("on", ctx);
+events.get("agent_start")({ type: "agent_start" }, ctx);
+branch.push(message("u2", "user", "sigue"), message("a2", "assistant", "Uno."));
+events.get("agent_settled")({ type: "agent_settled", aborted: false }, ctx);
+state.waiting = true;
+save();
+setInterval(() => {}, 1000);
+`;
 
 /** The voice archive served from 127.0.0.1; with `stall` the server sends the headers and part of it, then waits. */
 async function serveArchive(options: { stall?: boolean } = {}): Promise<VoiceArchive> {

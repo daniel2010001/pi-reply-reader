@@ -21,8 +21,11 @@ export interface AutoQueueOptions<T> {
 export interface AutoQueue<T> {
 	/** Adds a reply at the end of the line, starting it at once when nothing plays. */
 	push(item: T): void;
-	/** Drops every waiting reply and the one being started (/read-auto off, the session's end, an explicit action). */
-	clear(): void;
+	/**
+	 * Drops every waiting reply and the one being started (the session's end, an explicit action). With `keep`, only
+	 * those it rejects (/read-auto off keeps a manual request waiting after "Read after it", T33).
+	 */
+	clear(keep?: (item: T) => boolean): void;
 	/** Checks the line again now, as when this session's reading ended. */
 	kick(): void;
 	/** How many replies wait. */
@@ -33,8 +36,8 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 	let items: T[] = [];
 	/** Bumped by clear(); a start begun under an older generation is no longer current. */
 	let generation = 0;
-	/** Whether a start is in flight; only one at a time. */
-	let starting = false;
+	/** The reply whose start is in flight; only one at a time. */
+	let starting: { item: T } | undefined;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 
 	const later = (): void => {
@@ -52,10 +55,10 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 		const item = items.shift() as T;
 		const mine = generation;
 		const current = () => mine === generation;
-		starting = true;
+		starting = { item };
 		const attempt = (async () => options.start(item, current))().catch((): StartResult => "done");
 		void attempt.then((result) => {
-			starting = false;
+			starting = undefined;
 			if (result === "busy" && current()) {
 				// Taken between the check and the claim: try again on the next check, not in a tight loop.
 				items.unshift(item);
@@ -72,11 +75,13 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 			items.push(item);
 			pump();
 		},
-		clear() {
-			items = [];
-			generation++;
+		clear(keep) {
+			items = keep ? items.filter(keep) : [];
+			if (!keep || !starting || !keep(starting.item)) generation++;
 			clearTimeout(timer);
 			timer = undefined;
+			// Kept replies still wait for the machine.
+			later();
 		},
 		kick() {
 			clearTimeout(timer);

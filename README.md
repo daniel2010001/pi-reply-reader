@@ -67,10 +67,14 @@ While a reading plays, the footer shows `Reading P12.R1 on local · Esc stops` (
   interrupt a running agent turn at that moment; press it again for that.
 - **`/read-stop`** stops the reading and says `Reading stopped.`; with nothing playing it says
   `Nothing is being read.` and changes nothing.
-- **A new `/read`** stops the reading that is playing and starts the new one.
+- **A new `/read`** while something is being read, here or in another session, first asks
+  `Something is being read.`: **Stop it and read now** stops the reading playing and starts the new one;
+  **Read after it** waits like an auto-read (see [Auto-read](#auto-read)) and plays once nothing does; Esc
+  dismisses the question and changes nothing. With nothing playing, or without a UI, `/read` reads at once.
+  `/read-stop` and Esc never ask.
 - **One reading per machine.** The last reading wins across every Pi or Gentle Shell session of your user on
-  the machine: a new `/read` in one session stops a reading playing in another, and `/read-stop` stops it
-  too. The session whose reading was stopped just clears its footer, with no error. Sessions find each other
+  the machine: a new `/read` in one session (answered **Stop it and read now**) stops a reading playing in
+  another, and `/read-stop` stops it too. The session whose reading was stopped just clears its footer, with no error. Sessions find each other
   through a small file in `$XDG_RUNTIME_DIR/pi-reply-reader/` (an entry left by a session that is gone is
   ignored). Without a usable `XDG_RUNTIME_DIR`, each session only stops its own readings. Esc only stops the
   reading of the session you press it in.
@@ -124,10 +128,16 @@ speed, footer and stop keys (Esc, `/read-stop`) as `/read`, and still follow one
 Auto-read never interrupts. A reply that is due while a reading plays, in this session or in any other Pi or
 Gentle Shell session or `reply-reader` command on the machine, waits and is read once nothing plays; one
 session's replies are read in order. Nothing shows while a reply waits. Explicit actions still win: a manual
-`/read` (or a read from pi-reply-thread's Alt+R view), `/read-stop` and Esc stop the reading playing, as
-always, and also drop every auto-read waiting on the machine at that moment; replies due after that are read
-as usual. `/read-auto off` and the end of the session drop that session's waiting replies. Without a usable
-`XDG_RUNTIME_DIR`, a reply only waits for its own session's readings.
+`/read` (or a read from pi-reply-thread's Alt+R view) answered **Stop it and read now**, `/read-stop` and Esc
+stop the reading playing, as always, and also drop every auto-read waiting on the machine at that moment; replies due after that are read
+as usual. The standalone `reply-reader` command drops them too when it starts reading. `/read-auto off` and the
+end of the session drop that session's waiting replies. Without a usable `XDG_RUNTIME_DIR`, a reply only waits
+for its own session's readings.
+
+A manual `/read` (or a read from Alt+R) that you answer **Read after it** joins the same line: it is read after
+the replies already waiting in its session, once nothing plays, and `/read-stop`, Esc or another manual reading
+drops it, here or in any session. It is not an auto-read, so `/read-auto off` keeps it; the end of the session
+drops it.
 
 ### pi-reply-thread
 
@@ -136,6 +146,8 @@ reads the selected reply (Replies tab and the reply viewer) or only the selected
 Answered tabs). The key and its hint appear only when this reader is loaded. A reading started there is the
 same as `/read`: same cleanup, language, output question on first use, voice, speed, footer (naming the
 reply or question ID), Esc, `/read-stop` and one reading per machine. Neither package depends on the other.
+While something is being read, `s` asks the same `Something is being read.` question as `/read`. It opens
+in a small box above the Alt+R view, and once it is answered or dismissed (Esc) the keys go back to the view.
 
 #### Event contract for other extensions
 
@@ -145,7 +157,7 @@ Any extension can use the reader over Pi's shared event bus (`pi.events`). Contr
 |---|---|---|
 | `reply-reader:ping` | `{ v: 1 }` | Is a reader there? Answered with `reply-reader:ready` synchronously, before your `emit` returns. |
 | `reply-reader:ready` | `{ v: 1 }` | The reader is there. Also sent at every session start. |
-| `reply-reader:read` | `{ v: 1, id: string, text: string }` | Read `text` (Markdown) aloud like `/read`, naming `id` in the footer and in `<id> has nothing to read.` |
+| `reply-reader:read` | `{ v: 1, id: string, text: string }` | Read `text` (Markdown) aloud like `/read`, naming `id` in the footer and in `<id> has nothing to read.`; while something is being read the reader asks first, as `/read` does. |
 
 ```ts
 let readerReady = false;
@@ -174,7 +186,7 @@ voice, saved speed, outputs and one-reading-per-machine rule as `/read`. `-` rea
 If the voice is missing, the command asks `[y/N]` before downloading it. Without a terminal, or when reading
 standard input, it exits with an error instead of downloading. Ctrl+C, `kill` or closing the terminal stops
 the reading. A new `/read` or `/read-stop` in any Pi session stops a command reading, and the command stops a
-Pi reading.
+Pi reading without asking, dropping the auto-reads waiting in Pi sessions as a manual `/read` does.
 
 Exit codes: 0 read (or nothing to read, or stopped by another reading), 1 cannot read, download or play,
 2 bad arguments, 129/130/143 stopped by SIGHUP, Ctrl+C or SIGTERM.

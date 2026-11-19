@@ -96,7 +96,8 @@ function parse(argv: string[]): Options | "help" | { problem: string } {
 /**
  * `reply-reader <file.md>` (S6): reads a Markdown file, or standard input with "-", aloud from a terminal without Pi,
  * through the same cleanup (S2, S7), voice and download confirm, saved speed (S3), named outputs (S4) and one reading
- * per machine (S1) as `/read`. Resolves with the exit code; nothing throws.
+ * per machine (S1) as `/read`; starting to read drops the auto-reads waiting in Pi sessions (S8). Resolves with the
+ * exit code; nothing throws.
  */
 export async function main(argv: string[], deps: CliDeps): Promise<number> {
 	const { env, stdout, stderr, signal } = deps;
@@ -180,8 +181,9 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 	}
 	if (signal?.aborted) return INTERRUPTED;
 
-	// Without a usable XDG_RUNTIME_DIR there is no claim, and only Ctrl+C stops this reading.
-	const claim = openReadingLock(env)?.claim();
+	// Without a usable XDG_RUNTIME_DIR there is no claim, and only Ctrl+C stops this reading. Like a manual /read it drops
+	// the auto-reads waiting in Pi sessions (S8, T33); it never asks.
+	const claim = openReadingLock(env)?.claim({ dropWaiting: true });
 	let interrupted = false;
 	const reading = startReading({
 		voice,

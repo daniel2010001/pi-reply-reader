@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripTerminalSequences, Text, TuiMainScreen } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import replyReader, { createReplyReader } from "../extensions/reply-reader.ts";
 import type { SherpaRequest, SherpaTts } from "../src/playback.ts";
@@ -129,8 +130,22 @@ function createBus() {
 	};
 }
 
-/** Loads the extension into a recording Pi and returns a driver for its commands, events and UI. */
-function load(answers: { select?: string; confirm?: boolean } = {}, start: unknown[] = branch) {
+/** The keys that pick each answer of the "Something is being read." question (T33): Enter, Down then Enter, Esc. */
+const CUT_KEYS = { now: ["\r"], after: ["\x1b[B", "\r"], dismiss: ["\x1b"] } as const;
+type CutAnswer = keyof typeof CUT_KEYS;
+/** A theme that adds no colour, so a rendered question reads as plain text. */
+const PLAIN_THEME = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+
+/**
+ * Loads the extension into a recording Pi and returns a driver for its commands, events and UI.
+ * `ctx.ui.custom` builds the component the way Pi's TUI does and answers the reader's question with `cut` (default
+ * "now", today's behaviour), each key going first through the terminal input listeners as in Pi; "wait" leaves it
+ * open until `answer()`.
+ */
+function load(
+	answers: { select?: string; confirm?: boolean; cut?: CutAnswer | "wait"; hasUI?: boolean; mode?: string; ui?: Record<string, unknown> } = {},
+	start: unknown[] = branch,
+) {
 	/** The session branch; a test appends to it to simulate a new turn. */
 	const entries = [...start];
 	const commands = new Map<string, { handler: Handler; getArgumentCompletions?: Handler }>();
@@ -148,9 +163,20 @@ function load(answers: { select?: string; confirm?: boolean } = {}, start: unkno
 	const confirms: string[] = [];
 	const statuses: (string | undefined)[] = [];
 	let input: ((data: string) => unknown) | undefined;
+	/** Every question shown through ctx.ui.custom, as plain rendered lines, and the options it was shown with. */
+	const asked: string[][] = [];
+	const overlays: unknown[] = [];
+	let open: { handleInput(data: string): void } | undefined;
+	const press = (choice: CutAnswer): void => {
+		const component = open;
+		for (const key of CUT_KEYS[choice]) {
+			if ((input?.(key) as { consume?: boolean } | undefined)?.consume) continue;
+			component?.handleInput(key);
+		}
+	};
 	const ctx = {
-		hasUI: true,
-		mode: "tui",
+		hasUI: answers.hasUI ?? true,
+		mode: answers.mode ?? "tui",
 		cwd: join(root, "work"),
 		sessionManager: { getBranch: () => entries },
 		ui: {
@@ -159,6 +185,24 @@ function load(answers: { select?: string; confirm?: boolean } = {}, start: unkno
 			confirm: async (_title: string, message: string) => (confirms.push(message), answers.confirm ?? false),
 			setStatus: (_key: string, text: string | undefined) => statuses.push(text),
 			onTerminalInput: (handler: (data: string) => unknown) => ((input = handler), () => (input = undefined)),
+			custom: (
+				factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: unknown) => void) => {
+					render(width: number): string[];
+					handleInput(data: string): void;
+				},
+				options: unknown,
+			) =>
+				new Promise((resolve) => {
+					const component = factory({ requestRender: () => {} }, PLAIN_THEME, undefined, (result) => {
+						if (open === component) open = undefined;
+						resolve(result);
+					});
+					open = component;
+					overlays.push(options);
+					asked.push(component.render(60).map((line) => line.trimEnd()));
+					if (answers.cut !== "wait") press(answers.cut ?? "now");
+				}),
+			...answers.ui,
 		},
 	};
 	(events.get("session_start") as (event: unknown, ctx: unknown) => void)({ reason: "startup" }, ctx);
@@ -168,6 +212,12 @@ function load(answers: { select?: string; confirm?: boolean } = {}, start: unkno
 		commands,
 		notes,
 		selects,
+		asked,
+		overlays,
+		/** Answers the open question with the keys a person would press. */
+		answer: press,
+		/** Whether a question is still open. */
+		asking: () => open !== undefined,
 		confirms,
 		statuses,
 		run: (name: string, args = "") => (commands.get(name)!.handler as (a: string, c: unknown) => Promise<void>)(args, ctx),
@@ -541,6 +591,381 @@ describe("reply-reader extension", () => {
 					["Auto-read off.", "info"],
 					["Auto-read on: full replies.", "info"],
 				]);
+			});
+		});
+
+		describe("ask before cutting (T33, S8, S10)", { timeout: 20000 }, () => {
+			const holding = () => {
+				writeFileSync(log("hold"), "");
+				installVoice(`while [ -e "${root}/hold" ]; do sleep 0.02; done;`);
+			};
+			const pid = (n: number) => Number(read(`play-${n}.pid`));
+			const has = (n: number) => existsSync(log(`play-${n}.pid`));
+			const wait = () => new Promise((resolve) => setTimeout(resolve, 700));
+			const ended = (reader: ReturnType<typeof load>, n: number) => waitFor(() => reader.statuses.filter((status) => status === undefined).length === n);
+			const shared = () => {
+				env.XDG_RUNTIME_DIR = join(root, "run");
+				mkdirSync(env.XDG_RUNTIME_DIR, { recursive: true });
+			};
+			/** The question as the user sees it: the title, the two choices with the first one selected, and the keys. */
+			const QUESTION = ["Something is being read.", "→ Stop it and read now", "Read after it"];
+			const shown = (lines: string[]) => lines.map((line) => line.trim()).filter((line) => line && !/^─+$/.test(line));
+
+			it("a manual /read while this session reads asks first, in a small overlay of its own, and stops nothing while it is open", async () => {
+				holding();
+				const reader = load({ cut: "wait" });
+				await reader.run("read");
+				await waitFor(() => has(0));
+				void reader.run("read", "P1.R1");
+				await waitFor(reader.asking);
+				const [title, first, second, hint] = shown(reader.asked[0]);
+				expect([title, first, second]).toEqual(QUESTION);
+				expect(hint).toMatch(/select.*cancel/);
+				expect(reader.asked).toHaveLength(1);
+				expect(reader.overlays).toEqual([{ overlay: true, overlayOptions: { anchor: "center", width: 48 } }]);
+				expect(reader.selects).toEqual([]);
+				await wait();
+				expect(alive(pid(0))).toBe(true);
+				expect(has(1)).toBe(false);
+				reader.answer("dismiss");
+				rmSync(log("hold"));
+				await ended(reader, 1);
+			});
+
+			it("in Pi's TUI the question is painted above a capturing overlay (Alt+R), takes its keys, and gives them back on closing", async () => {
+				holding();
+				const terminal = {
+					...Object.fromEntries(
+						["start", "stop", "write", "moveBy", "hideCursor", "showCursor", "clearLine", "clearFromCursor", "clearScreen", "setTitle", "setProgress", "setProgramStatus"].map(
+							(name) => [name, () => {}],
+						),
+					),
+					drainInput: async () => {},
+					columns: 80,
+					rows: 24,
+					kittyProtocolActive: false,
+				};
+				const tui = new TuiMainScreen(terminal as never);
+				tui.addChild(new Text("the editor", 0, 0));
+				/** pi-reply-thread's Alt+R view: a capturing overlay with the same options, filled with V. */
+				const viewKeys: string[] = [];
+				const view = { render: (width: number) => Array.from({ length: 20 }, () => "V".repeat(width)), handleInput: (data: string) => void viewKeys.push(data), invalidate() {} };
+				tui.showOverlay(view, { width: "90%", maxHeight: "90%", anchor: "center" });
+				// What Pi's showExtensionCustom does for { overlay: true }: build the component, show it, hide it on done.
+				const custom = (
+					factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: unknown) => void) => never,
+					options: { overlayOptions?: never },
+				) =>
+					new Promise((resolve) => {
+						let handle: { hide(): void } | undefined;
+						const component = factory(tui, PLAIN_THEME, undefined, (result) => {
+							handle?.hide();
+							resolve(result);
+						});
+						handle = tui.showOverlay(component, options.overlayOptions);
+					});
+				const reader = load({ ui: { custom, onTerminalInput: (handler: never) => tui.addInputListener(handler) } });
+				const type = (data: string) => (tui as unknown as { handleTerminalInput(data: string): void }).handleTerminalInput(data);
+				const screen = () =>
+					(tui as unknown as { compositeOverlays(lines: string[], width: number, height: number): string[] })
+						.compositeOverlays(tui.render(80), 80, 24)
+						.map((line) => stripTerminalSequences(line));
+				await reader.run("read");
+				await waitFor(() => has(0));
+				type("j");
+				reader.bus.emit(READER_EVENTS.read, { v: 1, id: "P9.R1", text: "Nueve." });
+				await waitFor(() => screen().some((line) => line.includes("Something is being read.")));
+				const rows = screen();
+				const title = rows.findIndex((line) => line.includes("Something is being read."));
+				// The view's V's on both sides of the question: it is drawn over the view, not under it.
+				expect(rows[title]).toMatch(/^ *V+.*Something is being read\..*V+ *$/);
+				expect(rows.slice(title, title + 4).join("\n")).toMatch(/Stop it and read now[\s\S]*Read after it/);
+				// Small: only the question's own rows cover the middle of the view.
+				const covered = rows.filter((line) => line.slice(4, 10) === "VVVVVV" && line[40] !== "V").length;
+				expect(covered).toBeGreaterThanOrEqual(4);
+				expect(covered).toBeLessThanOrEqual(8);
+				type("x");
+				expect(viewKeys).toEqual(["j"]);
+				// Esc closes the question (changing nothing, the reading here keeps playing), and the view has the keys again.
+				type("\x1b");
+				await waitFor(() => !screen().some((line) => line.includes("Something is being read.")));
+				expect(tui.getFocusedComponent()).toBe(view);
+				type("k");
+				expect(viewKeys).toEqual(["j", "k"]);
+				await wait();
+				expect([alive(pid(0)), has(1)]).toEqual([true, false]);
+				expect(reader.notes).toEqual([]);
+				rmSync(log("hold"));
+				await ended(reader, 1);
+			});
+
+			it("a manual /read while another session reads (S1's lock) asks too", async () => {
+				shared();
+				holding();
+				const a = load();
+				const b = load({ cut: "wait" });
+				await a.run("read");
+				await waitFor(() => has(0));
+				void b.run("read", "P1.R1");
+				await waitFor(b.asking);
+				expect(shown(b.asked[0]).slice(0, 2)).toEqual(QUESTION.slice(0, 2));
+				expect(alive(pid(0))).toBe(true);
+				b.answer("dismiss");
+				rmSync(log("hold"));
+				await ended(a, 1);
+			});
+
+			it("Stop it and read now does what /read did: stops the reading, drops every waiting auto-read on the machine, reads", async () => {
+				shared();
+				holding();
+				const a = load();
+				const c = load();
+				const b = load({ cut: "now" });
+				await a.run("read");
+				await waitFor(() => has(0));
+				await c.run("read-auto", "on");
+				c.turn([user("a"), assistant("Uno.")]);
+				await wait();
+				await b.run("read", "P1.R1");
+				expect(b.asked).toHaveLength(1);
+				await waitFor(() => !alive(pid(0)));
+				await waitFor(() => has(1));
+				rmSync(log("hold"));
+				await ended(b, 1);
+				await wait();
+				expect(has(2)).toBe(false);
+				expect(texts()).not.toContain("Uno.");
+				expect(b.statuses).toEqual(["Reading P1.R1 on local · Esc stops", undefined]);
+				expect([a.notes, b.notes]).toEqual([[], []]);
+			});
+
+			it("Read after it waits like an auto-read, after this session's waiting replies, then plays; nothing is cut", async () => {
+				holding();
+				const reader = load({ cut: "after" });
+				await reader.run("read-auto", "on");
+				await reader.run("read");
+				await waitFor(() => has(0));
+				reader.turn([user("a"), assistant("Uno.")]);
+				await reader.run("read", "P1.R1");
+				await wait();
+				expect(alive(pid(0))).toBe(true);
+				expect(has(1)).toBe(false);
+				rmSync(log("hold"));
+				await ended(reader, 3);
+				expect(texts().slice(-2)).toEqual(["Uno.", "Primera respuesta."]);
+				expect([0, 1, 2].map((n) => existsSync(log(`play-${n}.audio`)))).toEqual([true, true, true]);
+				expect(reader.statuses.filter(Boolean)).toEqual([
+					"Reading P2.R1 on local · Esc stops",
+					"Reading P3.R1 on local · Esc stops",
+					"Reading P1.R1 on local · Esc stops",
+				]);
+				expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
+			});
+
+			it("Read after it waits for another session's reading and plays when the machine is free", async () => {
+				shared();
+				holding();
+				const a = load();
+				const b = load({ cut: "after" });
+				await a.run("read");
+				await waitFor(() => has(0));
+				await b.run("read", "P1.R1");
+				await wait();
+				expect([alive(pid(0)), has(1)]).toEqual([true, false]);
+				rmSync(log("hold"));
+				await ended(b, 1);
+				expect(b.statuses).toEqual(["Reading P1.R1 on local · Esc stops", undefined]);
+				expect(existsSync(log("play-0.audio"))).toBe(true);
+				expect([a.notes, b.notes]).toEqual([[], []]);
+			});
+
+			for (const how of ["/read-stop", "Esc", "another manual /read", "another session's /read-stop"] as const) {
+				it(`a request waiting after Read after it is dropped by ${how}`, async () => {
+					shared();
+					holding();
+					const reader = load({ cut: "wait" });
+					const other = load();
+					await reader.run("read");
+					await waitFor(() => has(0));
+					const asked = reader.run("read", "P1.R1");
+					await waitFor(reader.asking);
+					reader.answer("after");
+					await asked;
+					await wait();
+					expect([alive(pid(0)), has(1)]).toEqual([true, false]);
+					if (how === "/read-stop") await reader.run("read-stop");
+					if (how === "Esc") expect(reader.key("\x1b")).toEqual({ consume: true });
+					if (how === "another session's /read-stop") await other.run("read-stop");
+					if (how === "another manual /read") {
+						reader.bus.emit(READER_EVENTS.read, { v: 1, id: "P9.R1", text: "Nueve." });
+						await waitFor(() => reader.asked.length === 2);
+						reader.answer("now");
+					}
+					await waitFor(() => !alive(pid(0)));
+					rmSync(log("hold"));
+					await wait();
+					expect(texts()).not.toContain("Primera respuesta.");
+					expect(reader.statuses.filter(Boolean)).toEqual(
+						how === "another manual /read"
+							? ["Reading P2.R1 on local · Esc stops", "Reading P9.R1 on local · Esc stops"]
+							: ["Reading P2.R1 on local · Esc stops"],
+					);
+				});
+			}
+
+			it("/read-auto off keeps a request waiting after Read after it: it is no auto-read (worker's call)", async () => {
+				holding();
+				const reader = load({ cut: "after" });
+				await reader.run("read-auto", "on");
+				await reader.run("read");
+				await waitFor(() => has(0));
+				reader.turn([user("a"), assistant("Uno.")]);
+				await reader.run("read", "P1.R1");
+				await reader.run("read-auto", "off");
+				rmSync(log("hold"));
+				await ended(reader, 2);
+				expect(texts()).not.toContain("Uno.");
+				expect(texts().at(-1)).toBe("Primera respuesta.");
+			});
+
+			it("dismissing the question (Esc, even while this session reads) changes nothing: nothing stops, nothing plays, no message", async () => {
+				holding();
+				const reader = load({ cut: "dismiss" });
+				await reader.run("read-auto", "on");
+				await reader.run("read");
+				await waitFor(() => has(0));
+				reader.turn([user("a"), assistant("Uno.")]);
+				await reader.run("read", "P1.R1");
+				reader.bus.emit(READER_EVENTS.read, { v: 1, id: "P9.R1", text: "Nueve." });
+				await waitFor(() => reader.asked.length === 2 && !reader.asking());
+				await wait();
+				expect(alive(pid(0))).toBe(true);
+				expect(has(1)).toBe(false);
+				expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
+				expect(reader.statuses).toEqual(["Reading P2.R1 on local · Esc stops"]);
+				// The waiting auto-read was not dropped; the dismissed requests never play.
+				rmSync(log("hold"));
+				await ended(reader, 2);
+				await wait();
+				expect(texts().slice(-1)).toEqual(["Uno."]);
+				expect(texts()).not.toContain("Primera respuesta.");
+				expect(texts()).not.toContain("Nueve.");
+				expect(has(2)).toBe(false);
+			});
+
+			it("with nothing playing, or without a UI, /read and a read request read at once without asking", async () => {
+				holding();
+				const idle = load({ cut: "wait" });
+				await idle.run("read", "P1.R1");
+				await waitFor(() => has(0));
+				idle.shutdown();
+				await waitFor(() => !alive(pid(0)));
+				const event = load({ cut: "wait" });
+				event.bus.emit(READER_EVENTS.read, { v: 1, id: "P9.R1", text: "Nueve." });
+				await waitFor(() => has(1));
+				event.shutdown();
+				await waitFor(() => !alive(pid(1)));
+				expect([idle.asked, event.asked]).toEqual([[], []]);
+
+				const headless = load({ hasUI: false, cut: "wait" });
+				await headless.run("read");
+				await waitFor(() => has(2));
+				await headless.run("read", "P1.R1");
+				await waitFor(() => !alive(pid(2)));
+				await waitFor(() => has(3));
+				headless.bus.emit(READER_EVENTS.read, { v: 1, id: "P9.R1", text: "Nueve." });
+				await waitFor(() => !alive(pid(3)));
+				await waitFor(() => has(4));
+				expect(headless.asked).toEqual([]);
+				expect(headless.selects).toEqual([]);
+				headless.shutdown();
+				await waitFor(() => !alive(pid(4)));
+			});
+
+			it("a read request (Alt+R s) while a reading plays asks the same question; each answer works as for /read", async () => {
+				holding();
+				const reader = load({ cut: "wait" });
+				await reader.run("read");
+				await waitFor(() => has(0));
+				reader.bus.emit(READER_EVENTS.read, { v: 1, id: "P9.R1", text: "Nueve." });
+				await waitFor(reader.asking);
+				expect([shown(reader.asked[0])[0], shown(reader.asked[0])[1]]).toEqual(QUESTION.slice(0, 2));
+				reader.answer("after");
+				await wait();
+				expect([alive(pid(0)), has(1)]).toEqual([true, false]);
+				reader.bus.emit(READER_EVENTS.read, { v: 1, id: "P8.R1", text: "Ocho." });
+				await waitFor(() => reader.asked.length === 2);
+				reader.answer("now");
+				await waitFor(() => !alive(pid(0)));
+				await waitFor(() => has(1));
+				rmSync(log("hold"));
+				await ended(reader, 2);
+				await wait();
+				// "Ocho" was an explicit reading: it dropped the request waiting after the first answer.
+				expect(texts()).not.toContain("Nueve.");
+				expect(reader.statuses.filter(Boolean)).toEqual(["Reading P2.R1 on local · Esc stops", "Reading P8.R1 on local · Esc stops"]);
+				expect(reader.notes).toEqual([]);
+			});
+
+			it("/read-stop and Esc never ask; /read-auto and /read-stop say what they said before", async () => {
+				shared();
+				holding();
+				const a = load({ cut: "wait" });
+				const b = load({ cut: "wait" });
+				await a.run("read");
+				await waitFor(() => has(0));
+				await b.run("read-auto", "on");
+				await b.run("read-auto", "questions");
+				await b.run("read-auto", "maybe");
+				await b.run("read-stop");
+				await waitFor(() => !alive(pid(0)));
+				await b.run("read-stop");
+				await b.run("read-auto", "off");
+				await a.run("read");
+				await waitFor(() => has(1));
+				expect(a.key("\x1b")).toEqual({ consume: true });
+				await waitFor(() => !alive(pid(1)));
+				expect([a.asked, b.asked]).toEqual([[], []]);
+				expect(b.notes).toEqual([
+					["Auto-read on: full replies.", "info"],
+					["Auto-read on: questions only.", "info"],
+					["Use /read-auto on, questions or off.", "warning"],
+					["Reading stopped.", "info"],
+					["Nothing is being read.", "info"],
+					["Auto-read off.", "info"],
+				]);
+				expect(a.notes).toEqual([]);
+			});
+
+			it("outside the TUI (RPC) the question goes through ctx.ui.select, with the same title and choices", async () => {
+				holding();
+				const reader = load({ mode: "rpc", select: "Read after it", cut: "wait" });
+				await reader.run("read");
+				await waitFor(() => has(0));
+				await reader.run("read", "P1.R1");
+				expect(reader.selects).toEqual([["Something is being read.", ["Stop it and read now", "Read after it"]]]);
+				expect(reader.asked).toEqual([]);
+				await wait();
+				expect([alive(pid(0)), has(1)]).toEqual([true, false]);
+				rmSync(log("hold"));
+				await ended(reader, 2);
+				expect(texts().at(-1)).toBe("Primera respuesta.");
+			});
+
+			it("a question still open when the reading ends: Read after it then plays at once, and Stop it and read now reads", async () => {
+				holding();
+				const reader = load({ cut: "wait" });
+				await reader.run("read");
+				await waitFor(() => has(0));
+				const asked = reader.run("read", "P1.R1");
+				await waitFor(reader.asking);
+				rmSync(log("hold"));
+				await ended(reader, 1);
+				reader.answer("after");
+				await asked;
+				await ended(reader, 2);
+				expect(texts().at(-1)).toBe("Primera respuesta.");
+				expect(reader.notes).toEqual([]);
 			});
 		});
 
