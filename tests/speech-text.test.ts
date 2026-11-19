@@ -4,7 +4,7 @@ import { detectLanguage, narrationPlan, renderNarration, speechNarration, speech
 describe("speechText", () => {
 	it("leaves plain prose untouched", () => {
 		expect(speechText("Hola, esto es texto normal. 2 * 3 * 4 = 24.")).toBe(
-			"Hola, esto es texto normal. 2 * 3 * 4 = 24.",
+			"Hola, esto es texto normal. dos * tres * cuatro = veinticuatro.",
 		);
 	});
 
@@ -20,13 +20,13 @@ describe("speechText", () => {
 
 	it("drops bullet, number punctuation and checkbox markers", () => {
 		expect(speechText("- uno\n* dos\n+ tres\n1) cuatro\n- [x] hecho\n- [ ] pendiente")).toBe(
-			"uno.\ndos.\ntres.\n1: cuatro.\nhecho.\npendiente.",
+			"uno.\ndos.\ntres.\nuno: cuatro.\nhecho.\npendiente.",
 		);
 	});
 
 	it("speaks a table row by row, without pipes or the separator", () => {
 		expect(speechText("| Col 1 | Col 2 | Col 3 |\n|---|:---:|---|\n| a | **b** | c |\n| d | | f |")).toBe(
-			"Col 1, Col 2, Col 3.\na, b, c.\nd, f.",
+			"Col uno, Col dos, Col tres.\na, b, c.\nd, f.",
 		);
 	});
 
@@ -86,7 +86,7 @@ describe("speechText", () => {
 
 	it("speaks dotted reply IDs as their parts", () => {
 		expect(speechText("Citó P11.R1.Q1 a Q5, ver P11.R1 y `P12.R3.Q2`.")).toBe(
-			"Citó P 11, R 1, Q 1 a Q5, ver P 11, R 1 y P 12, R 3, Q 2.",
+			"Citó P once, R uno, Q uno a Q cinco, ver P once, R uno y P doce, R tres, Q dos.",
 		);
 	});
 
@@ -94,7 +94,7 @@ describe("speechText", () => {
 		expect(speechText("s llena R: Sí. o → Sí. según el formato (→).")).toBe("s llena R: Sí. o a Sí. según el formato (a).");
 		expect(speechText("a ⇒ b ➜ c ← d, la sugerencia ≈.")).toBe("a a b a c desde d, la sugerencia aproximadamente.");
 		expect(speechText("x ≠ y, n ≥ 2, n ≤ 5, ± 3, 1920×1080, 3 × 4, R&D y `a && b`.")).toBe(
-			"x distinto de y, n mayor o igual a 2, n menor o igual a 5, más o menos 3, 1920 por 1080, 3 por 4, R y D y a y b.",
+			"x distinto de y, n mayor o igual a dos, n menor o igual a cinco, más o menos tres, mil novecientos veinte por mil ochenta, tres por cuatro, R y D y a y b.",
 		);
 	});
 
@@ -119,7 +119,7 @@ describe("speechText", () => {
 	});
 
 	it("(e3) speaks path:N as the file reading plus its line", () => {
-		expect(speechText("Mirá `src/speech-text.ts:42`.")).toBe("Mirá speech text punto ts, en src, línea 42.");
+		expect(speechText("Mirá `src/speech-text.ts:42`.")).toBe("Mirá speech text punto ts, en src, línea cuarenta y dos.");
 	});
 
 	it("(e4) speaks a path as its last part plus its folder", () => {
@@ -143,7 +143,7 @@ describe("speechText", () => {
 	it("(e7) speaks a bare file name with 'punto', leaving versions, numbers and URL hosts", () => {
 		expect(speechText("`README.md`")).toBe("README punto md");
 		expect(speechText("Leé `README.md`. Y CHANGELOG.md, v2.0.1, 3.5 y https://pi.dev/docs.")).toBe(
-			"Leé README punto md. Y CHANGELOG punto md, v2.0.1, 3 punto 5 y pi.dev.",
+			"Leé README punto md. Y CHANGELOG punto md, v dos punto cero punto uno, tres punto cinco y pi.dev.",
 		);
 		expect(speechText("Desde `422773f..HEAD`.")).toBe("Desde 422773f..HEAD.");
 	});
@@ -156,7 +156,7 @@ describe("speechText", () => {
 	});
 
 	it("keeps fractions and y/o-style words as they are", () => {
-		expect(speechText("Leé 1/2 o `3/4` y/o and/or.")).toBe("Leé 1/2 o 3/4 y/o and/or.");
+		expect(speechText("Leé 1/2 o `3/4` y/o and/or.")).toBe("Leé uno/dos o tres/cuatro y/o and/or.");
 	});
 
 	it("keeps URL hosts unchanged next to the path rule", () => {
@@ -167,10 +167,10 @@ describe("speechText", () => {
 	});
 
 	it("keeps plain numbers, dates and tagged versions unchanged; (h1) reads dotted numbers with 'punto'", () => {
-		expect(speechText("Son 1,044 respuestas, 42 tests y 3.5 s.")).toBe("Son 1,044 respuestas, 42 tests y 3 punto 5 segundos.");
-		expect(speechText("El 2026-10-27 y `2026-10-27`.")).toBe("El 2026-10-27 y 2026-10-27.");
+		expect(speechText("Son 1,044 respuestas, 42 tests y 3.5 s.")).toBe("Son uno coma cero cuatro cuatro respuestas, cuarenta y dos tests y tres punto cinco segundos.");
+		expect(speechText("El 2026-10-27 y `2026-10-27`.")).toBe("El dos mil veintiséis-diez-veintisiete y dos mil veintiséis-diez-veintisiete.");
 		expect(speechText("Versiones 1.13.8, v2.0.1 y `sherpa-onnx-node@2.0.1`.")).toBe(
-			"Versiones 1 punto 13 punto 8, v2.0.1 y sherpa-onnx-node@2.0.1.",
+			"Versiones uno punto trece punto ocho, v dos punto cero punto uno y sherpa-onnx-node@2.0.1.",
 		);
 	});
 
@@ -190,32 +190,32 @@ describe("speechText", () => {
 	});
 
 	it("(f1) speaks ~ right before a number as 'aproximadamente', whatever the noun's gender", () => {
-		expect(speechText("~1,2 s")).toBe("aproximadamente 1,2 segundos");
-		expect(speechText("~99%")).toBe("aproximadamente 99 por ciento");
-		expect(speechText("Pasa las ~400 líneas en ~1 ms.")).toBe("Pasa las aproximadamente 400 líneas en aproximadamente 1 milisegundo.");
+		expect(speechText("~1,2 s")).toBe("aproximadamente uno coma dos segundos");
+		expect(speechText("~99%")).toBe("aproximadamente noventa y nueve por ciento");
+		expect(speechText("Pasa las ~400 líneas en ~1 ms.")).toBe("Pasa las aproximadamente cuatrocientos líneas en aproximadamente un milisegundo.");
 		expect(speechText("| Pausa | ~0,33 s |\n|---|---|\n| Total | ~24 s (~5 min) |")).toBe(
-			"Pausa, aproximadamente 0,33 segundos.\nTotal, aproximadamente 24 segundos (aproximadamente 5 minutos).",
+			"Pausa, aproximadamente cero coma treinta y tres segundos.\nTotal, aproximadamente veinticuatro segundos (aproximadamente cinco minutos).",
 		);
 	});
 
 	it("(f2) speaks units right after a number as words", () => {
 		expect(speechText("Tarda 1 s, 2,5 s, 250 ms, 3 min, 12 KB, 4,5 MB, 2 GB, 80%, -16 dB y -1 dBFS.")).toBe(
-			"Tarda 1 segundo, 2,5 segundos, 250 milisegundos, 3 minutos, 12 kilobytes, 4,5 megabytes, 2 gigabytes, 80 por ciento, -16 decibeles y -1 decibel.",
+			"Tarda un segundo, dos coma cinco segundos, doscientos cincuenta milisegundos, tres minutos, doce kilobytes, cuatro coma cinco megabytes, dos gigabytes, ochenta por ciento, menos dieciséis decibeles y menos un decibel.",
 		);
-		expect(speechText("En `1.5s` y 30ms.")).toBe("En 1 punto 5 segundos y 30 milisegundos.");
+		expect(speechText("En `1.5s` y 30ms.")).toBe("En uno punto cinco segundos y treinta milisegundos.");
 		expect(speechText("1 ms, 1 min, 1 KB, 1 MB, 1 GB, 1 dB, 1% y 1,0 s.")).toBe(
-			"1 milisegundo, 1 minuto, 1 kilobyte, 1 megabyte, 1 gigabyte, 1 decibel, 1 por ciento y 1,0 segundos.",
+			"un milisegundo, un minuto, un kilobyte, un megabyte, un gigabyte, un decibel, uno por ciento y uno coma cero segundos.",
 		);
 	});
 
 	it("(f1)/(f2) leave versions, dates, ~/ paths, URLs and unit-like words without a number alone", () => {
 		expect(speechText("Versión 1.13.8, el 2026-10-28, en `~/.gentle-shell` y ~/x/y.md.")).toBe(
-			"Versión 1 punto 13 punto 8, el 2026-10-28, en la carpeta gentle shell y y punto md, en x.",
+			"Versión uno punto trece punto ocho, el dos mil veintiséis-diez-veintiocho, en la carpeta gentle shell y y punto md, en x.",
 		);
 		expect(speechText("Ver https://x.dev/a?b=~1&c=5%20s y los s, 3 semanas, 2 minas, v2 s, R1 ms.")).toBe(
-			"Ver x.dev y los s, 3 semanas, 2 minas, v2 s, R1 ms.",
+			"Ver x.dev y los s, tres semanas, dos minas, v dos s, R uno ms.",
 		);
-		expect(speechText("Usá `%d`, `printf(\"%s\")` y a~1.")).toBe('Usá %d, printf("%s") y a~1.');
+		expect(speechText("Usá `%d`, `printf(\"%s\")` y a~1.")).toBe('Usá %d, printf("%s") y a~uno.');
 	});
 
 	it("(f3) speaks inline code holding a single punctuation mark by name", () => {
@@ -242,9 +242,9 @@ describe("speechText", () => {
 	});
 
 	it("(g1) speaks an ordered list marker as \"N:\" so playback does not cut after the number", () => {
-		expect(speechText("1. Después\n2) Luego")).toBe("1: Después.\n2: Luego.");
-		expect(speechText("Versión 2. Luego sigue.")).toBe("Versión 2. Luego sigue.");
-		expect(speechText("## 1. Estado de gsh\n**2. Engram listo.** Bajé todo.")).toBe("1: Estado de gsh.\n\n2: Engram listo. Bajé todo.");
+		expect(speechText("1. Después\n2) Luego")).toBe("uno: Después.\ndos: Luego.");
+		expect(speechText("Versión 2. Luego sigue.")).toBe("Versión dos. Luego sigue.");
+		expect(speechText("## 1. Estado de gsh\n**2. Engram listo.** Bajé todo.")).toBe("uno: Estado de gsh.\n\ndos: Engram listo. Bajé todo.");
 	});
 
 	it("(g2) undoes a contraction before an article a reading inserts", () => {
@@ -259,55 +259,55 @@ describe("speechText", () => {
 	});
 
 	it("(g3) speaks the closing \"Needs your decision\" heading in Spanish", () => {
-		expect(speechText("## Needs your decision\n1. ¿Seguimos?")).toBe("Decisiones pendientes.\n\n1: ¿Seguimos?");
-		expect(speechText("**Needs your decision:**\n1. ¿Sí?")).toBe("Decisiones pendientes.\n\n1: ¿Sí?");
+		expect(speechText("## Needs your decision\n1. ¿Seguimos?")).toBe("Decisiones pendientes.\n\nuno: ¿Seguimos?");
+		expect(speechText("**Needs your decision:**\n1. ¿Sí?")).toBe("Decisiones pendientes.\n\nuno: ¿Sí?");
 		expect(speechText("Needs your decision")).toBe("Needs your decision");
 	});
 
 	it("(h1) reads a number with dots with 'punto'", () => {
 		expect(speechText("Versión 1.1 y 0.8.0, con 3.5 s y ~1.5 MB.")).toBe(
-			"Versión 1 punto 1 y 0 punto 8 punto 0, con 3 punto 5 segundos y aproximadamente 1 punto 5 megabytes.",
+			"Versión uno punto uno y cero punto ocho punto cero, con tres punto cinco segundos y aproximadamente uno punto cinco megabytes.",
 		);
-		expect(speechText("Usá `1.13.8` (o 2.1).")).toBe("Usá 1 punto 13 punto 8 (o 2 punto 1).");
-		expect(speechText("Un contraste de 4.5:1, a las 22:48.")).toBe("Un contraste de 4 punto 5:1, a las 22:48.");
+		expect(speechText("Usá `1.13.8` (o 2.1).")).toBe("Usá uno punto trece punto ocho (o dos punto uno).");
+		expect(speechText("Un contraste de 4.5:1, a las 22:48.")).toBe("Un contraste de cuatro punto cinco:uno, a las veintidós:cuarenta y ocho.");
 	});
 
 	it("(h1) turns the period after a dotted number ending a numbered heading, bold line or item into ':'", () => {
-		expect(speechText("## 5.2. Título\nTexto.")).toBe("5 punto 2: Título.\n\nTexto.");
-		expect(speechText("**1.1. Engram**\n5.2. Después")).toBe("1 punto 1: Engram.\n\n5 punto 2: Después");
-		expect(speechText("## 5.2 Título")).toBe("5 punto 2 Título.");
+		expect(speechText("## 5.2. Título\nTexto.")).toBe("cinco punto dos: Título.\n\nTexto.");
+		expect(speechText("**1.1. Engram**\n5.2. Después")).toBe("uno punto uno: Engram.\n\ncinco punto dos: Después");
+		expect(speechText("## 5.2 Título")).toBe("cinco punto dos Título.");
 	});
 
 	it("(h1) keeps Spanish thousands as they are", () => {
 		expect(speechText("Son 2.750 respuestas y 1.500.000 bytes, no 0.750 ni 2.75.")).toBe(
-			"Son 2.750 respuestas y 1.500.000 bytes, no 0 punto 750 ni 2 punto 75.",
+			"Son dos mil setecientos cincuenta respuestas y un millón quinientos mil bytes, no cero punto setecientos cincuenta ni dos punto setenta y cinco.",
 		);
 	});
 
 	it("(h1) leaves reply IDs to their own reading", () => {
-		expect(speechText("En P11.R1.Q1 y `P2.R10`, versión 1.1.")).toBe("En P 11, R 1, Q 1 y P 2, R 10, versión 1 punto 1.");
+		expect(speechText("En P11.R1.Q1 y `P2.R10`, versión 1.1.")).toBe("En P once, R uno, Q uno y P dos, R diez, versión uno punto uno.");
 	});
 
 	it("(h1) leaves URLs to their own reading", () => {
-		expect(speechText("Ver https://10.0.0.1:8080/v/1.2 y `https://x.dev/r/1.2.3`, en 1.2.")).toBe("Ver 10.0.0.1:8080 y https://x.dev/r/1.2.3, en 1 punto 2.");
+		expect(speechText("Ver https://10.0.0.1:8080/v/1.2 y `https://x.dev/r/1.2.3`, en 1.2.")).toBe("Ver 10.0.0.1:8080 y https://x.dev/r/1.2.3, en uno punto dos.");
 	});
 
 	it("(h1) leaves file names to their own reading", () => {
-		expect(speechText("Abrí `1.2.md`, `notas-1.2.md` y 2.0.1.tgz de la 2.0.1.")).toBe("Abrí 1.2.md, notas 1 punto 2 punto md y 2.0.1.tgz de la 2 punto 0 punto 1.");
+		expect(speechText("Abrí `1.2.md`, `notas-1.2.md` y 2.0.1.tgz de la 2.0.1.")).toBe("Abrí uno punto dos.md, notas uno punto dos punto md y dos punto cero punto uno.tgz de la dos punto cero punto uno.");
 	});
 
 	it("(h1) leaves paths to their own reading", () => {
-		expect(speechText("Está en `src/1.2/a.ts` y en `~/v/1.2.3/` desde la 1.2.")).toBe("Está en a punto ts, en 1.2 y en la carpeta 1.2.3, en v desde la 1 punto 2.");
+		expect(speechText("Está en `src/1.2/a.ts` y en `~/v/1.2.3/` desde la 1.2.")).toBe("Está en a punto ts, en uno punto dos y en la carpeta uno punto dos punto tres, en v desde la uno punto dos.");
 	});
 
 	it("(h1) keeps IP addresses as they are", () => {
 		expect(speechText("El hs es 192.168.1.50 y el desktop `tcp:10.0.0.5:4713`, no 1.2.3 ni 300.1.1.1.")).toBe(
-			"El hs es 192.168.1.50 y el desktop tcp:10.0.0.5:4713, no 1 punto 2 punto 3 ni 300 punto 1 punto 1 punto 1.",
+			"El hs es ciento noventa y dos punto ciento sesenta y ocho punto uno punto cincuenta y el desktop tcp:diez punto cero punto cero punto cinco:cuatro mil setecientos trece, no uno punto dos punto tres ni trescientos punto uno punto uno punto uno.",
 		);
 	});
 
 	it("(h1) keeps the period of a number ending a sentence", () => {
-		expect(speechText("Ahora son 1.1. Luego 2.0.")).toBe("Ahora son 1 punto 1. Luego 2 punto 0.");
+		expect(speechText("Ahora son 1.1. Luego 2.0.")).toBe("Ahora son uno punto uno. Luego dos punto cero.");
 	});
 
 	it("is deterministic and collapses blank runs", () => {
@@ -382,21 +382,21 @@ describe("S7: language of the added words", () => {
 	});
 
 	it("reads a path with a line in English", () => {
-		expect(speechText("See `src/speech-text.ts:42` for the rule.")).toBe("See speech text dot ts, in src, line 42 for the rule.");
+		expect(speechText("See `src/speech-text.ts:42` for the rule.")).toBe("See speech text dot ts, in src, line forty two for the rule.");
 	});
 
 	it("reads approximations in English", () => {
 		expect(speechText("It takes ~400 lines and the ~ is kept in `a~1` for the path.")).toBe(
-			"It takes approximately 400 lines and the ~ is kept in a~1 for the path.",
+			"It takes approximately four hundred lines and the ~ is kept in a~one for the path.",
 		);
 	});
 
 	it("reads units in English, singular after 1", () => {
 		expect(speechText("It takes 2,5 s, 250 ms, 3 min, 12 KB, 4 MB, 2 GB, 80%, -16 dB and -3 dBFS for the run.")).toBe(
-			"It takes 2,5 seconds, 250 milliseconds, 3 minutes, 12 kilobytes, 4 megabytes, 2 gigabytes, 80 percent, -16 decibels and -3 decibels for the run.",
+			"It takes two comma five seconds, two hundred fifty milliseconds, three minutes, twelve kilobytes, four megabytes, two gigabytes, eighty percent, minus sixteen decibels and minus three decibels for the run.",
 		);
 		expect(speechText("It is 1 s, 1 ms, 1 min, 1 KB, 1 MB, 1 GB, 1% and 1 dB for the run.")).toBe(
-			"It is 1 second, 1 millisecond, 1 minute, 1 kilobyte, 1 megabyte, 1 gigabyte, 1 percent and 1 decibel for the run.",
+			"It is one second, one millisecond, one minute, one kilobyte, one megabyte, one gigabyte, one percent and one decibel for the run.",
 		);
 	});
 
@@ -408,7 +408,7 @@ describe("S7: language of the added words", () => {
 
 	it("reads symbols in English", () => {
 		expect(speechText("The flow is a → b ← c, and x ≈ y, x ≠ y, n ≥ 2, n ≤ 5, ± 3, 3 × 4, R&D with the rest.")).toBe(
-			"The flow is a to b from c, and x approximately y, x not equal to y, n greater than or equal to 2, n less than or equal to 5, plus or minus 3, 3 times 4, R and D with the rest.",
+			"The flow is a to b from c, and x approximately y, x not equal to y, n greater than or equal to two, n less than or equal to five, plus or minus three, three times four, R and D with the rest.",
 		);
 	});
 
@@ -418,14 +418,14 @@ describe("S7: language of the added words", () => {
 
 	it("reads dotted numbers with 'point' in English, numbered headings with ':'", () => {
 		expect(speechText("The version is 1.1 and the next is 0.8.0, with the 2.750 rate.")).toBe(
-			"The version is 1 point 1 and the next is 0 point 8 point 0, with the 2 point 750 rate.",
+			"The version is one point one and the next is zero point eight point zero, with the two point seven hundred fifty rate.",
 		);
-		expect(speechText("## 5.2. The title\nThis is the text.")).toBe("5 point 2: The title.\n\nThis is the text.");
+		expect(speechText("## 5.2. The title\nThis is the text.")).toBe("five point two: The title.\n\nThis is the text.");
 	});
 
 	it("reads Spanish thousands as a decimal in English", () => {
 		expect(speechText("The rate is 2.750 and the total is 1.500.000 for the run.")).toBe(
-			"The rate is 2 point 750 and the total is 1 point 500 point 000 for the run.",
+			"The rate is two point seven hundred fifty and the total is one point five hundred point zero zero zero for the run.",
 		);
 	});
 
@@ -462,14 +462,14 @@ describe("S7: language of the added words", () => {
 	});
 
 	it("keeps reply IDs as in Spanish", () => {
-		expect(speechText("This is in P11.R1.Q1 and the `P2.R10` reply.")).toBe("This is in P 11, R 1, Q 1 and the P 2, R 10 reply.");
+		expect(speechText("This is in P11.R1.Q1 and the `P2.R10` reply.")).toBe("This is in P eleven, R one, Q one and the P two, R ten reply.");
 	});
 
 	it("does not apply Spanish-only rules to English text", () => {
 		expect(speechText("Then go back to `/read` from the menu, and to `/tmp/a/b/` for the files.")).toBe(
 			"Then go back to the command read from the menu, and to the folder b, in a for the files.",
 		);
-		expect(speechText("## Needs your decision\n1. Do you want the change?")).toBe("Needs your decision.\n\n1: Do you want the change?");
+		expect(speechText("## Needs your decision\n1. Do you want the change?")).toBe("Needs your decision.\n\none: Do you want the change?");
 		expect(speechText("I said a el and de el in the text of the page for the user.")).toBe(
 			"I said a el and de el in the text of the page for the user.",
 		);
@@ -493,14 +493,14 @@ describe("S2 (i1)-(i4): pending readings, round 1", () => {
 	});
 
 	it("(i2) reads a standalone # before digits as número/number, keeping trailing punctuation", () => {
-		expect(speechText("Se mergeó el PR #43, y el issue #7 (ver #12).")).toBe("Se mergeó el PR número 43, y el issue número 7 (ver número 12).");
-		expect(speechText("Merged the PR #43, closing issue #7.", "en")).toBe("Merged the PR number 43, closing issue number 7.");
-		expect(speechText("El `#43` está listo.")).toBe("El número 43 está listo.");
+		expect(speechText("Se mergeó el PR #43, y el issue #7 (ver #12).")).toBe("Se mergeó el PR número cuarenta y tres, y el issue número siete (ver número doce).");
+		expect(speechText("Merged the PR #43, closing issue #7.", "en")).toBe("Merged the PR number forty three, closing issue number seven.");
+		expect(speechText("El `#43` está listo.")).toBe("El número cuarenta y tres está listo.");
 	});
 
 	it("(i2) leaves headings and a # inside a word alone", () => {
-		expect(speechText("# 43\n\nTexto.")).toBe("43.\n\nTexto.");
-		expect(speechText("## Estado\nel PR #43")).toBe("Estado.\n\nel PR número 43");
+		expect(speechText("# 43\n\nTexto.")).toBe("cuarenta y tres.\n\nTexto.");
+		expect(speechText("## Estado\nel PR #43")).toBe("Estado.\n\nel PR número cuarenta y tres");
 		expect(speechText("Ver issue#43 y C#.")).toBe("Ver issue#43 y C#.");
 	});
 
@@ -511,7 +511,7 @@ describe("S2 (i1)-(i4): pending readings, round 1", () => {
 			"Probá Control más c, Control más SHIFT más t, cmd más Enter y Control más Tab.",
 		);
 		expect(speechText("Probá Fn+F12, Super+Space, Meta+Esc, Win+Left, Option+Backspace y Command+1.")).toBe(
-			"Probá Fn más F12, Super más Space, Meta más Esc, Win más Left, Option más Backspace y Command más 1.",
+			"Probá Fn más F doce, Super más Space, Meta más Esc, Win más Left, Option más Backspace y Command más uno.",
 		);
 	});
 
@@ -520,9 +520,9 @@ describe("S2 (i1)-(i4): pending readings, round 1", () => {
 	});
 
 	it("(i4) reads a minimum version as o superior/or later, with and without v, its dots as in (h1)", () => {
-		expect(speechText("Requiere `v1+`, `v2.0+` y Node 1.4+.")).toBe("Requiere v1 o superior, v2 punto 0 o superior y Node 1 punto 4 o superior.");
-		expect(speechText("Needs `v1+`, `v2.0+` and Node 1.4+.", "en")).toBe("Needs v1 or later, v2 point 0 or later and Node 1 point 4 or later.");
-		expect(speechText("Con 2.11.0+ basta.")).toBe("Con 2 punto 11 punto 0 o superior basta.");
+		expect(speechText("Requiere `v1+`, `v2.0+` y Node 1.4+.")).toBe("Requiere v uno o superior, v dos punto cero o superior y Node uno punto cuatro o superior.");
+		expect(speechText("Needs `v1+`, `v2.0+` and Node 1.4+.", "en")).toBe("Needs v one or later, v two point zero or later and Node one point four or later.");
+		expect(speechText("Con 2.11.0+ basta.")).toBe("Con dos punto once punto cero o superior basta.");
 	});
 
 	it("(i1) reads a dot-leading last part with no extension in a path as a file named without the dot (L102)", () => {
@@ -531,14 +531,14 @@ describe("S2 (i1)-(i4): pending readings, round 1", () => {
 		expect(speechText("Mirá `./ckan-docker/.gitignore` y `~/projects/odp-docker/.demo-users`.")).toBe(
 			"Mirá gitignore, en ckan docker y demo users, en odp docker.",
 		);
-		expect(speechText("Ver `ckan-docker/.gitignore:3`.")).toBe("Ver gitignore, en ckan docker, línea 3.");
+		expect(speechText("Ver `ckan-docker/.gitignore:3`.")).toBe("Ver gitignore, en ckan docker, línea tres.");
 		expect(speechText("Revisá `ckan-docker/.github/`.")).toBe("Revisá la carpeta github, en ckan docker.");
 	});
 
 	it("(i4) reads a whole number with no v followed by + as a count: o más/or more (L102)", () => {
-		expect(speechText("Hay `100+` respuestas, 300+ líneas y 6.000+ casos.")).toBe("Hay 100 o más respuestas, 300 o más líneas y 6.000 o más casos.");
-		expect(speechText("There are `100+` replies and 300+ lines.", "en")).toBe("There are 100 or more replies and 300 or more lines.");
-		expect(speechText("Sumá +4 y C++, con `v1+`.")).toBe("Sumá +4 y C++, con v1 o superior.");
+		expect(speechText("Hay `100+` respuestas, 300+ líneas y 6.000+ casos.")).toBe("Hay cien o más respuestas, trescientos o más líneas y seis mil o más casos.");
+		expect(speechText("There are `100+` replies and 300+ lines.", "en")).toBe("There are one hundred or more replies and three hundred or more lines.");
+		expect(speechText("Sumá +4 y C++, con `v1+`.")).toBe("Sumá +4 y C++, con v uno o superior.");
 	});
 
 	it("(i1)-(i4) tokens are read, so diagnostics no longer report them", () => {
@@ -548,8 +548,102 @@ describe("S2 (i1)-(i4): pending readings, round 1", () => {
 
 	it("(e4) paths, commands, fractions and short pairs keep their readings (preserved by i1)", () => {
 		expect(speechText("Ver `odd/tasks/reply-reader.md`, `~/.gentle-shell`, `/reload`, `/tmp/`, 1/2, y/o y `light/dark`.")).toBe(
-			"Ver reply reader punto md, en tasks, la carpeta gentle shell, el comando reload, la carpeta tmp, 1/2, y/o y light o dark.",
+			"Ver reply reader punto md, en tasks, la carpeta gentle shell, el comando reload, la carpeta tmp, uno/dos, y/o y light o dark.",
 		);
+	});
+});
+
+describe("S2 (j1): numbers in words", () => {
+	it("(j1) reads integers and Spanish thousands as words", () => {
+		expect(speechText("Hay 51 en 2026 y 11.457 respuestas.")).toBe(
+			"Hay cincuenta y uno en dos mil veintiséis y once mil cuatrocientos cincuenta y siete respuestas.",
+		);
+		expect(speechText("Son 15, 16, 22, 100, 101, 115, 500, 999, 1000, 1001, 21000, 100000, 1000000, 2500000 y 999999999.")).toBe(
+			"Son quince, dieciséis, veintidós, cien, ciento uno, ciento quince, quinientos, novecientos noventa y nueve, mil, mil uno, veintiún mil, cien mil, un millón, dos millones quinientos mil y novecientos noventa y nueve millones novecientos noventa y nueve mil novecientos noventa y nueve.",
+		);
+		expect(speechText("There are 51 tests in 2026, then 101, 115, 1000000 and 2500000 for the run.", "en")).toBe(
+			"There are fifty one tests in two thousand twenty six, then one hundred one, one hundred fifteen, one million and two million five hundred thousand for the run.",
+		);
+	});
+
+	it("(j1) reads 0 as cero/zero", () => {
+		expect(speechText("Quedan 0 errores.")).toBe("Quedan cero errores.");
+		expect(speechText("There are 0 errors.", "en")).toBe("There are zero errors.");
+	});
+
+	it("(j1) reads decimals with coma/comma, and English three-digit comma groups as thousands", () => {
+		expect(speechText("Tarda 1,2 y 0,05, con 1.234,5 en total.")).toBe("Tarda uno coma dos y cero coma cero cinco, con mil doscientos treinta y cuatro coma cinco en total.");
+		expect(speechText("It takes 2,5 and 1,234 for the run.", "en")).toBe("It takes two comma five and one thousand two hundred thirty four for the run.");
+	});
+
+	it("(j1) reads the digit groups of punto readings one by one: dotted numbers, versions and IP addresses", () => {
+		expect(speechText("Versión 1.4, 1.13.8, v2.0.1 y la IP 192.168.1.50.")).toBe(
+			"Versión uno punto cuatro, uno punto trece punto ocho, v dos punto cero punto uno y la IP ciento noventa y dos punto ciento sesenta y ocho punto uno punto cincuenta.",
+		);
+		expect(speechText("The version is 1.4, then v2.0.1 and the IP 10.0.0.1.", "en")).toBe(
+			"The version is one point four, then v two point zero point one and the IP ten point zero point zero point one.",
+		);
+	});
+
+	it("(j1) reads a leading minus as menos/minus, not a hyphen between numbers", () => {
+		expect(speechText("Bajá a -16 dB y -3, el 2026-10-27.")).toBe("Bajá a menos dieciséis decibeles y menos tres, el dos mil veintiséis-diez-veintisiete.");
+		expect(speechText("Set -16 dB and -3 for the run.", "en")).toBe("Set minus sixteen decibels and minus three for the run.");
+	});
+
+	it("(j1) Spanish agreement: un/veintiún before a word, una/veintiuna/y una before a listed feminine noun, singular or plural", () => {
+		expect(speechText("En 1 segundo, 21 días y 51 tests.")).toBe("En un segundo, veintiún días y cincuenta y un tests.");
+		expect(speechText("Queda 1 respuesta, 21 líneas, 31 preguntas, 101 veces y 1 Sesión.")).toBe(
+			"Queda una respuesta, veintiuna líneas, treinta y una preguntas, ciento una veces y una Sesión.",
+		);
+		expect(speechText("1 hora, 21 horas, 1 vez, 41 personas y 1 versión.")).toBe("una hora, veintiuna horas, una vez, cuarenta y una personas y una versión.");
+	});
+
+	it("(j1) Spanish agreement: uno stays before punctuation, at the end, before a function word and in decimal parts", () => {
+		expect(speechText("Quedó 1. Y 21, luego 1")).toBe("Quedó uno. Y veintiuno, luego uno");
+		expect(speechText("Van de 1 a 5, 1 de 3 y 1 o 2.")).toBe("Van de uno a cinco, uno de tres y uno o dos.");
+		expect(speechText("Citó P11.R1.Q1 a Q5.")).toBe("Citó P once, R uno, Q uno a Q cinco.");
+		expect(speechText("Tarda 2.1 s y 1,1 s.")).toBe("Tarda dos punto uno segundos y uno coma uno segundos.");
+	});
+
+	it("(j1) English has no agreement", () => {
+		expect(speechText("It took 1 s and 21 lines for the run.", "en")).toBe("It took one second and twenty one lines for the run.");
+	});
+
+	it("(j1) reads long numbers and numbers starting with 0 digit by digit", () => {
+		expect(speechText("El 007, el 5551234567 y 123456789.")).toBe(
+			"El cero cero siete, el cinco cinco cinco uno dos tres cuatro cinco seis siete y ciento veintitrés millones cuatrocientos cincuenta y seis mil setecientos ochenta y nueve.",
+		);
+		expect(speechText("Call 007 at 5551234567 for the run.", "en")).toBe("Call zero zero seven at five five five one two three four five six seven for the run.");
+	});
+
+	it("(j1) separates digits glued to letters", () => {
+		expect(speechText("Probá F12, sha256 y R2D2.")).toBe("Probá F doce, sha doscientos cincuenta y seis y R dos D dos.");
+		// A number glued to a name keeps "uno": it is not counting the word after it.
+		expect(speechText("Así T1 está cumplido y L21 queda.")).toBe("Así T uno está cumplido y L veintiuno queda.");
+	});
+
+	it("(j1) keeps digits as written in URLs, hosts and technical tokens no class claimed", () => {
+		expect(speechText("Ver https://10.0.0.1:8080/x, `http://localhost:8082/a?b=1`, `sherpa-onnx-node@2.0.1` y `422773f..HEAD` 2 veces.")).toBe(
+			"Ver 10.0.0.1:8080, http://localhost:8082/a?b=1, sherpa-onnx-node@2.0.1 y 422773f..HEAD dos veces.",
+		);
+	});
+
+	it("(j1) a technical token another rule split into words keeps only its technical parts as written", () => {
+		expect(speechText("Requiere `>=1.2.0`, `time=0.0003` y $1,500.50.")).toBe("Requiere >=1 punto dos punto cero, time=0 punto cero cero cero tres y $1,500 punto cincuenta.");
+	});
+
+	it("(j1) runs last: numbering, (h1) headings, (i2), (i4), units and reply IDs keep their structure and only digits change", () => {
+		expect(speechText("## 5.2. Título\n1. Después\n2) Luego")).toBe("cinco punto dos: Título.\n\nuno: Después.\ndos: Luego.");
+		expect(speechText("Hay 300+ líneas, `v1+`, el PR #43, 1 MB, ~2 min y P2.R10.")).toBe(
+			"Hay trescientos o más líneas, v uno o superior, el PR número cuarenta y tres, un megabyte, aproximadamente dos minutos y P dos, R diez.",
+		);
+	});
+
+	it("(j1) a number in words creates or removes no fragment split", () => {
+		expect(speechNarration("Son 1.5 s y 2.0.1. Luego 3.", "es").fragments.map((fragment) => fragment.text)).toEqual([
+			"Son uno punto cinco segundos y dos punto cero punto uno.",
+			"Luego tres.",
+		]);
 	});
 });
 
@@ -599,10 +693,10 @@ describe("S12: narration plan, renderer and diagnostics", () => {
 			{ text: "Hola, mundo.", role: "paragraph", after: "sentence" },
 			{ text: "¿Seguimos?", role: "paragraph", after: "paragraph" },
 			{ text: "Un ítem.", role: "item", after: "line" },
-			{ text: "2: Segundo.", role: "item", after: "line" },
+			{ text: "dos: Segundo.", role: "item", after: "line" },
 			{ text: "Citado.", role: "paragraph", after: "paragraph" },
 			{ text: "A, B.", role: "row", after: "line" },
-			{ text: "1, 2.", role: "row", after: "line" },
+			{ text: "uno, dos.", role: "row", after: "line" },
 			{ text: "Bloque de código.", role: "codeBlock", after: "line" },
 			{ text: "Nota.", role: "heading", after: "paragraph" },
 			{ text: "Fin.", role: "paragraph", after: "sentence" },
@@ -678,5 +772,14 @@ describe("S12: plan and renderer invariants (regression pins from the T30 verify
 				expect(narration.fragments.map((f) => [f.text, f.after])).toEqual(spokenFragments(narration.text).map((f) => [f.text, f.after]));
 			}
 		}
+	});
+});
+
+describe("S2 (j1): agreement lists tuned from real replies (L109)", () => {
+	it("reads una before imagen, corrida and fila, and uno before pronouns, articles and frequent verbs", () => {
+		expect(speechText("Queda 1 corrida, 1 imagen, 21 imágenes y 1 fila.", "es")).toBe("Queda una corrida, una imagen, veintiuna imágenes y una fila.");
+		expect(speechText("El paso 1 no corre, el 1 ya está, el 1 se borra, el 1 lo usa, el 1 está listo y el 1 sigue.", "es")).toBe(
+			"El paso uno no corre, el uno ya está, el uno se borra, el uno lo usa, el uno está listo y el uno sigue.",
+		);
 	});
 });

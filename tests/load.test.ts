@@ -277,7 +277,7 @@ describe("reply-reader extension", () => {
 				["Auto-read on: questions only.", "info"],
 				["Use /read-auto on, questions or off.", "warning"],
 			]);
-			expect(texts()).toEqual(["Decisiones pendientes.", "1: ¿Seguimos?", "2: ¿Publicamos?"]);
+			expect(texts()).toEqual(["Decisiones pendientes.", "uno: ¿Seguimos?", "dos: ¿Publicamos?"]);
 		});
 
 		it("questions mode keeps the whole reply's language for added words (S7)", async () => {
@@ -286,7 +286,7 @@ describe("reply-reader extension", () => {
 			await reader.run("read-auto", "questions");
 			reader.turn([user("a"), assistant("The build is done and the tests pass for the new parser.\n\n## Needs your decision\n\n1. Run `/reload`?")]);
 			await reader.settled();
-			expect(texts()).toEqual(["Needs your decision.", "1: Run the command reload?"]);
+			expect(texts()).toEqual(["Needs your decision.", "one: Run the command reload?"]);
 		});
 
 		it("bare /read-auto toggles: off to on in full, and any on to off", async () => {
@@ -295,7 +295,7 @@ describe("reply-reader extension", () => {
 			await reader.run("read-auto");
 			reader.turn([user("a"), assistant(questions)]);
 			await reader.settled();
-			expect(texts()).toEqual(["Hecho.", "Decisiones pendientes.", "1: ¿Seguimos?", "2: ¿Publicamos?"]);
+			expect(texts()).toEqual(["Hecho.", "Decisiones pendientes.", "uno: ¿Seguimos?", "dos: ¿Publicamos?"]);
 			await reader.run("read-auto");
 			await reader.run("read-auto", "questions");
 			await reader.run("read-auto");
@@ -343,7 +343,7 @@ describe("reply-reader extension", () => {
 			await reader.settled();
 			reader.turn([user("b"), assistant("Listo.\n\n**Needs your decision:**\n- ¿A o B?")]);
 			await waitFor(() => reader.statuses.filter((status) => status === undefined).length === 2);
-			expect(texts()).toEqual(["Decisiones pendientes.", "1: ¿Seguimos?", "2: ¿Publicamos?", "Decisiones pendientes.", "¿A o B?"]);
+			expect(texts()).toEqual(["Decisiones pendientes.", "uno: ¿Seguimos?", "dos: ¿Publicamos?", "Decisiones pendientes.", "¿A o B?"]);
 			expect(reader.statuses.filter(Boolean)).toEqual(["Reading P3.R1 on local · Esc stops", "Reading P4.R1 on local · Esc stops"]);
 		});
 
@@ -1168,7 +1168,7 @@ describe("reply-reader extension", () => {
 			const reader = load();
 			await reader.run("read", "notes.md#instalacion");
 			await reader.settled();
-			expect(texts()).toEqual(["1: Instalación.", "Paso uno.", "Detalle.", "Sub."]);
+			expect(texts()).toEqual(["uno: Instalación.", "Paso uno.", "Detalle.", "Sub."]);
 			expect(reader.statuses).toEqual(["Reading notes.md on local · Esc stops", undefined]);
 			expect(reader.notes).toEqual([]);
 		});
@@ -1184,8 +1184,8 @@ describe("reply-reader extension", () => {
 			await reader.settled();
 			await reader.run("read", "#instalacion");
 			await reader.settled();
-			const rest = ["1: Instalación.", "Paso uno.", "Uso del lector.", "Paso dos."];
-			expect(texts()).toEqual([...rest, ...rest, "1: Instalación.", "Paso uno."]);
+			const rest = ["uno: Instalación.", "Paso uno.", "Uso del lector.", "Paso dos."];
+			expect(texts()).toEqual([...rest, ...rest, "uno: Instalación.", "Paso uno."]);
 			expect(reader.statuses.filter(Boolean)).toEqual([
 				"Reading notes.md on local · Esc stops",
 				"Reading P1.R1 on local · Esc stops",

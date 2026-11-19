@@ -153,7 +153,7 @@ export function renderNarration(plan: NarrationPlan, language: Language): Narrat
 		for (const block of plan.blocks) {
 			diagnosis.line = block.line;
 			const role = block.role === "break" ? "paragraph" : block.role;
-			lines.push({ text: finished(blockText(block)), role });
+			lines.push({ text: numbersInWords(finished(blockText(block))), role });
 			// A heading or bold-only line ends its section, so playback pauses as at a blank line; trim drops a last one.
 			if (block.role === "heading") lines.push({ text: "", role });
 		}
@@ -265,7 +265,74 @@ interface Phrasebook {
 	symbols: [RegExp, string][];
 	/** "2.750" is a Spanish thousand; in English it is a decimal. */
 	thousands: boolean;
+	/** (j1) "1,234" is an English thousand; any other comma between digits is read as `comma`. */
+	commaThousands: boolean;
+	/** (j1) Between the digit groups of a decimal written with a comma: "1,2". */
+	comma: string;
+	/** (j1) A leading minus: "-16". */
+	minus: string;
+	/** (j1) A whole number from 0 to 999.999.999.999 in words. */
+	cardinal: (n: number) => string;
+	/** (j1) Spanish only: "un"/"una" by the word after a number ending in 1. */
+	agreement?: { feminine: Set<string>; keepsUno: Set<string> };
 }
+
+const SPANISH_UNITS = "cero uno dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce quince dieciséis diecisiete dieciocho diecinueve veinte veintiuno veintidós veintitrés veinticuatro veinticinco veintiséis veintisiete veintiocho veintinueve".split(" ");
+const SPANISH_TENS = "  veinte treinta cuarenta cincuenta sesenta setenta ochenta noventa".split(" ");
+const SPANISH_HUNDREDS = " ciento doscientos trescientos cuatrocientos quinientos seiscientos setecientos ochocientos novecientos".split(" ");
+
+/** "veintiuno" → "veintiún", "treinta y uno" → "treinta y un": before "mil", "millones" or a noun. */
+function apocope(text: string): string {
+	return text.replace(/(veinti)?uno$/, (_m, twenty?: string) => (twenty ? "veintiún" : "un"));
+}
+
+function spanishBelowThousand(n: number): string {
+	if (n === 100) return "cien";
+	const hundreds = SPANISH_HUNDREDS[Math.floor(n / 100)];
+	const rest = n % 100;
+	const tens = rest < 30 ? SPANISH_UNITS[rest] : `${SPANISH_TENS[Math.floor(rest / 10)]}${rest % 10 ? ` y ${SPANISH_UNITS[rest % 10]}` : ""}`;
+	return [hundreds, rest || !hundreds ? tens : ""].filter((part) => part !== "").join(" ");
+}
+
+function spanishCardinal(n: number): string {
+	if (n >= 1_000_000) {
+		const millions = Math.floor(n / 1_000_000);
+		const rest = n % 1_000_000;
+		const head = millions === 1 ? "un millón" : `${apocope(spanishCardinal(millions))} millones`;
+		return rest ? `${head} ${spanishCardinal(rest)}` : head;
+	}
+	if (n >= 1000) {
+		const thousands = Math.floor(n / 1000);
+		const rest = n % 1000;
+		const head = thousands === 1 ? "mil" : `${apocope(spanishBelowThousand(thousands))} mil`;
+		return rest ? `${head} ${spanishBelowThousand(rest)}` : head;
+	}
+	return spanishBelowThousand(n);
+}
+
+const ENGLISH_UNITS = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split(" ");
+const ENGLISH_TENS = "  twenty thirty forty fifty sixty seventy eighty ninety".split(" ");
+
+function englishCardinal(n: number): string {
+	for (const [size, name] of [[1e9, "billion"], [1e6, "million"], [1e3, "thousand"], [100, "hundred"]] as const) {
+		if (n >= size) {
+			const rest = n % size;
+			const head = `${englishCardinal(Math.floor(n / size))} ${name}`;
+			return rest ? `${head} ${englishCardinal(rest)}` : head;
+		}
+	}
+	return n < 20 ? ENGLISH_UNITS[n] : `${ENGLISH_TENS[Math.floor(n / 10)]}${n % 10 ? ` ${ENGLISH_UNITS[n % 10]}` : ""}`;
+}
+
+/** (j1) Frequent feminine nouns, singular and plural: "una respuesta", "veintiuna líneas". Tunable. */
+const FEMININE = new Set(
+	(
+		"línea respuesta pregunta sesión tarea vez hora semana página carpeta rama prueba versión lectura voz opción regla palabra cosa parte persona máquina salida entrada imagen corrida fila " +
+		"líneas respuestas preguntas sesiones tareas veces horas semanas páginas carpetas ramas pruebas versiones lecturas voces opciones reglas palabras cosas partes personas máquinas salidas entradas imágenes corridas filas"
+	).split(" "),
+);
+/** (j1) Function words a number ending in 1 keeps "uno" before: "de 1 a 5", "1 de 3". */
+const KEEPS_UNO = new Set("a de del al y e o u ni en por para con sin entre hasta desde sobre contra según que es son más menos coma punto no ya se lo la el los las le está era queda sigue fue".split(" "));
 
 const SPANISH: Phrasebook = {
 	codeBlock: "Bloque de código.",
@@ -334,6 +401,11 @@ const SPANISH: Phrasebook = {
 		[/&+/, "y"],
 	],
 	thousands: true,
+	commaThousands: false,
+	comma: "coma",
+	minus: "menos",
+	cardinal: spanishCardinal,
+	agreement: { feminine: FEMININE, keepsUno: KEEPS_UNO },
 };
 
 const ENGLISH: Phrasebook = {
@@ -402,6 +474,10 @@ const ENGLISH: Phrasebook = {
 		[/&+/, "and"],
 	],
 	thousands: false,
+	commaThousands: true,
+	comma: "comma",
+	minus: "minus",
+	cardinal: englishCardinal,
 };
 
 const PHRASEBOOKS: Record<Language, Phrasebook> = { es: SPANISH, en: ENGLISH };
@@ -472,7 +548,87 @@ function tableCells(raw: string): string[] {
 }
 
 function closeSentence(text: string): string {
-	return text === "" || /[.!?:;…,]$/.test(text) ? text : `${text}.`;
+	const bare = text.replace(KEPT_MARKS, "");
+	return bare === "" || /[.!?:;…,]$/.test(bare) ? text : `${text}.`;
+}
+
+/**
+ * (j1) Text whose digits stay as written (URL hosts, technical tokens no class claimed) is held between \uE00A and
+ * \uE00B from `speakable` until `numbersInWords` drops the marks.
+ */
+const KEPT_MARKS = /[\uE00A\uE00B]/g;
+
+/** (j1) Kept text, or a run of digits, its groups joined by single dots or commas, with an optional leading minus. */
+const DIGITS = /\uE00A[^\uE00B]*\uE00B|[-−]?\d+(?:[.,]\d+)*/gu;
+
+/**
+ * (j1) The last pass of a line: every run of digits left becomes words in the current language, except in kept text.
+ * The text around it does not change, so units, numbering, IDs and the (h1) and (i4) readings keep their shape.
+ */
+function numbersInWords(line: string): string {
+	return line.replace(DIGITS, (match: string, offset: number, whole: string) => {
+		if (match.startsWith("\uE00A")) {
+			// A later rule may have split a kept token into words (">=1 punto 2 punto 0"): only its technical parts stay.
+			const kept = match.slice(1, -1);
+			return /\s/.test(kept) ? kept.replace(/\S+/g, (part) => (UNCLASSIFIED.test(part) && !NUMERIC.test(part) ? part : numbersInWords(part))) : kept;
+		}
+		const before = whole.slice(0, offset);
+		const after = whole.slice(offset + match.length);
+		let sign = "";
+		let run = match;
+		if (/^[-−]/.test(run)) {
+			// A hyphen right after a word or a number ("2026-10-27", "a-1") is not a minus.
+			sign = /[\p{L}\p{N}_.,\-−]$/u.test(before) ? run[0] : `${words.minus} `;
+			run = run.slice(1);
+		}
+		// Digits glued to letters are spoken apart from them: "Q5" reads "Q cinco".
+		const space = (char: string) => (/\p{L}/u.test(char) ? " " : "");
+		// A decimal part ("2 punto 1 segundos") keeps "uno", as a decimal run does, and so does a name such as "T1".
+		const decimalPart = new RegExp(`(?:^|\\s)(?:${words.point}|${words.comma}) $`).test(before);
+		const glued = sign === "" && space(before.at(-1) ?? "") !== "";
+		const next = /^[ \t]+(\p{L}+)/u.exec(after)?.[1];
+		const reading = digitRun(run, decimalPart || glued ? undefined : next);
+		return `${sign === "" ? space(before.at(-1) ?? "") : ""}${sign}${reading}${space(after[0] ?? "")}`;
+	});
+}
+
+/** One run of digit groups; `next` is the word right after it, which a whole number agrees with (Spanish). */
+function digitRun(run: string, next: string | undefined): string {
+	const thousands = words.thousands
+		? /^([1-9]\d{0,2}(?:\.\d{3})+)(?:,(\d+))?$/.exec(run)
+		: words.commaThousands
+			? /^([1-9]\d{0,2}(?:,\d{3})+)$/.exec(run)
+			: null;
+	if (thousands && !IP_ADDRESS.test(run)) {
+		const whole = words.cardinal(Number(thousands[1].replace(/[.,]/g, "")));
+		return thousands[2] === undefined ? whole : `${whole} ${words.comma} ${digitGroup(thousands[2])}`;
+	}
+	if (/^\d+$/.test(run)) {
+		const reading = digitGroup(run);
+		return run.length > 1 && (run.startsWith("0") || run.length > 9) ? reading : agreed(reading, next);
+	}
+	return run
+		.split(/([.,])/)
+		.map((part) => (part === "." ? ` ${words.point} ` : part === "," ? ` ${words.comma} ` : digitGroup(part)))
+		.join("");
+}
+
+/** Four groups of 0-255: an IP address, read group by group even when it looks like a Spanish thousand. */
+const IP_ADDRESS = /^(?:(?:25[0-5]|2[0-4]\d|1?\d{1,2})\.){3}(?:25[0-5]|2[0-4]\d|1?\d{1,2})$/;
+
+/** A group of digits: a whole number, or digit by digit when it is longer than 9 digits or starts with 0. */
+function digitGroup(digits: string): string {
+	if (digits.length > 9 || (digits.length > 1 && digits.startsWith("0"))) return [...digits].map((digit) => words.cardinal(Number(digit))).join(" ");
+	return words.cardinal(Number(digits));
+}
+
+/** "uno" becomes "un" before a word, "una" before a listed feminine noun; it stays before a function word. */
+function agreed(reading: string, next: string | undefined): string {
+	const agreement = words.agreement;
+	if (!agreement || next === undefined || !/uno$/.test(reading)) return reading;
+	const word = next.toLowerCase();
+	if (agreement.feminine.has(word)) return reading.replace(/uno$/, "una");
+	return agreement.keepsUno.has(word) ? reading : apocope(reading);
 }
 
 /**
@@ -492,7 +648,10 @@ function inline(text: string): string {
 	return prose(parked)
 		.replace(/\uE000(\d+)\uE001/g, (_m, code: string) => String.fromCodePoint(Number(code)))
 		.replace(/\uE002(\d+)\uE003/g, (_m, index: string) => spans[Number(index)])
-		.replace(/[ \t]*\uE008|[\uE006\uE007]/g, "");
+		.replace(/[ \t]*\uE008/g, "")
+		// (j1) A host keeps its digits: its marks become the kept-text marks `numbersInWords` drops.
+		.replace(/\uE006/g, "\uE00A")
+		.replace(/\uE007/g, "\uE00B");
 }
 
 /**
@@ -526,7 +685,7 @@ function speakable(text: string, before = "", after = ""): string {
 	out = out.replace(/(\d)[ \t]*×[ \t]*(?=\d)/g, `$1 ${words.times} `);
 	for (const [symbol, word] of words.symbols) out = spokenAs(out, symbol, word);
 	return spokenAs(out, EMOJI, "")
-		.replace(/\uE004(\d+)\uE005/g, (_m, index: string) => identifierSpaces(urls[Number(index)]))
+		.replace(/\uE004(\d+)\uE005/g, (_m, index: string) => `\uE00A${identifierSpaces(urls[Number(index)])}\uE00B`)
 		.replace(/\uE009/g, ".");
 }
 
@@ -576,8 +735,10 @@ function tokenReading(token: string, previous: string, next: string): string {
 	const noun = words === ENGLISH && trail === "" ? next.toLowerCase() : "";
 	const reading = classified(core, previous.toLowerCase(), noun);
 	if (reading === undefined) {
-		if (diagnosis && UNCLASSIFIED.test(core) && !NUMERIC.test(core)) diagnosis.diagnostics.push({ line: diagnosis.line, token: core });
-		return token;
+		if (!UNCLASSIFIED.test(core) || NUMERIC.test(core)) return token;
+		if (diagnosis) diagnosis.diagnostics.push({ line: diagnosis.line, token: core });
+		// (j1) Read as written, digits included.
+		return `${lead}\uE00A${core}\uE00B${trail}`;
 	}
 	if (reading === "") return `\uE008${trail}`;
 	// A dot between digits in a reading ("a punto ts, en 1.2") is the token's own; (h1) leaves it.

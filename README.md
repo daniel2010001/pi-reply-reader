@@ -266,8 +266,13 @@ agent", "the branch origin main", "a commit", ", line 42", "1 point 1", "approxi
   - a minimum version: `v1+` becomes "v1 o superior" ("or later" in English), `v2.0+` "v2 punto 0 o superior",
     `1.4+` "1 punto 4 o superior";
   - a count: `100+` becomes "100 o más" ("100 or more" in English), `300+ líneas` "300 o más líneas".
+  - numbers, last, in the text's language: `51` becomes "cincuenta y uno" ("fifty one"), `11.457` "once mil
+    cuatrocientos cincuenta y siete", `1,2` "uno coma dos", `1.4` "uno punto cuatro", `-16` "menos dieciséis".
+    In Spanish the number agrees with the next word: `1 segundo` "un segundo", `21 líneas` "veintiuna líneas",
+    `de 1 a 5` "de uno a cinco". Numbers of more than 9 digits, or starting with 0, are read digit by digit
+    (`007` "cero cero siete"). Digits in URLs, hosts and unrecognized technical tokens stay as written.
 
-  Fractions like `1/2`, versions, dates and short pairs like `y/o` stay as they are.
+  Fractions like `1/2` keep their slash ("uno/dos") and short pairs like `y/o` stay as they are.
 
 ### Known limits
 
@@ -279,6 +284,10 @@ agent", "the branch origin main", "a commit", ", line 42", "1 point 1", "approxi
   written without a final `/` inside a longer path read as files (`/home/.snapshots` becomes "snapshots, en
   home"), browser versions written without `v` read as counts ("Chrome 123 o más"), and some hosts or code names
   read as file names (`org.bluez` becomes "org punto bluez").
+- Numbers: hundreds do not agree with a feminine noun ("cuatrocientos líneas"), the feminine list is
+  short (an unlisted feminine noun gets "un"), times and dates keep their separators ("veintiuno:cero dos",
+  "diecisiete/diez"), eight-digit stamps such as `20261026` are read as one number, and an English thousands
+  comma in Spanish text (`1,044`) reads as a decimal.
 - The voice speaks with Spanish pronunciation, also for English text (only the words the cleanup adds
   switch to English there).
 

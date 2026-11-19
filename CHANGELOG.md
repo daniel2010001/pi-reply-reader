@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Numbers are spoken as words in the text's language (Supertonic mispronounced digits): "51" "cincuenta y
+  uno", with Spanish "un"/"una" agreement by the next word, decimals, versions and IP addresses group by group,
+  and numbers over 9 digits or starting with 0 digit by digit.
 - Internal: the cleanup now builds a narration plan (blocks with a role: heading, paragraph, item, row, code
   block) and renders it in the reading's language; playback speaks the rendered fragments with each one's own
   pause instead of splitting the text again. `speechNarration(markdown, language?)` returns the text, the
