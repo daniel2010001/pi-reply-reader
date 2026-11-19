@@ -7,6 +7,11 @@
   pause instead of splitting the text again. `speechNarration(markdown, language?)` returns the text, the
   fragments and diagnostics: technical tokens no reading rule claimed, with their line. What is spoken and
   played is byte-identical to 0.1.0.
+- New readings: a bare folder (`src/` "la carpeta src") and a path ending in a dot file
+  (`ckan-docker/.prettierrc.json` "prettierrc punto json, en ckan docker"), issue and PR numbers (`#43`
+  "número 43"), key combinations (`Ctrl+Shift+P` "Control más Shift más P") and minimum versions (`v1+` "v1 o
+  superior", `1.4+` "1 punto 4 o superior"), with "number", "plus" and "or later" in English. Diagnostics no
+  longer report these tokens.
 - `npm run build` removes `dist/` before compiling, so a packed tarball never carries stale files.
 
 ## 0.1.0 — 2026-11-17

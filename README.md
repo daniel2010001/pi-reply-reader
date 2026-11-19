@@ -231,22 +231,29 @@ agent", "the branch origin main", "a commit", ", line 42", "1 point 1", "approxi
   IDs, URLs, file names and paths keep their own reading, and a number ending a sentence keeps its period.
 - **Technical names** are read by kind (`snake_case` loses its `_` everywhere):
   - a path, as its file or folder plus where it is: `~/.gentle-shell/agent/AGENTS.md` becomes "AGENTS punto md,
-    en agent", `/tmp/x/wav/hs/` becomes "la carpeta hs, en wav";
+    en agent", `/tmp/x/wav/hs/` becomes "la carpeta hs, en wav", a bare `src/` becomes "la carpeta src", and a
+    last part starting with a dot reads like any other (`ckan-docker/.prettierrc.json` becomes "prettierrc punto
+    json, en ckan docker");
   - a path with a line: `src/speech-text.ts:42` becomes "speech text punto ts, en src, línea 42";
   - a file name: `README.md` becomes "README punto md";
   - a branch: `origin/main` becomes "la rama origin main" (after "rama", only the name);
   - a command: `/reload` becomes "el comando reload" ("del `/reload`" becomes "del comando reload"), while
     system folders such as `/tmp` read as "la carpeta tmp";
   - a commit hash is dropped after "commit" and read as "un commit" elsewhere;
-  - a pair of words: `light/dark` becomes "light o dark".
+  - a pair of words: `light/dark` becomes "light o dark";
+  - an issue or PR number: `el PR #43` becomes "el PR número 43" ("number 43" in English);
+  - a key combination: `Ctrl+Shift+P` becomes "Control más Shift más P" ("plus" in English), `Alt+R` "Alt más R";
+  - a minimum version: `v1+` becomes "v1 o superior" ("or later" in English), `v2.0+` "v2 punto 0 o superior",
+    `1.4+` "1 punto 4 o superior".
 
-  Fractions like `1/2`, versions, dates and short pairs like `y/o` stay as they are.
+  Fractions like `1/2`, versions, dates, counts like `100+` and short pairs like `y/o` stay as they are.
 
 ### Known limits
 
 - Kinds are guessed from the text alone, so some names are misread: two-word paths such as `odd/tasks`
   or MIME types such as `application/json` read as alternatives ("odd o tasks"), web routes such as
-  `/users` read as commands, files without an extension read as folders, and some hosts or code names
+  `/users` read as commands, files without an extension read as folders (`ckan-docker/.gitignore` becomes
+  "la carpeta gitignore, en ckan docker"), and some hosts or code names
   read as file names (`org.bluez` becomes "org punto bluez").
 - The voice speaks with Spanish pronunciation, also for English text (only the words the cleanup adds
   switch to English there).

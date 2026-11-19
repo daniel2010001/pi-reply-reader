@@ -476,6 +476,67 @@ describe("S7: language of the added words", () => {
 	});
 });
 
+describe("S2 (i1)-(i4): pending readings, round 1", () => {
+	it("(i1) reads a relative one-part folder like any other folder, only its name right after carpeta/folder", () => {
+		expect(speechText("Mirá `src/` y odd/.")).toBe("Mirá la carpeta src y la carpeta odd.");
+		expect(speechText("Mirá la carpeta `src/`.")).toBe("Mirá la carpeta src.");
+		expect(speechText("Pasá al `src/`.")).toBe("Pasá a la carpeta src.");
+		expect(speechText("Revisá `ckan-docker/` y `.github/`.")).toBe("Revisá la carpeta ckan docker y la carpeta github.");
+		expect(speechText("Look at `src/` for the code.", "en")).toBe("Look at the folder src for the code.");
+		expect(speechText("Look at the folder `src/`.", "en")).toBe("Look at the folder src.");
+	});
+
+	it("(i1) reads a path whose last part starts with a dot like any other (e4) file or folder", () => {
+		expect(speechText("Copiá `ckan-docker/.prettierrc.json`.")).toBe("Copiá prettierrc punto json, en ckan docker.");
+		expect(speechText("Copy `ckan-docker/.prettierrc.json` to the root.", "en")).toBe("Copy prettierrc dot json, in ckan docker to the root.");
+		expect(speechText("Mirá `ckan-docker/src/.github/`.")).toBe("Mirá la carpeta github, en src.");
+	});
+
+	it("(i2) reads a standalone # before digits as número/number, keeping trailing punctuation", () => {
+		expect(speechText("Se mergeó el PR #43, y el issue #7 (ver #12).")).toBe("Se mergeó el PR número 43, y el issue número 7 (ver número 12).");
+		expect(speechText("Merged the PR #43, closing issue #7.", "en")).toBe("Merged the PR number 43, closing issue number 7.");
+		expect(speechText("El `#43` está listo.")).toBe("El número 43 está listo.");
+	});
+
+	it("(i2) leaves headings and a # inside a word alone", () => {
+		expect(speechText("# 43\n\nTexto.")).toBe("43.\n\nTexto.");
+		expect(speechText("## Estado\nel PR #43")).toBe("Estado.\n\nel PR número 43");
+		expect(speechText("Ver issue#43 y C#.")).toBe("Ver issue#43 y C#.");
+	});
+
+	it("(i3) reads key combinations with más/plus, Ctrl as Control, modifiers in any case", () => {
+		expect(speechText("Usá `Ctrl+Shift+P`, después Alt+R.")).toBe("Usá Control más Shift más P, después Alt más R.");
+		expect(speechText("Press `Ctrl+Shift+P`, then Alt+R.", "en")).toBe("Press Control plus Shift plus P, then Alt plus R.");
+		expect(speechText("Probá ctrl+c, CTRL+SHIFT+t, cmd+Enter y Control+Tab.")).toBe(
+			"Probá Control más c, Control más SHIFT más t, cmd más Enter y Control más Tab.",
+		);
+		expect(speechText("Probá Fn+F12, Super+Space, Meta+Esc, Win+Left, Option+Backspace y Command+1.")).toBe(
+			"Probá Fn más F12, Super más Space, Meta más Esc, Win más Left, Option más Backspace y Command más 1.",
+		);
+	});
+
+	it("(i3) leaves a + between non-modifiers, or before a non-key, as written", () => {
+		expect(speechText("Sumá a+b, C++ y Ctrl+Foo.")).toBe("Sumá a+b, C++ y Ctrl+Foo.");
+	});
+
+	it("(i4) reads a minimum version as o superior/or later, with and without v, its dots as in (h1)", () => {
+		expect(speechText("Requiere `v1+`, `v2.0+` y Node 1.4+.")).toBe("Requiere v1 o superior, v2 punto 0 o superior y Node 1 punto 4 o superior.");
+		expect(speechText("Needs `v1+`, `v2.0+` and Node 1.4+.", "en")).toBe("Needs v1 or later, v2 point 0 or later and Node 1 point 4 or later.");
+		expect(speechText("Con 2.11.0+ basta.")).toBe("Con 2 punto 11 punto 0 o superior basta.");
+	});
+
+	it("(i1)-(i4) tokens are read, so diagnostics no longer report them", () => {
+		const narration = speechNarration("Mirá `src/`, `ckan-docker/.prettierrc.json`, el PR #43, `Ctrl+Shift+P` y `v1+`.\nY `a+b`.");
+		expect(narration.diagnostics).toEqual([{ line: 2, token: "a+b" }]);
+	});
+
+	it("(e4) paths, commands, fractions and short pairs keep their readings (preserved by i1)", () => {
+		expect(speechText("Ver `odd/tasks/reply-reader.md`, `~/.gentle-shell`, `/reload`, `/tmp/`, 1/2, y/o y `light/dark`.")).toBe(
+			"Ver reply reader punto md, en tasks, la carpeta gentle shell, el comando reload, la carpeta tmp, 1/2, y/o y light o dark.",
+		);
+	});
+});
+
 describe("S12: narration plan, renderer and diagnostics", () => {
 	const markdown = [
 		"# Estado",
@@ -563,13 +624,13 @@ describe("S12: narration plan, renderer and diagnostics", () => {
 
 	it("reports each token no reading class claimed, with its line (per line, code spans before prose)", () => {
 		const text = [
-			"Mirá `foo=bar` y #122.",
+			"Mirá a+b, `foo=bar` y #122.",
 			"Leé `src/x.ts`, `/reload`, README.md, 1.1, P1.R1, `1/2`, `y/o`, snake_case y https://a.com/x?y=1.",
 			"`jd-*` y a..HEAD",
 		].join("\n");
 		expect(speechNarration(text, "es").diagnostics).toEqual([
 			{ line: 1, token: "foo=bar" },
-			{ line: 1, token: "#122" },
+			{ line: 1, token: "a+b" },
 			{ line: 3, token: "jd-*" },
 			{ line: 3, token: "a..HEAD" },
 		]);

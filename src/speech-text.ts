@@ -247,6 +247,12 @@ interface Phrasebook {
 	/** Between the digit groups of a dotted number (h1). */
 	point: string;
 	or: string;
+	/** (i2) Before an issue or PR number: `#43`. */
+	number: string;
+	/** (i3) Between the keys of a combination: `Alt+R`. */
+	plus: string;
+	/** (i4) After a minimum version: `v1+`. */
+	orLater: string;
 	approximately: string;
 	/** × between numbers. */
 	times: string;
@@ -272,6 +278,9 @@ const SPANISH: Phrasebook = {
 	dot: "punto",
 	point: "punto",
 	or: "o",
+	number: "número",
+	plus: "más",
+	orLater: "o superior",
 	approximately: "aproximadamente",
 	times: "por",
 	units: {
@@ -336,6 +345,9 @@ const ENGLISH: Phrasebook = {
 	dot: "dot",
 	point: "point",
 	or: "or",
+	number: "number",
+	plus: "plus",
+	orLater: "or later",
 	approximately: "approximately",
 	times: "times",
 	units: {
@@ -584,6 +596,9 @@ function classified(core: string, previous: string, noun: string): string | unde
 		if (folder !== undefined) return folder;
 	}
 	return (
+		issueNumber(core) ??
+		keyCombination(core) ??
+		minimumVersion(core) ??
 		alternatives(core) ??
 		pathReading(core, previous) ??
 		command(core, previous, noun) ??
@@ -597,6 +612,30 @@ const BRANCH = /^(?:feat|fix|docs|chore|refactor|test|release|origin|upstream)\/
 const PATH = /^[\p{L}\p{N}._~/+-]+$/u;
 /** A bare `name.<tld>` is a host, not a file. */
 const HOST_ENDINGS = new Set(["com", "org", "net", "io", "dev", "lan", "app", "ai", "co"]);
+
+/** (i2) `#43` reads as "número 43"; a heading's own `#` never gets here. */
+function issueNumber(core: string): string | undefined {
+	const digits = /^#(\d+)$/.exec(core)?.[1];
+	return digits === undefined ? undefined : `${words.number} ${digits}`;
+}
+
+const MODIFIER = /^(?:ctrl|control|alt|shift|cmd|command|super|meta|win|option|fn)$/i;
+const KEY = /^(?:[\p{L}\p{N}]|enter|tab|esc|space|delete|backspace|up|down|left|right|home|end|f(?:[1-9]|1[0-2]))$/iu;
+
+/** (i3) `Ctrl+Shift+P` reads as "Control más Shift más P": modifiers joined by `+` to one key. */
+function keyCombination(core: string): string | undefined {
+	const keys = core.split("+");
+	const key = keys.pop() ?? "";
+	if (keys.length === 0 || !keys.every((name) => MODIFIER.test(name)) || !KEY.test(key)) return undefined;
+	return [...keys.map((name) => (/^ctrl$/i.test(name) ? "Control" : name)), key].join(` ${words.plus} `);
+}
+
+/** (i4) `v2.0+` reads as "v2 punto 0 o superior"; without a `v` it needs a dot, so a count such as `100+` stays. */
+function minimumVersion(core: string): string | undefined {
+	const version = /^(v?)(\d+(?:\.\d+)*)\+$/.exec(core);
+	if (!version || (version[1] === "" && !version[2].includes("."))) return undefined;
+	return `${version[1]}${dottedNumber(version[2])} ${words.orLater}`;
+}
 
 /** `feat/pending-central` reads as "feat pending central". */
 function nameWords(core: string): string {
@@ -613,15 +652,18 @@ function alternatives(core: string): string | undefined {
 /**
  * The last part plus its folder: `~/.gentle-shell/agent/AGENTS.md` reads as "AGENTS punto md, en agent"
  * and `/tmp/x/wav/hs/` as "la carpeta hs, en wav" ("hs, en wav" right after "carpeta"). A single `/word` is
- * left to `command`, `1/2` to the numbers.
+ * left to `command`, `1/2` to the numbers. (i1) A relative `src/` is a folder too, and a last part starting with
+ * a dot (`ckan-docker/.prettierrc.json`) reads like any other.
  */
 function pathReading(core: string, previous: string): string | undefined {
 	if (!PATH.test(core)) return undefined;
 	const root = /^(?:~|\.{1,2})?\//.exec(core)?.[0] ?? "";
 	const parts = core.slice(root.length).split("/").filter((part) => part !== "");
 	const isFolder = core.endsWith("/");
+	const bareFolder = root === "" && parts.length === 1 && isFolder && /\p{L}/u.test(parts[0]);
+	if (bareFolder) return previous === "carpeta" || previous === "folder" ? partName(parts[0]) : `${words.folder} ${partName(parts[0])}`;
 	if (root === "/" ? parts.length < 2 && !isFolder : root === "" && parts.length < 2) return undefined;
-	if (root === "" && !/\p{L}\/[\p{L}\p{N}]|[\p{L}\p{N}]\/\p{L}/u.test(core)) return undefined;
+	if (root === "" && !/\p{L}\/\.?[\p{L}\p{N}]|[\p{L}\p{N}]\/\.?\p{L}/u.test(core)) return undefined;
 	const name = partName(parts.at(-1) ?? "");
 	if (name === "") return undefined;
 	const said = previous === "carpeta" || previous === "folder";
