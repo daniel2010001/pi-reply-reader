@@ -1,5 +1,5 @@
-import { type ChildProcess, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
  */
 
 const EXTENSION = pathToFileURL(resolve(import.meta.dirname, "..", "extensions", "reply-reader.ts")).href;
+const LOCK = pathToFileURL(resolve(import.meta.dirname, "..", "src", "reading-lock.ts")).href;
 
 /**
  * One session: loads the extension into a recording Pi with a fake engine, runs the given commands in order,
@@ -401,6 +402,115 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 		await b.exited;
 		expect(a.seen()).toMatchObject({ notes: [["esc", { consume: true }]], statuses: ["Reading P2.R1 on local · Esc stops", null] });
 		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P4.R1 on local · Esc stops", null] });
+	});
+
+	it("Esc drops the waiting replies before it frees the machine, so no waiter slips in between (S8)", async () => {
+		const a = start("a", ["read", "await esc-a", "esc"]);
+		await playerOf(a.child);
+		const dir = join(root, "run", "pi-reply-reader");
+		// The player is recorded in the entry; nothing else writes it until Esc.
+		await waitFor(() => existsSync(join(dir, "reading.json")) && readFileSync(join(dir, "reading.json"), "utf8").includes('"player"'));
+		const events: string[] = [];
+		// inotify reports changes in the order they happened.
+		const watcher = watch(dir, (_type, file) => {
+			if (file === "waiting.json" || file === "reading.json") events.push(file);
+		});
+		try {
+			go("esc-a");
+			await a.exited;
+			await waitFor(() => events.includes("waiting.json") && events.includes("reading.json"));
+		} finally {
+			watcher.close();
+		}
+		expect(events[0]).toBe("waiting.json");
+	});
+
+	it("a leftover mutex that cannot be deleted (read-only folder) never hangs: auto-read is busy, /read goes ahead (S1, S8)", () => {
+		const dir = join(root, "run", "pi-reply-reader");
+		mkdirSync(dir, { recursive: true });
+		const script = join(root, "claim.mjs");
+		writeFileSync(
+			script,
+			`const { openReadingLock } = await import(process.argv[2]);
+const lock = openReadingLock({ XDG_RUNTIME_DIR: process.argv[3] });
+const auto = lock.claimIfFree(lock.waitingMark());
+const claim = lock.claim({ dropWaiting: true });
+console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", claim: typeof claim.lost }));
+`,
+		);
+		const victim = spawnSync("/bin/sh", ["-c", "echo $$"], { encoding: "utf8" });
+		for (const content of [`${Number(victim.stdout)} 1`, ""]) {
+			writeFileSync(join(dir, "reading.lock"), content);
+			if (content === "") {
+				const old = new Date(Date.now() - 5000);
+				utimesSync(join(dir, "reading.lock"), old, old);
+			}
+			chmodSync(dir, 0o500);
+			try {
+				const result = spawnSync(process.execPath, [script, LOCK, join(root, "run")], { encoding: "utf8", timeout: 5000 });
+				expect({ signal: result.signal, stdout: result.stdout.trim() }).toEqual({ signal: null, stdout: JSON.stringify({ auto: "busy", claim: "function" }) });
+			} finally {
+				chmodSync(dir, 0o700);
+			}
+		}
+	});
+
+	it("three sessions waiting at once read one at a time, one session's replies in order (S8 Queue)", async () => {
+		const a = start("a", ["read"]);
+		const playerA = await playerOf(a.child);
+		const [b, c, d] = [auto("b", ["Uno.", "Dos."]), auto("c", ["Uno."]), auto("d", ["Uno."])];
+		await Promise.all([noted(b), noted(c), noted(d)]);
+		await wait();
+		expect([b, c, d].map(hasPlayer)).toEqual([false, false, false]);
+		finish(playerA);
+		const nulls = (s: Session) => s.seen().statuses.filter((x) => x === null).length;
+		await playThrough(() => nulls(b) === 2 && nulls(c) === 1 && nulls(d) === 1);
+		for (const n of ["b", "c", "d"]) go(`go-${n}`);
+		await Promise.all([a.exited, b.exited, c.exited, d.exited]);
+		const log = lines();
+		expect(log).toHaveLength(10);
+		for (let i = 0; i < log.length; i += 2) expect(log[i + 1]).toBe(log[i].replace("start", "end"));
+		expect(b.seen().statuses).toEqual(["Reading P3.R1 on local · Esc stops", null, "Reading P4.R1 on local · Esc stops", null]);
+	});
+
+	it("a manual /read cancelled at the output question drops nothing and stops nothing (S8)", async () => {
+		const a = start("a", ["read"]);
+		const playerA = await playerOf(a.child);
+		const b = auto("b", ["Uno."]);
+		await noted(b);
+		mkdirSync(join(root, "config2", "pi-reply-reader"), { recursive: true });
+		writeFileSync(join(root, "config2", "pi-reply-reader", "outputs.json"), JSON.stringify({ desk: "tcp:desk:4713" }));
+		const c = start("c", ["read P1.R1"], { ...env, XDG_CONFIG_HOME: join(root, "config2") });
+		await c.exited;
+		expect(c.seen().notes).toEqual([["Reading cancelled: no output chosen.", "info"]]);
+		await wait();
+		expect([alive(playerA), hasPlayer(b)]).toEqual([true, false]);
+		finish(playerA);
+		await playThrough(() => b.seen().statuses.includes(null));
+		go("go-b");
+		await Promise.all([a.exited, b.exited]);
+		expect(lines()).toEqual([`start ${a.child.pid}`, `end ${a.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`]);
+	});
+
+	it("a mutex left by a SIGKILLed holder is broken: auto-read and /read still work (S1, S8)", async () => {
+		const dir = join(root, "run", "pi-reply-reader");
+		mkdirSync(dir, { recursive: true });
+		const victim = spawn("/bin/sleep", ["30"]);
+		await new Promise((r) => setTimeout(r, 100));
+		const st = startTime(victim.pid as number);
+		victim.kill("SIGKILL");
+		await new Promise((r) => victim.on("exit", r));
+		writeFileSync(join(dir, "reading.lock"), `${victim.pid} ${st}`);
+		const b = auto("b", ["Uno."]);
+		const playerB = await playerOf(b.child);
+		const c = start("c", ["read P1.R1"]);
+		const playerC = await playerOf(c.child);
+		await waitFor(() => !alive(playerB));
+		finish(playerC);
+		go("go-b");
+		await Promise.all([b.exited, c.exited]);
+		expect(existsSync(join(dir, "reading.lock"))).toBe(false);
+		expect(b.seen().notes).toEqual([["Auto-read on: full replies.", "info"]]);
 	});
 
 	it("a reading whose session died does not hold the waiting replies (stale entry)", async () => {

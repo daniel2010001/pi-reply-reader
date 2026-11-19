@@ -500,10 +500,11 @@ export function createReplyReader(
 			unsubscribe = ctx.hasUI
 				? ctx.ui.onTerminalInput((data) => {
 						if (!current || !matchesKey(data, Key.escape)) return undefined;
-						// Esc stops this session's reading and drops every auto-read waiting on the machine (S8).
+						// Esc stops this session's reading and drops every auto-read waiting on the machine (S8): dropped first,
+						// so no waiter can take the machine between the reading ending and the drop.
 						queue.clear();
-						stop();
 						openReadingLock(env)?.dropWaiting();
+						stop();
 						return { consume: true };
 					})
 				: undefined;

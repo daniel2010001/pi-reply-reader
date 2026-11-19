@@ -15,6 +15,13 @@ const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 const buildConfig = JSON.parse(readFileSync(join(ROOT, "tsconfig.build.json"), "utf8"));
 const TSC = join(ROOT, "node_modules", "typescript", "bin", "tsc");
 
+/** The package entry of `npm pack --json`: an array of entries up to npm 11, an object (keyed by package, or the entry itself) from npm 12. */
+function packResult(json: string): { files: { path: string }[] } {
+	const parsed = JSON.parse(json);
+	if (Array.isArray(parsed)) return parsed[0];
+	return Array.isArray(parsed?.files) ? parsed : (Object.values(parsed)[0] as { files: { path: string }[] });
+}
+
 describe("package metadata", () => {
 	it("is version 0.1.0 and names the public GitHub repository", () => {
 		expect(pkg.version).toBe("0.1.0");
@@ -47,7 +54,7 @@ describe("package metadata", () => {
 	it("packs only what users need", () => {
 		expect(pkg.files).toEqual(["dist", "extensions", "src", "examples", "README.md", "CHANGELOG.md", "LICENSE"]);
 		// What npm would pack without building first (dist/ is checked by the build test and the release proof).
-		const [packed] = JSON.parse(
+		const packed = packResult(
 			execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }),
 		);
 		const paths: string[] = packed.files.map((file: { path: string }) => file.path);
@@ -87,7 +94,7 @@ describe("build in a copy of the package", () => {
 		stale();
 		const stdout = execFileSync("npm", ["pack", "--dry-run", "--json"], { cwd: copy, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
 		// Lifecycle scripts may print to stdout before npm's JSON.
-		const [packed] = JSON.parse(stdout.slice(stdout.search(/^\[$/m)));
+		const packed = packResult(stdout.slice(stdout.search(/^[[{]$/m)));
 		const paths: string[] = packed.files.map((file: { path: string }) => file.path);
 		expect(paths).toEqual(expect.arrayContaining(["dist/bin/reply-reader.js", "dist/src/cli.js", "dist/src/speech-text.js"]));
 		expect(paths.filter((path) => path.includes("stale"))).toEqual([]);

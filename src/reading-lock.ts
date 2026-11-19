@@ -132,8 +132,10 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 				if (abandoned()) {
 					try {
 						unlinkSync(mutex);
-					} catch {}
-					continue;
+						continue;
+					} catch {
+						// Not deletable (a read-only folder, say): it counts as held, so the deadline still bounds the wait.
+					}
 				}
 				if (Date.now() > deadline) return timeout();
 				pause(2);
