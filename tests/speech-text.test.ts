@@ -525,6 +525,22 @@ describe("S2 (i1)-(i4): pending readings, round 1", () => {
 		expect(speechText("Con 2.11.0+ basta.")).toBe("Con 2 punto 11 punto 0 o superior basta.");
 	});
 
+	it("(i1) reads a dot-leading last part with no extension in a path as a file named without the dot (L102)", () => {
+		expect(speechText("Copiá `ckan-docker/.gitignore`.")).toBe("Copiá gitignore, en ckan docker.");
+		expect(speechText("Copy `ckan-docker/.gitignore` to the root.", "en")).toBe("Copy gitignore, in ckan docker to the root.");
+		expect(speechText("Mirá `./ckan-docker/.gitignore` y `~/projects/odp-docker/.demo-users`.")).toBe(
+			"Mirá gitignore, en ckan docker y demo users, en odp docker.",
+		);
+		expect(speechText("Ver `ckan-docker/.gitignore:3`.")).toBe("Ver gitignore, en ckan docker, línea 3.");
+		expect(speechText("Revisá `ckan-docker/.github/`.")).toBe("Revisá la carpeta github, en ckan docker.");
+	});
+
+	it("(i4) reads a whole number with no v followed by + as a count: o más/or more (L102)", () => {
+		expect(speechText("Hay `100+` respuestas, 300+ líneas y 6.000+ casos.")).toBe("Hay 100 o más respuestas, 300 o más líneas y 6.000 o más casos.");
+		expect(speechText("There are `100+` replies and 300+ lines.", "en")).toBe("There are 100 or more replies and 300 or more lines.");
+		expect(speechText("Sumá +4 y C++, con `v1+`.")).toBe("Sumá +4 y C++, con v1 o superior.");
+	});
+
 	it("(i1)-(i4) tokens are read, so diagnostics no longer report them", () => {
 		const narration = speechNarration("Mirá `src/`, `ckan-docker/.prettierrc.json`, el PR #43, `Ctrl+Shift+P` y `v1+`.\nY `a+b`.");
 		expect(narration.diagnostics).toEqual([{ line: 2, token: "a+b" }]);

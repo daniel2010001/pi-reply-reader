@@ -253,6 +253,8 @@ interface Phrasebook {
 	plus: string;
 	/** (i4) After a minimum version: `v1+`. */
 	orLater: string;
+	/** (i4) After a count: `100+`. */
+	orMore: string;
 	approximately: string;
 	/** × between numbers. */
 	times: string;
@@ -281,6 +283,7 @@ const SPANISH: Phrasebook = {
 	number: "número",
 	plus: "más",
 	orLater: "o superior",
+	orMore: "o más",
 	approximately: "aproximadamente",
 	times: "por",
 	units: {
@@ -348,6 +351,7 @@ const ENGLISH: Phrasebook = {
 	number: "number",
 	plus: "plus",
 	orLater: "or later",
+	orMore: "or more",
 	approximately: "approximately",
 	times: "times",
 	units: {
@@ -630,11 +634,16 @@ function keyCombination(core: string): string | undefined {
 	return [...keys.map((name) => (/^ctrl$/i.test(name) ? "Control" : name)), key].join(` ${words.plus} `);
 }
 
-/** (i4) `v2.0+` reads as "v2 punto 0 o superior"; without a `v` it needs a dot, so a count such as `100+` stays. */
+/**
+ * (i4) `v2.0+` reads as "v2 punto 0 o superior". Without a `v`, a whole number (`100+`, or a Spanish thousand such
+ * as `6.000+`) is a count: "100 o más".
+ */
 function minimumVersion(core: string): string | undefined {
 	const version = /^(v?)(\d+(?:\.\d+)*)\+$/.exec(core);
-	if (!version || (version[1] === "" && !version[2].includes("."))) return undefined;
-	return `${version[1]}${dottedNumber(version[2])} ${words.orLater}`;
+	if (!version) return undefined;
+	const [, v, number] = version;
+	if (v === "" && (!number.includes(".") || (words.thousands && THOUSANDS.test(number)))) return `${number} ${words.orMore}`;
+	return `${v}${dottedNumber(number)} ${words.orLater}`;
 }
 
 /** `feat/pending-central` reads as "feat pending central". */
@@ -653,7 +662,8 @@ function alternatives(core: string): string | undefined {
  * The last part plus its folder: `~/.gentle-shell/agent/AGENTS.md` reads as "AGENTS punto md, en agent"
  * and `/tmp/x/wav/hs/` as "la carpeta hs, en wav" ("hs, en wav" right after "carpeta"). A single `/word` is
  * left to `command`, `1/2` to the numbers. (i1) A relative `src/` is a folder too, and a last part starting with
- * a dot (`ckan-docker/.prettierrc.json`) reads like any other.
+ * a dot (`ckan-docker/.prettierrc.json`) reads like any other; with no extension and a folder before it
+ * (`ckan-docker/.gitignore`) it is a file named without the dot: "gitignore, en ckan docker".
  */
 function pathReading(core: string, previous: string): string | undefined {
 	if (!PATH.test(core)) return undefined;
@@ -667,7 +677,9 @@ function pathReading(core: string, previous: string): string | undefined {
 	const name = partName(parts.at(-1) ?? "");
 	if (name === "") return undefined;
 	const said = previous === "carpeta" || previous === "folder";
-	const reading = (!isFolder && fileReading(parts.at(-1) ?? "")) || (said ? name : `${words.folder} ${name}`);
+	const last = parts.at(-1) ?? "";
+	const dotFile = !isFolder && parts.length > 1 && last.startsWith(".") ? name : undefined;
+	const reading = (!isFolder && fileReading(last)) || dotFile || (said ? name : `${words.folder} ${name}`);
 	const folder = parts.length > 1 ? partName(parts[parts.length - 2]) : "";
 	return folder === "" ? reading : `${reading}, ${words.in} ${folder}`;
 }
