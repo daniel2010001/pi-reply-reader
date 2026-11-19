@@ -113,6 +113,7 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * Ask before cutting (S8, T33): a manual /read or read request while a reading plays anywhere asks "Something is being
  * read.": "Stop it and read now" (the above), "Read after it" (it waits like an auto-read, after this session's waiting
  * replies, and explicit actions drop it), or dismissed (nothing changes). Without a UI, or with nothing playing, it reads.
+ * An answer given after the session ended or restarted is dropped.
  * Other extensions (pi-reply-thread's Alt+R view) reach it over `pi.events` (S10, src/reader-events.ts): a ping is
  * answered with ready, ready is also sent at each session start, and a read request reads its text like `/read`.
  */
@@ -148,6 +149,8 @@ export function createReplyReader(
 
 		/** How many "Something is being read." questions are open; Esc belongs to them meanwhile. */
 		let asking = 0;
+		/** Counts session starts and ends: an answer given after the session it was asked in ended or restarted is dropped. */
+		let generation = 0;
 
 		/**
 		 * A reply due for auto-read, or a manual request answered "Read after it" (T33), with the machine's waiting mark
@@ -356,8 +359,10 @@ export function createReplyReader(
 		 */
 		const readRequested = async (ctx: ExtensionContext, name: string, label: string, markdown: string, language?: Language): Promise<void> => {
 			if (ctx.hasUI && playing() && speechNarration(markdown, language).text) {
+				const asked = generation;
 				const answer = await askCut(ctx);
-				if (!answer) return;
+				// The session ended or restarted while the question was open: nothing plays in it, no message.
+				if (!answer || generation !== asked) return;
 				if (answer === "after") {
 					queue.push({ ctx, name, label, markdown, language, mark: openReadingLock(env)?.waitingMark(), manual: true });
 					return;
@@ -589,6 +594,7 @@ export function createReplyReader(
 		};
 
 		pi.on("session_start", (_event, ctx) => {
+			generation++;
 			latest = ctx;
 			auto = "off";
 			queue.clear();
@@ -616,6 +622,7 @@ export function createReplyReader(
 		});
 
 		pi.on("session_shutdown", () => {
+			generation++;
 			// The session's end drops its waiting replies (S8), before its reading ends and would start one.
 			queue.clear();
 			stop();

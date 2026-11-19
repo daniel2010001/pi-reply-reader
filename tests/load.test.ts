@@ -921,6 +921,7 @@ describe("reply-reader extension", () => {
 				await waitFor(() => !alive(pid(0)));
 				await b.run("read-stop");
 				await b.run("read-auto", "off");
+				await ended(a, 1);
 				await a.run("read");
 				await waitFor(() => has(1));
 				expect(a.key("\x1b")).toEqual({ consume: true });
@@ -966,6 +967,123 @@ describe("reply-reader extension", () => {
 				await ended(reader, 2);
 				expect(texts().at(-1)).toBe("Primera respuesta.");
 				expect(reader.notes).toEqual([]);
+			});
+
+			for (const answer of ["after", "now"] as const) {
+				for (const how of ["ends", "restarts"] as const) {
+					it(`a question still open when the session ${how} is dropped when answered ${answer}: nothing plays, no message`, async () => {
+						holding();
+						const reader = load({ cut: "wait" });
+						await reader.run("read");
+						await waitFor(() => has(0));
+						const asked = reader.run("read", "P1.R1");
+						await waitFor(reader.asking);
+						reader.shutdown();
+						await waitFor(() => !alive(pid(0)));
+						if (how === "restarts") reader.restart();
+						rmSync(log("hold"));
+						reader.answer(answer);
+						await asked;
+						await wait();
+						expect(has(1)).toBe(false);
+						expect(texts()).not.toContain("Primera respuesta.");
+						expect(reader.statuses).toEqual(["Reading P2.R1 on local · Esc stops", undefined]);
+						expect(reader.notes).toEqual([]);
+					});
+				}
+			}
+
+			it("Read after it waits behind two waiting auto-replies; a later reply waits behind it (S8 c)", async () => {
+				holding();
+				const r = load({ cut: "after" });
+				await r.run("read-auto", "on");
+				await r.run("read");
+				await waitFor(() => has(0));
+				r.turn([user("a"), assistant("Uno.")]);
+				r.turn([user("b"), assistant("Dos.")]);
+				await r.run("read", "P1.R1");
+				r.turn([user("c"), assistant("Tres.")]);
+				await wait();
+				expect(has(1)).toBe(false);
+				rmSync(log("hold"));
+				await ended(r, 5);
+				expect(r.statuses.filter(Boolean)).toEqual(["P2.R1", "P3.R1", "P4.R1", "P1.R1", "P5.R1"].map((id) => `Reading ${id} on local · Esc stops`));
+			});
+
+			it("Read after it is dropped by the session's end and by Esc in another session (S8 c)", async () => {
+				shared();
+				holding();
+				const a = load();
+				const b = load({ cut: "after" });
+				await a.run("read");
+				await waitFor(() => has(0));
+				await b.run("read", "P1.R1");
+				await wait();
+				expect(a.key("\x1b")).toEqual({ consume: true });
+				await waitFor(() => !alive(pid(0)));
+				rmSync(log("hold"));
+				await wait();
+				await wait();
+				expect([has(1), b.statuses]).toEqual([false, []]);
+			});
+
+			it("Esc while the question is open is not consumed; once closed, Esc stops again (S8 f)", async () => {
+				holding();
+				const r = load({ cut: "wait" });
+				await r.run("read");
+				await waitFor(() => has(0));
+				void r.run("read", "P1.R1");
+				await waitFor(r.asking);
+				expect(r.key("\x1b")).toBeUndefined();
+				await wait();
+				expect(alive(pid(0))).toBe(true);
+				r.answer("dismiss");
+				await waitFor(() => !r.asking());
+				expect(r.key("\x1b")).toEqual({ consume: true });
+				await waitFor(() => !alive(pid(0)));
+				rmSync(log("hold"));
+			});
+
+			it("another session claims while the question is open: after waits for it (S8 h)", async () => {
+				shared();
+				holding();
+				const a = load();
+				const c = load();
+				const b = load({ cut: "wait" });
+				await a.run("read");
+				await waitFor(() => has(0));
+				await c.run("read-auto", "on");
+				c.turn([user("a"), assistant("Uno.")]);
+				const asked = b.run("read", "P1.R1");
+				await waitFor(b.asking);
+				process.kill(pid(0), "SIGTERM");
+				await waitFor(() => has(1));
+				b.answer("after");
+				await asked;
+				await wait();
+				expect([alive(pid(1)), has(2)]).toEqual([true, false]);
+				rmSync(log("hold"));
+				await ended(b, 1);
+				expect(b.statuses.filter(Boolean)).toEqual(["Reading P1.R1 on local · Esc stops"]);
+			});
+
+			it("the waiting mark is taken at answer time: an explicit read elsewhere while the question is open does not drop it (S8 h)", async () => {
+				shared();
+				holding();
+				const a = load();
+				const d = load({ cut: "now" });
+				const b = load({ cut: "wait" });
+				await a.run("read");
+				await waitFor(() => has(0));
+				const asked = b.run("read", "P1.R1");
+				await waitFor(b.asking);
+				await d.run("read", "P1.R1");
+				await waitFor(() => has(1));
+				b.answer("after");
+				await asked;
+				rmSync(log("hold"));
+				await ended(b, 1);
+				expect(b.statuses.filter(Boolean)).toEqual(["Reading P1.R1 on local · Esc stops"]);
 			});
 		});
 
