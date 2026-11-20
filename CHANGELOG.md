@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The SSH audio tunnel example now ends in a private Unix socket (`unix:/run/user/<uid>/reply-reader-pulse.sock`,
+  mode 0600) instead of the loopback port `127.0.0.1:4714`, which every local process and host-network container
+  could reach, with the desktop's microphone behind it. New `examples/reply-reader-vps-audio.service` for a cloud
+  VPS that cannot reach the desktop: the desktop opens a reverse tunnel. Existing `tcp:` outputs keep working.
 - Numbers are spoken as words in the text's language (Supertonic mispronounced digits): "51" "cincuenta y
   uno", with Spanish "un"/"una" agreement by the next word, decimals, versions and IP addresses group by group,
   and numbers over 9 digits or starting with 0 digit by digit.

@@ -1,0 +1,57 @@
+# Carries pi-reply-reader's audio from a cloud VPS that runs Pi to the PipeWire of the machine you
+# sit at (here called "desktop"), over SSH. Install it ON THE DESKTOP: a VPS usually cannot reach a
+# desktop behind NAT, so the desktop connects out and asks the VPS to forward a socket back
+# (ssh -R). Nothing is opened on the desktop or on the VPS's network.
+#
+# On the VPS the socket is /run/user/<your VPS uid>/reply-reader-pulse.sock, mode 0600 (sshd's
+# default StreamLocalBindMask), so only your user there can open it. It still gives the desktop's
+# whole audio, microphone included, to whoever can act as that user on the VPS: root and your cloud
+# provider among them. Keep the unit stopped when you do not need readings there.
+#
+# On the VPS, once:
+#     loginctl enable-linger           # /run/user/<uid> exists without a login session
+# On the desktop:
+#     cp examples/reply-reader-vps-audio.service ~/.config/systemd/user/
+#     (edit VPS_HOST, VPS_UID and the user in you@${VPS_HOST})
+#     systemctl --user daemon-reload && systemctl --user enable --now reply-reader-vps-audio.service
+# Then on the VPS, in ~/.config/pi-reply-reader/outputs.json (VPS_UID in place of 1000):
+#     { "desktop": "unix:/run/user/1000/reply-reader-pulse.sock" }
+# Verify on the VPS (prints the desktop's host name; plays nothing):
+#     PULSE_SERVER=unix:$XDG_RUNTIME_DIR/reply-reader-pulse.sock pactl info | grep 'Host Name'
+#
+# The VPS's sshd keeps the socket after a dropped connection and then refuses the next forward
+# ("remote port forwarding failed for listen path"), so ExecStartPre removes it first. With
+# "StreamLocalBindUnlink yes" in the VPS's sshd_config that step is not needed.
+
+[Unit]
+Description=SSH reverse tunnel for pi-reply-reader audio from a VPS to this machine's PipeWire
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The VPS's address and your user's ID there, in one place.
+Environment=VPS_HOST=vps.example.com
+Environment=VPS_UID=1000
+# "-" lets the tunnel start (and fail and retry) even when this step cannot reach the VPS.
+ExecStartPre=-/usr/bin/ssh \
+  -o BatchMode=yes \
+  -o ConnectTimeout=10 \
+  -o ControlMaster=no \
+  -o ControlPath=none \
+  you@${VPS_HOST} rm -f /run/user/${VPS_UID}/reply-reader-pulse.sock
+ExecStart=/usr/bin/ssh -N \
+  -o BatchMode=yes \
+  -o ExitOnForwardFailure=yes \
+  -o ConnectTimeout=10 \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o ControlMaster=no \
+  -o ControlPath=none \
+  -R /run/user/${VPS_UID}/reply-reader-pulse.sock:%t/pulse/native \
+  you@${VPS_HOST}
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
