@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Auto-read also reads the prompts that wait for you, through the same line: an `ask_user_question` /
+  `ask_user_choice` call reads each question with its option labels only ("Pregunta 1 de 2: ¿Cómo suena?
+  Opciones: uno, Bien; dos, Mal."), a command confirmation reads only the program ("Confirmación de comando:
+  git." / "Command confirmation: git."), and any other dialog its title. Once answered, a prompt's reading is
+  dropped, or stopped if it plays. The reader's own questions are not read.
 - Auto-read reads every new reply, each once and in order, as soon as it is written, even while the agent keeps
   working. Before, only the last reply of a run was read: a reply followed by a background-job or subagent
   notice that started another turn was skipped.

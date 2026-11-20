@@ -55,7 +55,7 @@ sentence is synthesized, about 1-2 s.
 | `/read <file.md>` | | Reads a Markdown file (see below). |
 | `/read <target>#<section> [rest]` | | Reads one section of a file or reply (see [Reading one section](#reading-one-section)). |
 | `/read-stop` | Stop the reading playing, in this or another Pi session (Esc or a new /read stop it too) | Stops the reading playing, in any Pi session of yours on this machine, and says `Reading stopped.`; with nothing playing anywhere, says `Nothing is being read.` |
-| `/read-auto [on\|questions\|off]` | Read each new reply aloud as soon as it is written, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles | See [Auto-read](#auto-read). |
+| `/read-auto [on\|questions\|off]` | Read each new reply aloud as soon as it is written, and each prompt that waits for you, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles | See [Auto-read](#auto-read). |
 | `/read-output [name]` | Choose where readings sound: local or an output from outputs.json | With a name, switches to that output; without one, asks. See [Outputs](#outputs). |
 | `/read-voice [male\|female]` | Choose the voice for the next readings: male (default) or female | With a name, switches the voice; without one, asks. |
 | `/read-speed [n]` | Choose the voice speed for the next readings, 0.5 to 2.0 (default 1.1); saved for later sessions | With a number, sets that speed; without one, offers 0.8 to 1.5. See [Speed](#speed). |
@@ -158,6 +158,22 @@ A manual `/read` (or a read from Alt+R) that you answer **Read after it** joins 
 the replies already waiting in its session, once nothing plays, and `/read-stop`, Esc or another manual reading
 drops it, here or in any session. It is not an auto-read, so `/read-auto off` keeps it; the end of the session
 drops it.
+
+#### Prompts that wait for you
+
+With auto-read on (in full or `questions`; prompts are questions too), when the agent stops to ask you
+something, that prompt is read through the same line, in the conversation's language:
+
+| Prompt | What is read |
+|---|---|
+| `ask_user_question` / `ask_user_choice` | Each question with its option labels, never descriptions or values: "Pregunta 1 de 2: ¿Cómo suena? Opciones: uno, Bien; dos, Mal." ("Pregunta: …" for a single question; "Question 1 of 2: … Options: one, …" in English) |
+| A command confirmation (a confirm while a `bash` call waits to run) | "Confirmación de comando: git." / "Command confirmation: git.": the program only, never its arguments (they may hold private values); `NAME=value` assignments, a leading `sudo` or `env` and the program's folder are left out |
+| Any other dialog (RDD consent, other confirms and selects) | Its title only; nothing when it has none (Pi does not give extensions a dialog's text or options) |
+
+Once you answer (the dialog closes, or the tool finishes), its reading is dropped if it still waits, or
+stopped if it plays; other waiting readings stay. A prompt that waited starts after the usual 1.5 s of
+silence, without an announcement (it says what it is). The reader's own questions (output, voice, speed,
+download, **Something is being read.**) are never read. With auto-read off, nothing of this plays.
 
 ### pi-reply-thread
 

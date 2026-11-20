@@ -241,6 +241,9 @@ function load(
 		},
 		/** Stores one message as Pi does: its message_end handlers run first, then the entry joins the branch. */
 		store,
+		/** Fires any other Pi event (tool_execution_*, ui_prompt_*) with this session's context. */
+		event: (name: string, payload: Record<string, unknown> = {}) =>
+			(events.get(name) as ((event: unknown, ctx: unknown) => void) | undefined)?.({ type: name, ...payload }, ctx),
 		/** Fires one agent event as Pi does, with this session's context. */
 		agent: (name: "agent_start" | "agent_settled", aborted = false) =>
 			(events.get(name) as ((event: unknown, ctx: unknown) => void) | undefined)?.({ type: name, aborted }, ctx),
@@ -1322,6 +1325,255 @@ describe("reply-reader extension", () => {
 			const complete = reader.commands.get("read-auto")!.getArgumentCompletions as (prefix: string) => { value: string }[];
 			expect(complete("").map((item) => item.value)).toEqual(["on", "questions", "off"]);
 			expect(complete("o").map((item) => item.value)).toEqual(["on", "off"]);
+		});
+	});
+
+	describe("blocking prompts are read aloud (T43, S18)", { timeout: 20000 }, () => {
+		const texts = () => synthesized.map((request) => request.text);
+		const pause = () => new Promise((resolve) => setTimeout(resolve, 150));
+		/** Longer than two of the reader's 250 ms checks. */
+		const wait = () => new Promise((resolve) => setTimeout(resolve, 700));
+		const ended = (reader: ReturnType<typeof load>, n: number) => waitFor(() => reader.statuses.filter((status) => status === undefined).length === n);
+		/** Each player plays while `hold`, or its own `hold-<n>`, exists. */
+		const holding = () => {
+			writeFileSync(log("hold"), "");
+			installVoice(`while [ -e "${root}/hold" ] || [ -e "${root}/hold-$n" ]; do sleep 0.02; done;`);
+		};
+		const pid = (n: number) => Number(read(`play-${n}.pid`));
+		const english = "The build is done and the tests pass for the new parser.";
+		const twoQuestions = {
+			questions: [
+				{
+					header: "Voz",
+					question: "¿Cómo suena?",
+					options: [
+						{ label: "Bien", description: "se oye claro" },
+						{ label: "Mal", description: "se corta" },
+					],
+				},
+				{ header: "Plan", question: "¿Seguimos?", multiSelect: false, options: [{ label: "Sí" }, { label: "No" }] },
+			],
+		};
+		const ask = (reader: ReturnType<typeof load>, toolCallId: string, toolName: string, args: unknown) =>
+			reader.event("tool_execution_start", { toolCallId, toolName, args });
+		const prompt = (reader: ReturnType<typeof load>, kind: string, title?: string) =>
+			reader.event("ui_prompt_start", { reason: "ui_prompt", kind, ...(title === undefined ? {} : { title }) });
+
+		it("ask_user_question reads each question with its option labels only, in Spanish, never descriptions", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto", "on");
+			ask(reader, "c1", "ask_user_question", twoQuestions);
+			await reader.settled();
+			expect(texts()).toEqual([
+				"Pregunta uno de dos: ¿Cómo suena?",
+				"Opciones: uno, Bien; dos, Mal.",
+				"Pregunta dos de dos: ¿Seguimos?",
+				"Opciones: uno, Sí; dos, No.",
+			]);
+			expect(texts().join(" ")).not.toMatch(/claro|corta|Voz|Plan/);
+			expect(reader.statuses).toEqual(["Reading question on local · Esc stops", undefined]);
+			expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
+		});
+
+		it("ask_user_choice reads its single question as Pregunta:, labels only (never values or descriptions); English reads Question", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto", "on");
+			ask(reader, "c1", "ask_user_choice", {
+				question: "¿Publicamos?",
+				options: [
+					{ label: "Sí", value: "publish-now", description: "sube la versión" },
+					{ label: "Todavía no", value: "wait" },
+				],
+			});
+			await reader.settled();
+			reader.event("tool_execution_end", { toolCallId: "c1", toolName: "ask_user_choice", result: {}, isError: false });
+			ask(reader, "c2", "ask_user_question", {
+				questions: [
+					{ header: "Sound", question: "How does it sound?", options: [{ label: "Good" }, { label: "Bad" }] },
+					{ header: "Plan", question: "Should we go on with the plan?", options: [{ label: "Yes" }, { label: "No" }] },
+				],
+			});
+			await ended(reader, 2);
+			expect(texts()).toEqual([
+				"Pregunta: ¿Publicamos?",
+				"Opciones: uno, Sí; dos, Todavía no.",
+				"Question one of two: How does it sound?",
+				"Options: one, Good; two, Bad.",
+				"Question two of two: Should we go on with the plan?",
+				"Options: one, Yes; two, No.",
+			]);
+			expect(texts().join(" ")).not.toMatch(/publish|wait|sube/);
+		});
+
+		it("a malformed ask_user_* call reads nothing and says nothing; other tools read nothing", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto", "on");
+			ask(reader, "c1", "ask_user_question", { questions: "¿Qué?" });
+			ask(reader, "c2", "ask_user_question", { questions: [] });
+			ask(reader, "c3", "ask_user_question", { questions: [{ question: "¿Qué?", options: [{ description: "sin etiqueta" }] }] });
+			ask(reader, "c4", "ask_user_choice", { question: 3, options: [{ label: "A" }] });
+			ask(reader, "c5", "ask_user_choice", undefined);
+			ask(reader, "c6", "read", { path: "README.md" });
+			await pause();
+			expect(synthesized).toEqual([]);
+			expect(reader.statuses).toEqual([]);
+			expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
+		});
+
+		it("a confirm while a bash call is pending reads Confirmación de comando and the program only, never its arguments", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto", "on");
+			ask(reader, "b1", "bash", { command: "TOKEN=abc123 sudo git push --force origin secreto" });
+			prompt(reader, "confirm", "Allow force push?");
+			await reader.settled();
+			reader.event("ui_prompt_end", { reason: "ui_prompt" });
+			reader.event("tool_execution_end", { toolCallId: "b1", toolName: "bash", result: {}, isError: false });
+			ask(reader, "b2", "bash", { command: "/usr/bin/npm publish --otp 123456" });
+			prompt(reader, "confirm", "Allow publish?");
+			await ended(reader, 2);
+			expect(texts()).toEqual(["Confirmación de comando: git.", "Confirmación de comando: npm."]);
+			expect(texts().join(" ")).not.toMatch(/push|force|secreto|TOKEN|abc|sudo|publish|otp|Allow/);
+			expect(reader.statuses.filter(Boolean)).toEqual(["Reading command confirmation on local · Esc stops", "Reading command confirmation on local · Esc stops"]);
+		});
+
+		it("the command confirmation is in the conversation's language: Command confirmation after an English reply", async () => {
+			installVoice();
+			const reader = load({}, [user("a"), assistant(english)]);
+			await reader.run("read-auto", "on");
+			ask(reader, "b1", "bash", { command: "git status" });
+			prompt(reader, "confirm", "Run it?");
+			await reader.settled();
+			expect(texts()).toEqual(["Command confirmation: git."]);
+		});
+
+		it("any other dialog reads only its title; none without a title; a confirm with no bash pending is such a dialog", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto", "on");
+			prompt(reader, "select", "¿Revisar con RDD antes de seguir?");
+			await reader.settled();
+			reader.event("ui_prompt_end", { reason: "ui_prompt" });
+			prompt(reader, "custom");
+			await pause();
+			reader.event("ui_prompt_end", { reason: "ui_prompt" });
+			ask(reader, "b1", "bash", { command: "ls -la" });
+			reader.event("tool_execution_end", { toolCallId: "b1", toolName: "bash", result: {}, isError: false });
+			prompt(reader, "confirm", "¿Borrar la sesión?");
+			await ended(reader, 2);
+			expect(texts()).toEqual(["¿Revisar con RDD antes de seguir?", "¿Borrar la sesión?"]);
+			expect(reader.statuses.filter(Boolean)).toEqual(["Reading dialog on local · Esc stops", "Reading dialog on local · Esc stops"]);
+		});
+
+		it("an ask_user_* call that also raises ui_prompt_start is read once (deduped by its pending call)", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read-auto", "on");
+			ask(reader, "c1", "ask_user_choice", { question: "¿Publicamos?", options: [{ label: "Sí" }, { label: "No" }] });
+			prompt(reader, "select", "¿Publicamos?");
+			await reader.settled();
+			await wait();
+			expect(texts()).toEqual(["Pregunta: ¿Publicamos?", "Opciones: uno, Sí; dos, No."]);
+		});
+
+		it("the reader's own questions (output, voice) are never read as dialogs", async () => {
+			installVoice();
+			configureOutputs({ desktop: "tcp:x" });
+			let fire: (title: string) => void = () => {};
+			const reader = load({
+				ui: {
+					select: async (title: string, options: string[]) => {
+						fire(title);
+						return options.at(-1);
+					},
+				},
+			});
+			fire = (title) => prompt(reader, "select", title);
+			await reader.run("read-auto", "on");
+			await reader.run("read-voice");
+			reader.event("ui_prompt_end", { reason: "ui_prompt" });
+			await reader.run("read");
+			await reader.settled();
+			reader.event("ui_prompt_end", { reason: "ui_prompt" });
+			await wait();
+			expect(texts().join(" ")).not.toMatch(/Which voice|Where should/);
+			expect(reader.statuses.filter(Boolean)).toEqual(["Reading P2.R1 on desktop · Esc stops"]);
+		});
+
+		it("answered prompts are dropped: one waiting (ui_prompt_end, tool end) never plays, one playing stops; other waiting readings stay", async () => {
+			holding();
+			const reader = load();
+			await reader.run("read-auto", "on");
+			await reader.run("read");
+			await waitFor(() => existsSync(log("play-0.pid")));
+			await reader.turn([user("a"), assistant("Uno.")]);
+			ask(reader, "c1", "ask_user_choice", { question: "¿Publicamos?", options: [{ label: "Sí" }] });
+			prompt(reader, "select", "¿Publicamos?");
+			ask(reader, "b1", "bash", { command: "git push" });
+			await reader.turn([user("b"), assistant("Dos.")]);
+			await wait();
+			expect(reader.statuses.at(-1)).toBe("Reading P2.R1 on local · 3 waiting · Esc stops");
+			// The ask_user_choice dialog is answered: its question, still waiting, is dropped.
+			reader.event("ui_prompt_end", { reason: "ui_prompt" });
+			reader.event("tool_execution_end", { toolCallId: "c1", toolName: "ask_user_choice", result: {}, isError: false });
+			expect(reader.statuses.at(-1)).toBe("Reading P2.R1 on local · 2 waiting · Esc stops");
+			// A command confirmation joins the line and is answered before its turn.
+			prompt(reader, "confirm", "Allow push?");
+			expect(reader.statuses.at(-1)).toBe("Reading P2.R1 on local · 3 waiting · Esc stops");
+			reader.event("ui_prompt_end", { reason: "ui_prompt" });
+			expect(reader.statuses.at(-1)).toBe("Reading P2.R1 on local · 2 waiting · Esc stops");
+			rmSync(log("hold"));
+			await ended(reader, 3);
+			await wait();
+			expect(texts().join(" ")).not.toMatch(/Publicamos|Confirmación/);
+			expect(texts().slice(-4)).toEqual(["Respuesta P tres, R uno.", "Uno.", "Respuesta P cuatro, R uno.", "Dos."]);
+
+			// One playing is stopped when answered, by ui_prompt_end or by its tool's end; the next waiting one then plays.
+			writeFileSync(log("hold-3"), "");
+			writeFileSync(log("hold-5"), "");
+			ask(reader, "c2", "ask_user_question", twoQuestions);
+			await waitFor(() => existsSync(log("play-3.pid")));
+			await reader.turn([user("c"), assistant("Tres.")]);
+			reader.event("tool_execution_end", { toolCallId: "c2", toolName: "ask_user_question", result: {}, isError: false });
+			await waitFor(() => !alive(pid(3)));
+			await waitFor(() => existsSync(log("play-4.audio")));
+			ask(reader, "b2", "bash", { command: "git push" });
+			prompt(reader, "confirm", "Allow push?");
+			await waitFor(() => existsSync(log("play-5.pid")) && texts().at(-1) === "Confirmación de comando: git.");
+			reader.event("ui_prompt_end", { reason: "ui_prompt" });
+			await waitFor(() => !alive(pid(5)));
+			await ended(reader, 6);
+			await wait();
+			expect(texts()).toContain("Tres.");
+			expect(existsSync(log("play-3.audio"))).toBe(false);
+			expect(existsSync(log("play-5.audio"))).toBe(false);
+			expect(existsSync(log("play-6.pid"))).toBe(false);
+			expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
+		});
+
+		it("with auto-read off nothing of this plays; questions mode reads prompts too", async () => {
+			installVoice();
+			const reader = load();
+			ask(reader, "c1", "ask_user_choice", { question: "¿Publicamos?", options: [{ label: "Sí" }] });
+			prompt(reader, "select", "¿Publicamos?");
+			reader.event("ui_prompt_end", { reason: "ui_prompt" });
+			reader.event("tool_execution_end", { toolCallId: "c1", toolName: "ask_user_choice", result: {}, isError: false });
+			ask(reader, "b1", "bash", { command: "git push" });
+			prompt(reader, "confirm", "Allow push?");
+			reader.event("ui_prompt_end", { reason: "ui_prompt" });
+			prompt(reader, "select", "¿Revisar con RDD?");
+			reader.event("ui_prompt_end", { reason: "ui_prompt" });
+			await pause();
+			expect(synthesized).toEqual([]);
+			expect(reader.statuses).toEqual([]);
+
+			await reader.run("read-auto", "questions");
+			ask(reader, "c2", "ask_user_choice", { question: "¿Publicamos?", options: [{ label: "Sí" }] });
+			await reader.settled();
+			expect(texts()).toEqual(["Pregunta: ¿Publicamos?", "Opciones: uno, Sí."]);
 		});
 	});
 

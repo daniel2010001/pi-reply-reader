@@ -75,6 +75,11 @@ export function speechNarration(markdown: string, language: Language = detectLan
  * Spanish wins ties, so a reply with no clear English majority reads as it always did.
  */
 export function detectLanguage(markdown: string): Language {
+	return languageOfWords(markdown) ?? "es";
+}
+
+/** (S7, S18) `detectLanguage`, or undefined when the text has no function word of either language ("git", "OK?"). */
+export function languageOfWords(markdown: string): Language | undefined {
 	const prose = markdown
 		.replace(/^\s{0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^\s{0,3}\1[^\n]*$|(?![\s\S]))/gm, " ")
 		// The closing heading every reply here uses is English even in a Spanish reply.
@@ -88,6 +93,7 @@ export function detectLanguage(markdown: string): Language {
 		if (ENGLISH_WORDS.has(word)) english++;
 		else if (SPANISH_WORDS.has(word)) spanish++;
 	}
+	if (english === 0 && spanish === 0) return undefined;
 	return english > spanish ? "en" : "es";
 }
 

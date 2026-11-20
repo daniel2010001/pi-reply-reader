@@ -8,12 +8,13 @@ import { loadOutputs, type Output } from "../src/outputs.ts";
 import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
 import { playerTimeoutMs, reapOrphans } from "../src/player.ts";
 import { questionsSection } from "../src/questions.ts";
+import { askedQuestions, commandMarkdown, commandProgram, dialogTitle, QUESTION_TOOLS, questionsMarkdown } from "../src/prompts.ts";
 import { isPing, parseReadRequest, READER_EVENTS, READER_EVENTS_VERSION } from "../src/reader-events.ts";
 import { type Claim, openReadingLock } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { sectionFrom } from "../src/sections.ts";
 import { formatSpeed, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSpeed } from "../src/settings.ts";
-import { announcement, detectLanguage, type Language, speechNarration } from "../src/speech-text.ts";
+import { announcement, detectLanguage, type Language, languageOfWords, speechNarration } from "../src/speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
 
 const STATUS = "reply-reader";
@@ -118,6 +119,10 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * read.": "Stop it and read now" (the above), "Read after it" (it waits like an auto-read, after this session's waiting
  * replies, and explicit actions drop it), or dismissed (nothing changes). Without a UI, or with nothing playing, it reads.
  * An answer given after the session ended or restarted is dropped.
+ * Blocking prompts (S18, T43): with auto-read on (in full or questions only), an ask_user_question / ask_user_choice
+ * call reads its questions with their option labels, a confirm raised while a bash call is pending reads "Confirmación
+ * de comando: <program>", and any other dialog its title; each joins the line, and is dropped (stopped if playing)
+ * once answered (ui_prompt_end, or the tool's end). The reader's own questions are never read.
  * Other extensions (pi-reply-thread's Alt+R view) reach it over `pi.events` (S10, src/reader-events.ts): a ping is
  * answered with ready, ready is also sent at each session start, and a read request reads its text like `/read`.
  */
@@ -139,6 +144,8 @@ export function createReplyReader(
 					output: string;
 					/** The footer last shown for it. */
 					shown?: string;
+					/** A blocking prompt's reading (S18): its answer stops it. */
+					prompt?: string;
 			  }
 			| undefined;
 		/** The output chosen in this session, by name; asked on the first reading. */
@@ -168,6 +175,16 @@ export function createReplyReader(
 		let asking = 0;
 		/** Counts session starts and ends: an answer given after the session it was asked in ended or restarted is dropped. */
 		let generation = 0;
+		/** How many of the reader's own prompts (output, voice, speed, download confirm, the cut question) are open (S18). */
+		let ownPrompts = 0;
+		/** Tool calls started and not yet ended, in start order (S18): an ask_user_* call, or the bash a confirm is about. */
+		const pending = new Map<string, { toolName: string; args: unknown }>();
+		/** The prompt readings the open ui_prompt span answers when it ends (S18). */
+		let spanPrompts: string[] = [];
+		/** The keys of the prompt readings queued and not yet answered (S18). */
+		const prompts = new Set<string>();
+		/** Numbers dialogs, so each gets its own prompt key. */
+		let dialogs = 0;
 
 		/**
 		 * A reply due for auto-read, or a manual request answered "Read after it" (T33), with the machine's waiting mark
@@ -183,6 +200,8 @@ export function createReplyReader(
 			manual?: true;
 			/** A Markdown file rather than a reply: announced by its name (S14). */
 			file?: true;
+			/** A blocking prompt (S18): the key its answer drops it by. It says what it is, so it gets no announcement. */
+			prompt?: string;
 		}
 		/** Whether a reading plays (or is starting) in this session or anywhere on the machine. */
 		const playing = (): boolean => current !== undefined || (openReadingLock(env)?.busy() ?? false);
@@ -193,13 +212,24 @@ export function createReplyReader(
 				readAloud(item.ctx, item.name, item.label, item.markdown, item.language, {
 					mark: item.mark,
 					still,
-					announce: waited ? (item.file ? "file" : "reply") : undefined,
+					announce: waited ? (item.prompt ? "prompt" : item.file ? "file" : "reply") : undefined,
+					prompt: item.prompt,
 				}).catch((error: Error) => {
 					item.ctx.ui.notify(error.message, "error");
 					return "done" as const;
 				}),
 			retryMs: WATCH_MS,
 		});
+
+		/** Runs one of the reader's own prompts; a ui_prompt_start meanwhile is the reader's and is not read (S18). */
+		const own = async <T>(prompt: () => Promise<T>): Promise<T> => {
+			ownPrompts++;
+			try {
+				return await prompt();
+			} finally {
+				ownPrompts--;
+			}
+		};
 
 		/** Registers a command whose context becomes the one bus events read with. */
 		const command = (name: string, options: Parameters<ExtensionAPI["registerCommand"]>[1]): void =>
@@ -246,7 +276,7 @@ export function createReplyReader(
 
 		const askOutput = async (ctx: ExtensionContext, list: Output[]): Promise<Output | undefined> => {
 			if (!ctx.hasUI) return undefined;
-			const label = await ctx.ui.select(ASK_OUTPUT, list.map((output) => output.label));
+			const label = await own(() => ctx.ui.select(ASK_OUTPUT, list.map((output) => output.label)));
 			const output = list.find((candidate) => candidate.label === label);
 			if (output) chosen = output.name;
 			return output;
@@ -277,7 +307,8 @@ export function createReplyReader(
 		 * `name` is what the footer names, `label` what the "nothing to read" message names.
 		 * Explicit (no `auto`): stops the reading playing and drops every waiting auto-read on the machine. Auto: starts
 		 * only when nothing plays and its reply was not dropped (`still`, the waiting mark), else answers "busy" or "done".
-		 * `announce` (a reading that waited in the line, S14): it starts after GAP_SECONDS of silence by saying which it is.
+		 * `announce` (a reading that waited in the line, S14): it starts after GAP_SECONDS of silence by saying which it is;
+		 * a blocking prompt (S18) already says what it is, so it gets the silence only. `prompt` is its key.
 		 */
 		const readAloud = async (
 			ctx: ExtensionContext,
@@ -285,7 +316,7 @@ export function createReplyReader(
 			label: string,
 			markdown: string,
 			language?: Language,
-			auto?: { mark: string | undefined; still: () => boolean; announce?: "reply" | "file" },
+			auto?: { mark: string | undefined; still: () => boolean; announce?: "reply" | "file" | "prompt"; prompt?: string },
 		): Promise<StartResult> => {
 			const narration = speechNarration(markdown, language);
 			if (!narration.text) {
@@ -298,7 +329,7 @@ export function createReplyReader(
 				try {
 					voice = await downloadVoice({
 						env,
-						confirm: async (message) => ctx.hasUI && ctx.ui.confirm("Reply reader voice", message),
+						confirm: async (message) => ctx.hasUI && own(() => ctx.ui.confirm("Reply reader voice", message)),
 					});
 				} catch (error) {
 					ctx.ui.notify((error as Error).message, "error");
@@ -342,7 +373,10 @@ export function createReplyReader(
 			const reading = startReading({
 				voice,
 				speaker: SPEAKERS[speaker],
-				fragments: auto?.announce ? [...announcement(auto.announce, name, narration.language), ...narration.fragments] : narration.fragments,
+				fragments:
+					auto?.announce && auto.announce !== "prompt"
+						? [...announcement(auto.announce, name, narration.language), ...narration.fragments]
+						: narration.fragments,
 				leadSilence: auto?.announce ? GAP_SECONDS : undefined,
 				output,
 				env,
@@ -359,7 +393,7 @@ export function createReplyReader(
 					}, WATCH_MS)
 				: undefined;
 			watch?.unref();
-			current = { reading, ctx, claim, watch, name, output: output.name };
+			current = { reading, ctx, claim, watch, name, output: output.name, prompt: auto?.prompt };
 			footer();
 			reading.done
 				.catch((error: Error) => {
@@ -379,6 +413,7 @@ export function createReplyReader(
 		 */
 		const askCut = async (ctx: ExtensionContext): Promise<"now" | "after" | undefined> => {
 			asking++;
+			ownPrompts++;
 			try {
 				const choice =
 					ctx.mode === "tui" && typeof ctx.ui.custom === "function"
@@ -390,6 +425,7 @@ export function createReplyReader(
 				return choice === CUT_NOW ? "now" : choice === CUT_AFTER ? "after" : undefined;
 			} finally {
 				asking--;
+				ownPrompts--;
 			}
 		};
 
@@ -531,7 +567,7 @@ export function createReplyReader(
 				let picked: string | undefined = name;
 				if (!name) {
 					if (!ctx.hasUI) return;
-					picked = await ctx.ui.select(ASK_SPEAKER, SPEAKER_NAMES);
+					picked = await own(() => ctx.ui.select(ASK_SPEAKER, SPEAKER_NAMES));
 					if (!picked) return;
 				}
 				if (!SPEAKER_NAMES.includes(picked as SpeakerName)) {
@@ -551,7 +587,7 @@ export function createReplyReader(
 				let text = args.trim();
 				if (!text) {
 					if (!ctx.hasUI) return;
-					const picked = await ctx.ui.select(ASK_SPEED, SPEED_CHOICES);
+					const picked = await own(() => ctx.ui.select(ASK_SPEED, SPEED_CHOICES));
 					if (!picked) return;
 					text = picked;
 				}
@@ -573,7 +609,7 @@ export function createReplyReader(
 
 		command("read-auto", {
 			description:
-				'Read each new reply aloud as soon as it is written, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles',
+				'Read each new reply aloud as soon as it is written, and each prompt that waits for you, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles',
 			getArgumentCompletions: (prefix) =>
 				AUTO_CHOICES.filter((choice) => choice.value.startsWith(prefix.trim())).map((choice) => ({ ...choice, label: choice.value })),
 			handler: async (args, ctx) => {
@@ -625,6 +661,82 @@ export function createReplyReader(
 			}, 0);
 		});
 
+		/**
+		 * The language a prompt reads in (S18): its own words when they tell, else the latest reply's (the conversation's),
+		 * else Spanish, as for any text that does not tell (S7).
+		 */
+		const promptLanguage = (ctx: ExtensionContext, text: string): Language => {
+			const told = text ? languageOfWords(text) : undefined;
+			if (told) return told;
+			const reply = latestReply(listReplies(ctx.sessionManager.getBranch()));
+			return reply ? detectLanguage(reply.text) : "es";
+		};
+
+		/** Queues a blocking prompt's reading (S18), when auto-read is on and it has something to say. */
+		const queuePrompt = (ctx: ExtensionContext, key: string, name: string, markdown: string, language: Language): void => {
+			if (!speechNarration(markdown, language).text) return;
+			prompts.add(key);
+			queue.push({ ctx, name, label: name, markdown, language, mark: openReadingLock(env)?.waitingMark(), prompt: key });
+			footer();
+		};
+
+		/** An answered prompt (S18): its reading still waiting is dropped, one playing is stopped; other readings stay. */
+		const dropPrompt = (key: string): void => {
+			if (!prompts.delete(key)) return;
+			queue.clear((item) => item.prompt !== key);
+			if (current?.prompt === key) stop();
+			footer();
+		};
+
+		pi.on("tool_execution_start", (event, ctx) => {
+			pending.set(event.toolCallId, { toolName: event.toolName, args: event.args });
+			if (auto === "off" || !QUESTION_TOOLS.has(event.toolName)) return;
+			const questions = askedQuestions(event.toolName, event.args);
+			if (!questions) return;
+			const language = promptLanguage(ctx, questions.map(({ question, labels }) => [question, ...labels].join("\n")).join("\n"));
+			queuePrompt(ctx, `tool:${event.toolCallId}`, "question", questionsMarkdown(questions, language), language);
+		});
+
+		pi.on("tool_execution_end", (event) => {
+			pending.delete(event.toolCallId);
+			dropPrompt(`tool:${event.toolCallId}`);
+		});
+
+		pi.on("ui_prompt_start", (event, ctx) => {
+			spanPrompts = [];
+			if (auto === "off" || ownPrompts > 0) return;
+			const calls = [...pending];
+			// An ask_user_* call shows its own dialog: it is already read from its call, so this span only answers it.
+			const asks = calls.filter(([, call]) => QUESTION_TOOLS.has(call.toolName)).map(([id]) => `tool:${id}`);
+			if (asks.length > 0) {
+				spanPrompts = asks;
+				return;
+			}
+			// A confirm while a bash call waits to run is that command's confirmation: the latest started is the one asked.
+			const bash = calls.filter(([, call]) => call.toolName === "bash").at(-1);
+			if (event.kind === "confirm" && bash) {
+				const [id, call] = bash;
+				const command = (call.args as { command?: unknown } | undefined)?.command;
+				const language = promptLanguage(ctx, "");
+				const key = `tool:${id}`;
+				spanPrompts = [key];
+				queuePrompt(ctx, key, "command confirmation", commandMarkdown(typeof command === "string" ? commandProgram(command) : undefined, language), language);
+				return;
+			}
+			const title = dialogTitle(event.title);
+			if (!title) return;
+			const key = `dialog:${++dialogs}`;
+			spanPrompts = [key];
+			const language = promptLanguage(ctx, title);
+			queuePrompt(ctx, key, "dialog", title, language);
+		});
+
+		pi.on("ui_prompt_end", () => {
+			const answered = spanPrompts;
+			spanPrompts = [];
+			for (const key of answered) dropPrompt(key);
+		});
+
 		// Moving to another branch (/tree) is no new reply: what that branch already holds is never read.
 		pi.on("session_tree", (_event, ctx) => {
 			for (const id of replyIds(ctx)) seen.add(id);
@@ -667,6 +779,9 @@ export function createReplyReader(
 			auto = "off";
 			queue.clear();
 			seen = new Set();
+			pending.clear();
+			prompts.clear();
+			spanPrompts = [];
 			chosen = undefined;
 			speaker = "male";
 			warned = false;
