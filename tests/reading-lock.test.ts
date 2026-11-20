@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { endProcessesOf, processesOf } from "./processes.ts";
 
 /**
@@ -19,7 +19,7 @@ const LOCK = pathToFileURL(resolve(import.meta.dirname, "..", "src", "reading-lo
  * then stays until its reading clears the footer (or 20 s), and keeps `<out>` up to date with what the user saw.
  * When `<root>/hold-<name>` exists at start, loading the voice waits until it is removed.
  * Besides commands: `turn <text>` is an agent run that ends with that reply (T32), `await <file>` waits until
- * `<root>/<file>` exists, and `esc` presses Esc. The "Something is being read." question (T33) is answered as Pi's TUI
+ * `<root>/<file>` exists, and `pause-key` presses the pause key (Alt+M). The "Something is being read." question (T33) is answered as Pi's TUI
  * would, with the keys of `answer now|after|dismiss` (default now, today's behaviour), and recorded in `asked`.
  * `shutdown` ends the session as Pi does (session_shutdown) and `exit` ends the process at once. While
  * `<root>/ask-<name>` exists, the output question stays open (`<root>/asked-<name>` says it was asked), as a human who
@@ -42,12 +42,14 @@ const loadSherpa = async () => {
 	return { sampleRate: 44100, async generateAsync() { return { samples: new Float32Array(1).fill(0.125) }; } };
 };
 const registered = new Map();
+const shortcuts = new Map();
 const events = new Map();
 // While <root>/slow-<name> exists, the session's line starts nothing, as a session slow to claim (S16).
 const holdLine = () => existsSync(root + "/slow-" + name);
 const yieldCapMs = existsSync(root + "/yield-cap") ? Number(readFileSync(root + "/yield-cap", "utf8")) : undefined;
 createReplyReader({ env, hostname: "hs-node", loadSherpa, holdLine, yieldCapMs })({
 	registerCommand: (n, o) => registered.set(n, o),
+	registerShortcut: (k, o) => shortcuts.set(k, o),
 	on: (e, h) => events.set(e, h),
 });
 let input;
@@ -94,8 +96,10 @@ for (const command of commands) {
 		events.get("session_shutdown")({ type: "session_shutdown" }, ctx);
 	} else if (cmd === "exit") {
 		process.exit(0);
-	} else if (cmd === "esc") {
+	} else if (cmd === "pause-key") {
+		// Esc reaches Pi, never the reader (L145): it is recorded as not taken, then the pause key is pressed.
 		state.notes.push(["esc", input?.("\\x1b") ?? null]);
+		await shortcuts.get("alt+m").handler(ctx);
 		save();
 	} else {
 		await registered.get(cmd).handler(rest, ctx);
@@ -105,7 +109,7 @@ state.ran = true;
 save();
 const end = Date.now() + 20000;
 while (Date.now() < end && state.statuses.length > 0 && state.statuses.at(-1) !== null) await sleep(20);
-// Esc after the reading ended must not be taken by the reader any more.
+// Esc is never taken by the reader (L145, L147), with or without a reading.
 state.consumedEsc.push(input?.("\\x1b") ?? null);
 save();
 process.exit(0);
@@ -117,8 +121,12 @@ let spawned: ChildProcess[];
 /** The process groups of the sessions this test started (each session leads its own, with its players in it). */
 let groups: number[];
 
+/** Every temp folder this file created: afterAll ends anything still naming one of them (T47). */
+const roots: string[] = [];
+
 beforeEach(() => {
 	root = mkdtempSync(join(tmpdir(), "reply-reader-lock-"));
+	roots.push(root);
 	spawned = [];
 	groups = [];
 	mkdirSync(join(root, "bin"));
@@ -138,6 +146,12 @@ afterEach(async () => {
 	// orphaned by a SIGKILL) goes too: a test leaves no process behind (L138).
 	await endProcessesOf(root, groups);
 	rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+});
+
+// A process that names a test's folder but showed up after that test's afterEach (T47: two fake players were found
+// running minutes after a full run, under `$TMPDIR/reply-reader-lock-*`) is ended once the file is done.
+afterAll(async () => {
+	for (const dir of roots) await endProcessesOf(dir);
 });
 
 const BUNDLE = "sherpa-onnx-supertonic-3-tts-int8-2026-05-11";
@@ -237,7 +251,8 @@ describe("one reading per machine (T21)", { timeout: 30000 }, () => {
 
 	it("(S13) a new reading kills a player that ignores SIGTERM, even when its own session cannot stop it", async () => {
 		const paplay = join(root, "bin", "paplay");
-		writeFileSync(paplay, `#!/bin/sh\nPATH=/usr/bin:/bin\ntrap '' TERM\necho $$ > "${root}/play-$PPID.pid"\nwhile :; do sleep 0.1; done\n`);
+		// It ignores SIGTERM and loops while its session lives (stopped or not), so it can never outlive the test (T47).
+		writeFileSync(paplay, `#!/bin/sh\nPATH=/usr/bin:/bin\ntrap '' TERM\necho $$ > "${root}/play-$PPID.pid"\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.1; done\n`);
 		chmodSync(paplay, 0o755);
 		const a = start("a", ["read"]);
 		const playerA = await playerOf(a.child);
@@ -276,7 +291,7 @@ describe("one reading per machine (T21)", { timeout: 30000 }, () => {
 		start("b", ["read P1.R1"]);
 		await a.exited;
 		expect(alive(playerA)).toBe(false);
-		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", null], consumedEsc: [null] });
+		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Alt+M pauses", null], consumedEsc: [null] });
 	});
 
 	it("a reading still loading the voice when a newer one starts never plays, and ends quietly", async () => {
@@ -289,7 +304,7 @@ describe("one reading per machine (T21)", { timeout: 30000 }, () => {
 		await a.exited;
 		const file = join(root, `play-${a.child.pid}.pid`);
 		if (existsSync(file)) expect(alive(Number(readFileSync(file, "utf8")))).toBe(false);
-		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", null], consumedEsc: [null] });
+		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Alt+M pauses", null], consumedEsc: [null] });
 		expect(alive(playerB)).toBe(true);
 	});
 
@@ -300,7 +315,7 @@ describe("one reading per machine (T21)", { timeout: 30000 }, () => {
 		expect((await ran(b)).notes).toEqual([["Reading stopped.", "info"]]);
 		await a.exited;
 		expect(alive(playerA)).toBe(false);
-		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", null], consumedEsc: [null] });
+		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Alt+M pauses", null], consumedEsc: [null] });
 		const c = start("c", ["read-stop"]);
 		expect((await ran(c)).notes).toEqual([["Nothing is being read.", "info"]]);
 	});
@@ -416,16 +431,16 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 		finish(playerA);
 		await a.exited;
 		await playThrough(() => b.seen().statuses.filter((x) => x === null).length === 2);
-		expect(await readings(b, 2)).toEqual(["Reading P3.R1 on local · 1 waiting · Esc pauses", null, "Reading P4.R1 on local · Esc pauses", null]);
+		expect(await readings(b, 2)).toEqual(["Reading P3.R1 on local · 1 waiting · Alt+M pauses", null, "Reading P4.R1 on local · Alt+M pauses", null]);
 		go("go-b");
 		await b.exited;
 		expect(lines()).toEqual([`start ${a.child.pid}`, `end ${a.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`]);
 		// S16: the footer counts what waits on the machine, here the other session's two replies. Its 250 ms check may
 		// also catch the moment only the first had joined.
-		const footers = a.seen().statuses.filter((status) => status !== "Reading P2.R1 on local · 1 waiting · Esc pauses");
+		const footers = a.seen().statuses.filter((status) => status !== "Reading P2.R1 on local · 1 waiting · Alt+M pauses");
 		expect({ notes: a.seen().notes, footers }).toEqual({
 			notes: [],
-			footers: ["Reading P2.R1 on local · Esc pauses", "Reading P2.R1 on local · 2 waiting · Esc pauses", null],
+			footers: ["Reading P2.R1 on local · Alt+M pauses", "Reading P2.R1 on local · 2 waiting · Alt+M pauses", null],
 		});
 		expect(b.seen().notes).toEqual([["Auto-read on: full replies.", "info"]]);
 	});
@@ -450,7 +465,7 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 		for (let i = 0; i < log.length; i += 2) expect(log[i + 1]).toBe(log[i].replace("start", "end"));
 		expect(log).toHaveLength(6);
 		// Which of the two goes first is not fixed, so the machine-wide count (S16) is left out.
-		for (const s of [b, c]) expect({ ...s.seen(), statuses: plain(s.seen().statuses) }).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc pauses", null] });
+		for (const s of [b, c]) expect({ ...s.seen(), statuses: plain(s.seen().statuses) }).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Alt+M pauses", null] });
 	});
 
 	for (const [what, commands, notes] of [
@@ -474,14 +489,14 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 			go("go-b");
 			go("go-c");
 			await Promise.all([a.exited, b.exited, c.exited]);
-			expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P5.R1 on local · Esc pauses", null] });
+			expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P5.R1 on local · Alt+M pauses", null] });
 			expect(c.seen().notes).toEqual(notes);
-			expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", "Reading P2.R1 on local · 2 waiting · Esc pauses", null] });
+			expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Alt+M pauses", "Reading P2.R1 on local · 2 waiting · Alt+M pauses", null] });
 		});
 	}
 
-	it("Esc pauses the reading (S15): it keeps the machine with no player, the waiting replies wait, and play after it resumes", async () => {
-		const a = start("a", ["read", "await esc-a", "esc", "await esc2-a", "esc"]);
+	it("the pause key pauses the reading (S15), Esc is not taken: it keeps the machine with no player, the waiting replies wait, and play after it resumes", async () => {
+		const a = start("a", ["read", "await esc-a", "pause-key", "await esc2-a", "pause-key"]);
 		const playerA = await playerOf(a.child);
 		const b = auto("b", ["Uno."]);
 		await noted(b);
@@ -503,17 +518,32 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 		go("go-b");
 		await b.exited;
 		expect(a.seen().notes).toEqual([
-			["esc", { consume: true }],
-			["esc", { consume: true }],
+			["esc", null],
+			["Reading paused.", "info"],
+			["esc", null],
+			["Reading resumed.", "info"],
 		]);
 		expect(a.seen().statuses).toEqual([
-			"Reading P2.R1 on local · Esc pauses",
-			"Reading P2.R1 on local · 1 waiting · Esc pauses",
-			"Paused P2.R1 · 1 waiting · Esc resumes · /read-stop ends",
-			"Reading P2.R1 on local · 1 waiting · Esc pauses",
+			"Reading P2.R1 on local · Alt+M pauses",
+			"Reading P2.R1 on local · 1 waiting · Alt+M pauses",
+			"Paused P2.R1 · 1 waiting · Alt+M resumes · /read-stop ends",
+			"Reading P2.R1 on local · 1 waiting · Alt+M pauses",
 			null,
 		]);
-		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc pauses", null] });
+		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Alt+M pauses", null] });
+	});
+
+	it("the pause key in another session pauses the reading playing here, as /read-pause does (S15, L147)", async () => {
+		const a = start("a", ["read"]);
+		const playerA = await playerOf(a.child);
+		const b = start("b", ["pause-key"]);
+		expect((await ran(b)).notes).toEqual([
+			["esc", null],
+			["Reading paused.", "info"],
+		]);
+		await waitFor(() => !alive(playerA));
+		await waitFor(() => a.seen().statuses.at(-1) === "Paused P2.R1 · Alt+M resumes · /read-stop ends");
+		expect(a.seen().notes).toEqual([]);
 	});
 
 	it("a leftover mutex that cannot be deleted (read-only folder) never hangs: auto-read is busy, /read goes ahead (S1, S8)", () => {
@@ -562,7 +592,7 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		expect(log).toHaveLength(10);
 		for (let i = 0; i < log.length; i += 2) expect(log[i + 1]).toBe(log[i].replace("start", "end"));
 		// The machine-wide count (S16) depends on which session goes first, so it is left out.
-		expect(plain(b.seen().statuses)).toEqual(["Reading P3.R1 on local · Esc pauses", null, "Reading P4.R1 on local · Esc pauses", null]);
+		expect(plain(b.seen().statuses)).toEqual(["Reading P3.R1 on local · Alt+M pauses", null, "Reading P4.R1 on local · Alt+M pauses", null]);
 	});
 
 	it("a manual /read cancelled at the output question drops nothing and stops nothing (S8)", async () => {
@@ -618,7 +648,7 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		await playThrough(() => b.seen().statuses.includes(null));
 		go("go-b");
 		await b.exited;
-		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc pauses", null] });
+		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Alt+M pauses", null] });
 	});
 
 	describe("play order follows /read-queue's list (S16, L135)", () => {
@@ -795,7 +825,7 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 	});
 
 	it("(S15, L135 PROBE1) a paused session that is SIGKILLed frees the machine: the other session's waiting reply starts within 1.5 s", async () => {
-		const a = start("a", ["read", "await esc-a", "esc", "await go-a"]);
+		const a = start("a", ["read", "await esc-a", "pause-key", "await go-a"]);
 		const playerA = await playerOf(a.child);
 		const b = auto("b", ["Uno."]);
 		await noted(b);
@@ -812,11 +842,11 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		await playThrough(() => b.seen().statuses.includes(null));
 		go("go-b");
 		await b.exited;
-		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc pauses", null] });
+		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Alt+M pauses", null] });
 	});
 
 	it("(S16, L135 PROBE3) /read-next from another session while a reading is paused ends it and the next one waiting starts", async () => {
-		const a = start("a", ["read", "await esc-a", "esc", "await go-a"]);
+		const a = start("a", ["read", "await esc-a", "pause-key", "await go-a"]);
 		const playerA = await playerOf(a.child);
 		const c = auto("c", ["Uno."]);
 		await noted(c);
@@ -837,8 +867,11 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		go("go-c");
 		await Promise.all([a.exited, b.exited, c.exited]);
 		expect(lines()).toEqual([`start ${a.child.pid}`, `term ${a.child.pid}`, `start ${c.child.pid}`, `end ${c.child.pid}`]);
-		expect(a.seen().notes).toEqual([["esc", { consume: true }]]);
-		expect(c.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc pauses", null] });
+		expect(a.seen().notes).toEqual([
+			["esc", null],
+			["Reading paused.", "info"],
+		]);
+		expect(c.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Alt+M pauses", null] });
 	});
 
 	it("with auto-read on, a manual /read still stops another session's reading at once (S1)", async () => {
@@ -850,7 +883,7 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		expect(alive(playerB)).toBe(true);
 		expect((await ran(b)).notes).toEqual([["Auto-read on: full replies.", "info"]]);
 		await a.exited;
-		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", null] });
+		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Alt+M pauses", null] });
 	});
 
 	describe("ask before cutting (T33, S8)", () => {
@@ -869,7 +902,7 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 			go("go-b");
 			await Promise.all([a.exited, b.exited]);
 			expect(lines()).toEqual([`start ${a.child.pid}`, `end ${a.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`]);
-			expect(b.seen()).toMatchObject({ notes: [], statuses: ["Reading P1.R1 on local · Esc pauses", null] });
+			expect(b.seen()).toMatchObject({ notes: [], statuses: ["Reading P1.R1 on local · Alt+M pauses", null] });
 		});
 
 		it("dismissing it in another process changes nothing: the reading plays on, the waiting auto-reads stay, nothing else plays", async () => {

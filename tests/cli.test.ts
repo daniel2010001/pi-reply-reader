@@ -561,7 +561,7 @@ const save = () => { writeFileSync(root + "/pi.json.tmp", JSON.stringify(state))
 const commands = new Map();
 const events = new Map();
 const loadSherpa = async () => ({ sampleRate: 44100, async generateAsync() { return { samples: new Float32Array(1).fill(0.125) }; } });
-createReplyReader({ env: JSON.parse(envJson), hostname: "hs-node", loadSherpa })({ registerCommand: (n, o) => commands.set(n, o), on: (e, h) => events.set(e, h) });
+createReplyReader({ env: JSON.parse(envJson), hostname: "hs-node", loadSherpa })({ registerCommand: (n, o) => commands.set(n, o), registerShortcut: () => {}, on: (e, h) => events.set(e, h) });
 const message = (id, role, text) => ({ type: "message", id, timestamp: "t", message: role === "user" ? { role, content: text } : { role, stopReason: "stop", content: [{ type: "text", text }] } });
 const branch = [message("u1", "user", "hola"), message("a1", "assistant", "Primera respuesta.")];
 const ctx = {
