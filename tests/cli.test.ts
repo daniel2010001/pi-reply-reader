@@ -574,9 +574,12 @@ const ctx = {
 };
 events.get("session_start")({ reason: "startup" }, ctx);
 await commands.get("read-auto").handler("on", ctx);
-events.get("agent_start")({ type: "agent_start" }, ctx);
-branch.push(message("u2", "user", "sigue"), message("a2", "assistant", "Uno."));
-events.get("agent_settled")({ type: "agent_settled", aborted: false }, ctx);
+// Pi stores each message after its message_end handlers return; the reader looks on the next turn (T42).
+for (const entry of [message("u2", "user", "sigue"), message("a2", "assistant", "Uno.")]) {
+	events.get("message_end")({ type: "message_end", message: entry.message }, ctx);
+	branch.push(entry);
+}
+await new Promise((resolve) => setTimeout(resolve, 0));
 state.waiting = true;
 save();
 setInterval(() => {}, 1000);

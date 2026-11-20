@@ -168,6 +168,19 @@ export function renderNarration(plan: NarrationPlan, language: Language): Narrat
 	}
 }
 
+/**
+ * (S14) What a reading that waited in the line says first: "Respuesta P12.R2." / "Reply P12.R2." for a reply,
+ * "Archivo notas.md." / "File notes.md." for a file, cleaned like any text in `language`, with a section break after it.
+ */
+export function announcement(kind: "reply" | "file", name: string, language: Language): Fragment[] {
+	// As inline code, so a name's own `_` or `*` is not read as emphasis.
+	const named = name.includes("`") ? name : `\`${name}\``;
+	const fragments = speechNarration(`${PHRASEBOOKS[language][kind]} ${named}.`, language).fragments;
+	const last = fragments.at(-1);
+	if (last) last.after = "paragraph";
+	return fragments;
+}
+
 /** (S12) Text already meant for speech, split as playback speaks it: every fragment a paragraph's. */
 export function spokenFragments(text: string): Fragment[] {
 	return fragmentsOf(text.split("\n").map((line) => ({ text: line, role: "paragraph" })));
@@ -231,6 +244,10 @@ function contracted(text: string): string {
 interface Phrasebook {
 	/** Said in place of a fenced block, so a sentence like "run this:" does not hang. */
 	codeBlock: string;
+	/** (S14) Before the ID of a reply that waited in the line: "Respuesta P12.R2." */
+	reply: string;
+	/** (S14) Before the name of a file that waited in the line: "Archivo notas.md." */
+	file: string;
 	/** Said for the English closing heading "Needs your decision", which this language's voice would mangle. */
 	needsYourDecision?: string;
 	/** "de el" and "a el" contract, as in Spanish. */
@@ -350,6 +367,8 @@ const KEEPS_UNO = new Set("a de del al y e o u ni en por para con sin entre hast
 
 const SPANISH: Phrasebook = {
 	codeBlock: "Bloque de código.",
+	reply: "Respuesta",
+	file: "Archivo",
 	needsYourDecision: "Decisiones pendientes",
 	contracts: true,
 	command: "el comando",
@@ -431,6 +450,8 @@ const SPANISH: Phrasebook = {
 
 const ENGLISH: Phrasebook = {
 	codeBlock: "Code block.",
+	reply: "Reply",
+	file: "File",
 	contracts: false,
 	command: "the command",
 	folder: "the folder",

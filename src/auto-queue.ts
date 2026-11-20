@@ -12,8 +12,9 @@ export interface AutoQueueOptions<T> {
 	/**
 	 * Starts `item`; resolves once its reading is under way, or was cancelled or dropped. `current()` turns false when
 	 * the line is cleared meanwhile, so a reply still starting (an output question, a download confirm) must not play.
+	 * `waited` is true when a reading played while it waited in the line (S14: it then starts after a gap, announced).
 	 */
-	start: (item: T, current: () => boolean) => Promise<StartResult>;
+	start: (item: T, current: () => boolean, waited: boolean) => Promise<StartResult>;
 	/** How often a waiting line checks again whether the machine is free. */
 	retryMs: number;
 }
@@ -33,7 +34,8 @@ export interface AutoQueue<T> {
 }
 
 export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
-	let items: T[] = [];
+	/** The line, in order; `waited` is set once a reading played while the item waited (S14). */
+	let items: { item: T; waited: boolean }[] = [];
 	/** Bumped by clear(); a start begun under an older generation is no longer current. */
 	let generation = 0;
 	/** The reply whose start is in flight; only one at a time. */
@@ -51,17 +53,22 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 
 	const pump = (): void => {
 		if (starting || items.length === 0) return;
-		if (options.busy()) return later();
-		const item = items.shift() as T;
+		if (options.busy()) {
+			for (const entry of items) entry.waited = true;
+			return later();
+		}
+		const entry = items.shift() as { item: T; waited: boolean };
+		const { item } = entry;
 		const mine = generation;
 		const current = () => mine === generation;
 		starting = { item };
-		const attempt = (async () => options.start(item, current))().catch((): StartResult => "done");
+		const attempt = (async () => options.start(item, current, entry.waited))().catch((): StartResult => "done");
 		void attempt.then((result) => {
 			starting = undefined;
 			if (result === "busy" && current()) {
-				// Taken between the check and the claim: try again on the next check, not in a tight loop.
-				items.unshift(item);
+				// Taken between the check and the claim: try again on the next check, not in a tight loop. It waits for
+				// that reading too.
+				items.unshift({ item, waited: true });
 				return later();
 			}
 			// The reading just started makes the machine busy, so the next reply waits for it; anything pushed while this
@@ -72,11 +79,11 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 
 	return {
 		push(item) {
-			items.push(item);
+			items.push({ item, waited: false });
 			pump();
 		},
 		clear(keep) {
-			items = keep ? items.filter(keep) : [];
+			items = keep ? items.filter((entry) => keep(entry.item)) : [];
 			if (!keep || !starting || !keep(starting.item)) generation++;
 			clearTimeout(timer);
 			timer = undefined;

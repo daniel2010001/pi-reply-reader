@@ -207,6 +207,11 @@ function load(
 		},
 	};
 	(events.get("session_start") as (event: unknown, ctx: unknown) => void)({ reason: "startup" }, ctx);
+	function store(entry: unknown): void {
+		const message = (entry as { message?: unknown }).message;
+		(events.get("message_end") as ((event: unknown, ctx: unknown) => void) | undefined)?.({ type: "message_end", message }, ctx);
+		entries.push(entry);
+	}
 
 	return {
 		bus,
@@ -226,12 +231,19 @@ function load(
 		shutdown: () => (events.get("session_shutdown") as (event: unknown, ctx: unknown) => void)({}, ctx),
 		restart: () => (events.get("session_start") as (event: unknown, ctx: unknown) => void)({ reason: "new" }, ctx),
 		entries,
-		/** One agent run: it starts, adds `added` to the branch, and settles. */
-		turn: (added: unknown[], aborted = false) => {
+		/** One agent run: it starts, stores each of `added` as Pi does (message_end, then the entry), and settles. */
+		turn: async (added: unknown[], aborted = false) => {
 			(events.get("agent_start") as ((event: unknown, ctx: unknown) => void) | undefined)?.({ type: "agent_start" }, ctx);
-			entries.push(...added);
+			for (const entry of added) store(entry);
 			(events.get("agent_settled") as ((event: unknown, ctx: unknown) => void) | undefined)?.({ type: "agent_settled", aborted }, ctx);
+			// The reader looks at the branch on the next turn of the event loop, once Pi stored the entries.
+			await new Promise((resolve) => setTimeout(resolve, 0));
 		},
+		/** Stores one message as Pi does: its message_end handlers run first, then the entry joins the branch. */
+		store,
+		/** Fires one agent event as Pi does, with this session's context. */
+		agent: (name: "agent_start" | "agent_settled", aborted = false) =>
+			(events.get(name) as ((event: unknown, ctx: unknown) => void) | undefined)?.({ type: name, aborted }, ctx),
 		/** Waits until the reading in progress clears its status line. */
 		settled: () => waitFor(() => statuses.length > 0 && statuses.at(-1) === undefined),
 	};
@@ -266,12 +278,12 @@ describe("reply-reader extension", () => {
 			installVoice();
 			const reader = load();
 			await reader.run("read-auto", "full");
-			reader.turn([user("a"), assistant("Uno.")]);
+			await reader.turn([user("a"), assistant("Uno.")]);
 			await pause();
 			expect(synthesized).toEqual([]);
 			await reader.run("read-auto", "questions");
 			await reader.run("read-auto", "yes please");
-			reader.turn([user("b"), assistant(questions)]);
+			await reader.turn([user("b"), assistant(questions)]);
 			await reader.settled();
 			expect(reader.notes).toEqual([
 				["Use /read-auto on, questions or off.", "warning"],
@@ -285,7 +297,7 @@ describe("reply-reader extension", () => {
 			installVoice();
 			const reader = load();
 			await reader.run("read-auto", "questions");
-			reader.turn([user("a"), assistant("The build is done and the tests pass for the new parser.\n\n## Needs your decision\n\n1. Run `/reload`?")]);
+			await reader.turn([user("a"), assistant("The build is done and the tests pass for the new parser.\n\n## Needs your decision\n\n1. Run `/reload`?")]);
 			await reader.settled();
 			expect(texts()).toEqual(["Needs your decision.", "one: Run the command reload?"]);
 		});
@@ -294,13 +306,13 @@ describe("reply-reader extension", () => {
 			installVoice();
 			const reader = load();
 			await reader.run("read-auto");
-			reader.turn([user("a"), assistant(questions)]);
+			await reader.turn([user("a"), assistant(questions)]);
 			await reader.settled();
 			expect(texts()).toEqual(["Hecho.", "Decisiones pendientes.", "uno: ¿Seguimos?", "dos: ¿Publicamos?"]);
 			await reader.run("read-auto");
 			await reader.run("read-auto", "questions");
 			await reader.run("read-auto");
-			reader.turn([user("b"), assistant("Dos.")]);
+			await reader.turn([user("b"), assistant("Dos.")]);
 			await pause();
 			expect(reader.notes).toEqual([
 				["Auto-read on: full replies.", "info"],
@@ -314,11 +326,11 @@ describe("reply-reader extension", () => {
 		it("is off by default and again at each session start", async () => {
 			installVoice();
 			const reader = load();
-			reader.turn([user("a"), assistant("Uno.")]);
+			await reader.turn([user("a"), assistant("Uno.")]);
 			await pause();
 			await reader.run("read-auto", "on");
 			reader.restart();
-			reader.turn([user("b"), assistant("Dos.")]);
+			await reader.turn([user("b"), assistant("Dos.")]);
 			await pause();
 			expect(synthesized).toEqual([]);
 			expect(reader.statuses).toEqual([]);
@@ -329,7 +341,7 @@ describe("reply-reader extension", () => {
 			installVoice();
 			const reader = load();
 			await reader.run("read-auto", "on");
-			reader.turn([user("tercera"), assistant("## Tercera\n\nHecho **ya**.")]);
+			await reader.turn([user("tercera"), assistant("## Tercera\n\nHecho **ya**.")]);
 			await reader.settled();
 			expect(texts()).toEqual(["Tercera.", "Hecho ya."]);
 			expect(reader.statuses).toEqual(["Reading P3.R1 on local · Esc stops", undefined]);
@@ -340,9 +352,9 @@ describe("reply-reader extension", () => {
 			installVoice();
 			const reader = load();
 			await reader.run("read-auto", "questions");
-			reader.turn([user("a"), assistant(questions)]);
+			await reader.turn([user("a"), assistant(questions)]);
 			await reader.settled();
-			reader.turn([user("b"), assistant("Listo.\n\n**Needs your decision:**\n- ¿A o B?")]);
+			await reader.turn([user("b"), assistant("Listo.\n\n**Needs your decision:**\n- ¿A o B?")]);
 			await waitFor(() => reader.statuses.filter((status) => status === undefined).length === 2);
 			expect(texts()).toEqual(["Decisiones pendientes.", "uno: ¿Seguimos?", "dos: ¿Publicamos?", "Decisiones pendientes.", "¿A o B?"]);
 			expect(reader.statuses.filter(Boolean)).toEqual(["Reading P3.R1 on local · Esc stops", "Reading P4.R1 on local · Esc stops"]);
@@ -352,7 +364,7 @@ describe("reply-reader extension", () => {
 			installVoice();
 			const reader = load({ confirm: true });
 			await reader.run("read-auto", "questions");
-			reader.turn([user("a"), assistant("## Hecho\n\nTodo listo.")]);
+			await reader.turn([user("a"), assistant("## Hecho\n\nTodo listo.")]);
 			await pause();
 			expect(synthesized).toEqual([]);
 			expect(reader.notes).toEqual([["Auto-read on: questions only.", "info"]]);
@@ -366,20 +378,104 @@ describe("reply-reader extension", () => {
 			const reader = load();
 			await reader.run("read-auto", "on");
 			await pause();
-			reader.turn([user("a")]);
+			await reader.turn([user("a")]);
 			await pause();
-			reader.turn([user("b"), { ...assistant("A medias"), message: { role: "assistant", stopReason: "aborted", content: [{ type: "text", text: "A medias" }] } }], true);
+			await reader.turn([user("b"), { ...assistant("A medias"), message: { role: "assistant", stopReason: "aborted", content: [{ type: "text", text: "A medias" }] } }], true);
 			await pause();
 			expect(synthesized).toEqual([]);
 			expect(reader.statuses).toEqual([]);
 			expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
 		});
 
+		describe("each final reply as soon as it is stored, in order, once (T42, S8 Timing)", () => {
+			const ended = (reader: ReturnType<typeof load>, n: number) => waitFor(() => reader.statuses.filter((status) => status === undefined).length === n);
+			const wake = "[System-generated Gentle Agents notification, not written by the user] job done";
+			const spoken = () => texts().filter((text) => !/^(Respuesta|Reply) /.test(text));
+			const names = (reader: ReturnType<typeof load>) =>
+				reader.statuses.filter(Boolean).map((status) => status?.replace(/ · \d+ waiting/, ""));
+
+			it("a reply is queued once it is stored, while the run goes on, before any agent_settled", async () => {
+				installVoice();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				reader.agent("agent_start");
+				reader.store(user("a"));
+				reader.store(assistant("Uno."));
+				await reader.settled();
+				expect(spoken()).toEqual(["Uno."]);
+				expect(names(reader)).toEqual(["Reading P3.R1 on local · Esc stops"]);
+			});
+
+			it("a reply followed by an injected turn, then the later reply: A then B, each once", async () => {
+				installVoice();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				reader.agent("agent_start");
+				reader.store(user("a"));
+				reader.store(assistant("Uno."));
+				reader.agent("agent_start");
+				reader.store(user(wake));
+				reader.store(assistant("Dos."));
+				reader.agent("agent_settled");
+				await ended(reader, 2);
+				await new Promise((resolve) => setTimeout(resolve, 700));
+				expect(spoken()).toEqual(["Uno.", "Dos."]);
+				expect(names(reader)).toEqual(["Reading P3.R1 on local · Esc stops", "Reading P3.R2 on local · Esc stops"]);
+				expect(existsSync(log("play-2.pid"))).toBe(false);
+			});
+
+			it("questions: each new reply's questions section, in order, skipping a reply without one", async () => {
+				installVoice();
+				const reader = load();
+				await reader.run("read-auto", "questions");
+				await reader.turn([user("a"), assistant(questions), user(wake), assistant("Sin preguntas."), user("b"), assistant("Listo.\n\n**Needs your decision:**\n- ¿A o B?")]);
+				await ended(reader, 2);
+				await pause();
+				expect(spoken()).toEqual(["Decisiones pendientes.", "uno: ¿Seguimos?", "dos: ¿Publicamos?", "Decisiones pendientes.", "¿A o B?"]);
+				expect(names(reader)).toEqual(["Reading P3.R1 on local · Esc stops", "Reading P4.R1 on local · Esc stops"]);
+			});
+
+			it("turning auto-read on never reads the replies already on the branch, nor those stored while it was off", async () => {
+				installVoice();
+				const reader = load();
+				await reader.turn([user("a"), assistant("Uno.")]);
+				await pause();
+				await reader.run("read-auto", "on");
+				reader.store(user("b"));
+				await pause();
+				reader.store(assistant("Dos."));
+				await reader.settled();
+				await pause();
+				expect(texts()).toEqual(["Dos."]);
+				await reader.run("read-auto", "off");
+				await reader.turn([user("c"), assistant("Tres.")]);
+				await pause();
+				await reader.run("read-auto", "on");
+				await reader.turn([user("d"), assistant("Cuatro.")]);
+				await ended(reader, 2);
+				await pause();
+				expect(texts()).toEqual(["Dos.", "Cuatro."]);
+			});
+
+			it("(preserved) a run with one final reply queues exactly one; a tool-use message is no reply", async () => {
+				installVoice();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				const toolUse = { ...assistant("Voy a mirar."), message: { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "Voy a mirar." }] } };
+				await reader.turn([user("a"), toolUse, assistant("Uno.")]);
+				await reader.settled();
+				await pause();
+				expect(texts()).toEqual(["Uno."]);
+				expect(reader.statuses).toEqual(["Reading P3.R1 on local · Esc stops", undefined]);
+				expect(existsSync(log("play-1.pid"))).toBe(false);
+			});
+		});
+
 		it("reuses /read's output question on first use, voice, speed, and the download confirm", async () => {
 			script("paplay", "cat > /dev/null");
 			const declined = load({ confirm: false });
 			await declined.run("read-auto", "on");
-			declined.turn([user("a"), assistant("Uno.")]);
+			await declined.turn([user("a"), assistant("Uno.")]);
 			await waitFor(() => declined.notes.length === 2);
 			expect(declined.confirms).toHaveLength(1);
 			expect(declined.notes[1]).toEqual(["Reading cancelled: the voice was not downloaded.", "info"]);
@@ -390,9 +486,9 @@ describe("reply-reader extension", () => {
 			await reader.run("read-auto", "on");
 			await reader.run("read-voice", "female");
 			await reader.run("read-speed", "1.3");
-			reader.turn([user("a"), assistant("Uno.")]);
+			await reader.turn([user("a"), assistant("Uno.")]);
 			await reader.settled();
-			reader.turn([user("b"), assistant("Dos.")]);
+			await reader.turn([user("b"), assistant("Dos.")]);
 			await waitFor(() => reader.statuses.filter((status) => status === undefined).length === 2);
 			expect(reader.selects).toEqual([["Where should readings sound?", ["local (hs-node)", "desktop (tcp:x)"]]]);
 			expect(read("play-0.server").trim()).toBe("tcp:x");
@@ -408,11 +504,11 @@ describe("reply-reader extension", () => {
 			installVoice("sleep 30;");
 			const reader = load();
 			await reader.run("read-auto", "on");
-			reader.turn([user("a"), assistant("Uno.")]);
+			await reader.turn([user("a"), assistant("Uno.")]);
 			await waitFor(() => existsSync(log("play-0.pid")));
 			expect(reader.key("\x1b")).toEqual({ consume: true });
 			await waitFor(() => !alive(Number(read("play-0.pid"))));
-			reader.turn([user("b"), assistant("Dos.")]);
+			await reader.turn([user("b"), assistant("Dos.")]);
 			await waitFor(() => existsSync(log("play-1.pid")));
 			await reader.run("read-stop");
 			await waitFor(() => !alive(Number(read("play-1.pid"))));
@@ -441,19 +537,22 @@ describe("reply-reader extension", () => {
 				await reader.run("read-auto", "on");
 				await reader.run("read");
 				await waitFor(() => existsSync(log("play-0.pid")));
-				reader.turn([user("a"), assistant("Uno.")]);
-				reader.turn([user("b"), assistant("Dos.")]);
+				await reader.turn([user("a"), assistant("Uno.")]);
+				await reader.turn([user("b"), assistant("Dos.")]);
 				await wait();
 				expect(alive(pid(0))).toBe(true);
 				expect(existsSync(log("play-1.pid"))).toBe(false);
 				rmSync(log("hold"));
 				await ended(reader, 3);
-				expect(texts().slice(-2)).toEqual(["Uno.", "Dos."]);
+				// S14 (T38): each waited, so each starts by saying which reply it is.
+				expect(texts().slice(-4)).toEqual(["Respuesta P tres, R uno.", "Uno.", "Respuesta P cuatro, R uno.", "Dos."]);
 				expect([played(0), played(1), played(2)]).toEqual([true, true, true]);
 				expect(reader.statuses).toEqual([
 					"Reading P2.R1 on local · Esc stops",
+					"Reading P2.R1 on local · 1 waiting · Esc stops",
+					"Reading P2.R1 on local · 2 waiting · Esc stops",
 					undefined,
-					"Reading P3.R1 on local · Esc stops",
+					"Reading P3.R1 on local · 1 waiting · Esc stops",
 					undefined,
 					"Reading P4.R1 on local · Esc stops",
 					undefined,
@@ -465,16 +564,20 @@ describe("reply-reader extension", () => {
 				holding();
 				const reader = load();
 				await reader.run("read-auto", "questions");
-				reader.turn([user("a"), assistant(questions)]);
+				await reader.turn([user("a"), assistant(questions)]);
 				await waitFor(() => existsSync(log("play-0.pid")));
-				reader.turn([user("b"), assistant("Listo.\n\n**Needs your decision:**\n- ¿A o B?")]);
+				await reader.turn([user("b"), assistant("Listo.\n\n**Needs your decision:**\n- ¿A o B?")]);
 				await wait();
 				expect(alive(pid(0))).toBe(true);
 				expect(existsSync(log("play-1.pid"))).toBe(false);
 				rmSync(log("hold"));
 				await ended(reader, 2);
 				expect([played(0), played(1)]).toEqual([true, true]);
-				expect(reader.statuses.filter(Boolean)).toEqual(["Reading P3.R1 on local · Esc stops", "Reading P4.R1 on local · Esc stops"]);
+				expect(reader.statuses.filter(Boolean)).toEqual([
+					"Reading P3.R1 on local · Esc stops",
+					"Reading P3.R1 on local · 1 waiting · Esc stops",
+					"Reading P4.R1 on local · Esc stops",
+				]);
 			});
 
 			it("a manual /read stops the reading and drops the waiting replies; a later reply is read", async () => {
@@ -483,8 +586,8 @@ describe("reply-reader extension", () => {
 				await reader.run("read-auto", "on");
 				await reader.run("read");
 				await waitFor(() => existsSync(log("play-0.pid")));
-				reader.turn([user("a"), assistant("Uno.")]);
-				reader.turn([user("b"), assistant("Dos.")]);
+				await reader.turn([user("a"), assistant("Uno.")]);
+				await reader.turn([user("b"), assistant("Dos.")]);
 				await wait();
 				await reader.run("read", "P1.R1");
 				await waitFor(() => !alive(pid(0)));
@@ -495,11 +598,13 @@ describe("reply-reader extension", () => {
 				expect(existsSync(log("play-2.pid"))).toBe(false);
 				expect(texts()).not.toContain("Uno.");
 				expect(texts()).not.toContain("Dos.");
-				reader.turn([user("c"), assistant("Tres.")]);
+				await reader.turn([user("c"), assistant("Tres.")]);
 				await ended(reader, 3);
 				expect(texts().at(-1)).toBe("Tres.");
 				expect(reader.statuses).toEqual([
 					"Reading P2.R1 on local · Esc stops",
+					"Reading P2.R1 on local · 1 waiting · Esc stops",
+					"Reading P2.R1 on local · 2 waiting · Esc stops",
 					undefined,
 					"Reading P1.R1 on local · Esc stops",
 					undefined,
@@ -515,7 +620,7 @@ describe("reply-reader extension", () => {
 				await reader.run("read-auto", "on");
 				await reader.run("read");
 				await waitFor(() => existsSync(log("play-0.pid")));
-				reader.turn([user("a"), assistant("Uno.")]);
+				await reader.turn([user("a"), assistant("Uno.")]);
 				await wait();
 				reader.bus.emit(READER_EVENTS.read, { v: 1, id: "P9.R1", text: "Nueve." });
 				await waitFor(() => !alive(pid(0)));
@@ -525,7 +630,11 @@ describe("reply-reader extension", () => {
 				await wait();
 				expect(existsSync(log("play-2.pid"))).toBe(false);
 				expect(texts()).not.toContain("Uno.");
-				expect(reader.statuses.filter(Boolean)).toEqual(["Reading P2.R1 on local · Esc stops", "Reading P9.R1 on local · Esc stops"]);
+				expect(reader.statuses.filter(Boolean)).toEqual([
+					"Reading P2.R1 on local · Esc stops",
+					"Reading P2.R1 on local · 1 waiting · Esc stops",
+					"Reading P9.R1 on local · Esc stops",
+				]);
 			});
 
 			it("/read-stop and Esc stop the reading and drop the waiting replies", async () => {
@@ -534,7 +643,7 @@ describe("reply-reader extension", () => {
 				await reader.run("read-auto", "on");
 				await reader.run("read");
 				await waitFor(() => existsSync(log("play-0.pid")));
-				reader.turn([user("a"), assistant("Uno.")]);
+				await reader.turn([user("a"), assistant("Uno.")]);
 				await wait();
 				await reader.run("read-stop");
 				await waitFor(() => !alive(pid(0)));
@@ -542,7 +651,7 @@ describe("reply-reader extension", () => {
 				expect(existsSync(log("play-1.pid"))).toBe(false);
 				await reader.run("read", "P2.R1");
 				await waitFor(() => existsSync(log("play-1.pid")));
-				reader.turn([user("b"), assistant("Dos.")]);
+				await reader.turn([user("b"), assistant("Dos.")]);
 				await wait();
 				expect(reader.key("\x1b")).toEqual({ consume: true });
 				await waitFor(() => !alive(pid(1)));
@@ -555,7 +664,14 @@ describe("reply-reader extension", () => {
 					["Auto-read on: full replies.", "info"],
 					["Reading stopped.", "info"],
 				]);
-				expect(reader.statuses).toEqual(["Reading P2.R1 on local · Esc stops", undefined, "Reading P2.R1 on local · Esc stops", undefined]);
+				expect(reader.statuses).toEqual([
+					"Reading P2.R1 on local · Esc stops",
+					"Reading P2.R1 on local · 1 waiting · Esc stops",
+					undefined,
+					"Reading P2.R1 on local · Esc stops",
+					"Reading P2.R1 on local · 1 waiting · Esc stops",
+					undefined,
+				]);
 			});
 
 			it("/read-auto off and the session's end drop this session's waiting replies", async () => {
@@ -564,7 +680,7 @@ describe("reply-reader extension", () => {
 				await reader.run("read-auto", "on");
 				await reader.run("read");
 				await waitFor(() => existsSync(log("play-0.pid")));
-				reader.turn([user("a"), assistant("Uno.")]);
+				await reader.turn([user("a"), assistant("Uno.")]);
 				await wait();
 				await reader.run("read-auto", "off");
 				rmSync(log("hold"));
@@ -577,7 +693,7 @@ describe("reply-reader extension", () => {
 				await reader.run("read-auto", "on");
 				await reader.run("read", "P2.R1");
 				await waitFor(() => existsSync(log("play-1.pid")));
-				reader.turn([user("b"), assistant("Dos.")]);
+				await reader.turn([user("b"), assistant("Dos.")]);
 				await wait();
 				reader.shutdown();
 				await waitFor(() => !alive(pid(1)));
@@ -591,6 +707,100 @@ describe("reply-reader extension", () => {
 					["Auto-read on: full replies.", "info"],
 					["Auto-read off.", "info"],
 					["Auto-read on: full replies.", "info"],
+				]);
+			});
+		});
+
+		describe("between queued readings: a gap and an announcement (T38, S14)", { timeout: 20000 }, () => {
+			const holding = () => {
+				writeFileSync(log("hold"), "");
+				installVoice(`while [ -e "${root}/hold" ]; do sleep 0.02; done;`);
+			};
+			const ended = (reader: ReturnType<typeof load>, n: number) => waitFor(() => reader.statuses.filter((status) => status === undefined).length === n);
+			const audio = (n: number) => readFileSync(log(`play-${n}.audio`));
+			/** 1.5 s of silence at the fake engine's 44.1 kHz, as 16-bit samples. */
+			const GAP_BYTES = Math.round(1.5 * 44100) * 2;
+			/** One fragment of the fake engine (one sample) plus a section break's 0.75 s pause. */
+			const ANNOUNCED_BYTES = 2 + Math.round(0.75 * 44100) * 2;
+			const wake = "[System-generated Gentle Agents notification, not written by the user] job done";
+			/** One run where an injected user-role message chains a second turn (T42). */
+			const chained = (reader: ReturnType<typeof load>, first: unknown[], second: unknown[]) => {
+				reader.agent("agent_start");
+				for (const entry of first) reader.store(entry);
+				reader.agent("agent_start");
+				for (const entry of second) reader.store(entry);
+				reader.agent("agent_settled");
+			};
+
+			it("a reading that waited starts after 1.5 s of silence, saying which reply it is; the first starts as today", async () => {
+				installVoice();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				chained(reader, [user("a"), assistant("Uno.")], [user(wake), assistant("Dos.")]);
+				await ended(reader, 2);
+				expect(texts()).toEqual(["Uno.", "Respuesta P tres, R dos.", "Dos."]);
+				// The first: its own sample only. The second: the gap, the announcement and its section pause, then the reply.
+				expect(audio(0).length).toBe(2);
+				const second = audio(1);
+				expect(second.length).toBe(GAP_BYTES + ANNOUNCED_BYTES + 2);
+				expect(second.subarray(0, GAP_BYTES).every((byte) => byte === 0)).toBe(true);
+				expect(second.readInt16LE(GAP_BYTES)).not.toBe(0);
+				expect(second.subarray(GAP_BYTES + 2, GAP_BYTES + ANNOUNCED_BYTES).every((byte) => byte === 0)).toBe(true);
+				expect(second.readInt16LE(GAP_BYTES + ANNOUNCED_BYTES)).not.toBe(0);
+			});
+
+			it("the announcement is in the reading's own language: Reply in English", async () => {
+				installVoice();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				const english = "The build is done and the tests pass for the new parser.";
+				chained(reader, [user("a"), assistant(english)], [user(wake), assistant(`${english} Then it was pushed.`)]);
+				await ended(reader, 2);
+				expect(texts()).toEqual([english, "Reply P three, R two.", english, "Then it was pushed."]);
+			});
+
+			it("a file waiting after Read after it says its name, in its own language", async () => {
+				holding();
+				mkdirSync(join(root, "work"), { recursive: true });
+				writeFileSync(join(root, "work", "notas.md"), "Hola.");
+				writeFileSync(join(root, "work", "notes.md"), "The build is done and the tests pass for the new parser.");
+				const reader = load({ cut: "after" });
+				await reader.run("read");
+				await waitFor(() => existsSync(log("play-0.pid")));
+				await reader.run("read", "notas.md");
+				await reader.run("read", "notes.md");
+				rmSync(log("hold"));
+				await ended(reader, 3);
+				expect(texts().slice(-4)).toEqual([
+					"Archivo notas punto md.",
+					"Hola.",
+					"File notes dot md.",
+					"The build is done and the tests pass for the new parser.",
+				]);
+				expect(audio(1).subarray(0, GAP_BYTES).every((byte) => byte === 0)).toBe(true);
+			});
+
+			it("the footer adds the count while readings wait, and drops it when none does", async () => {
+				holding();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				await reader.run("read");
+				await waitFor(() => existsSync(log("play-0.pid")));
+				chained(reader, [user("a"), assistant("Uno.")], [user(wake), assistant("Dos.")]);
+				await waitFor(() => reader.statuses.length === 3);
+				expect(reader.statuses).toEqual([
+					"Reading P2.R1 on local · Esc stops",
+					"Reading P2.R1 on local · 1 waiting · Esc stops",
+					"Reading P2.R1 on local · 2 waiting · Esc stops",
+				]);
+				rmSync(log("hold"));
+				await ended(reader, 3);
+				expect(reader.statuses.slice(3)).toEqual([
+					undefined,
+					"Reading P3.R1 on local · 1 waiting · Esc stops",
+					undefined,
+					"Reading P3.R2 on local · Esc stops",
+					undefined,
 				]);
 			});
 		});
@@ -725,7 +935,7 @@ describe("reply-reader extension", () => {
 				await a.run("read");
 				await waitFor(() => has(0));
 				await c.run("read-auto", "on");
-				c.turn([user("a"), assistant("Uno.")]);
+				await c.turn([user("a"), assistant("Uno.")]);
 				await wait();
 				await b.run("read", "P1.R1");
 				expect(b.asked).toHaveLength(1);
@@ -746,18 +956,20 @@ describe("reply-reader extension", () => {
 				await reader.run("read-auto", "on");
 				await reader.run("read");
 				await waitFor(() => has(0));
-				reader.turn([user("a"), assistant("Uno.")]);
+				await reader.turn([user("a"), assistant("Uno.")]);
 				await reader.run("read", "P1.R1");
 				await wait();
 				expect(alive(pid(0))).toBe(true);
 				expect(has(1)).toBe(false);
 				rmSync(log("hold"));
 				await ended(reader, 3);
-				expect(texts().slice(-2)).toEqual(["Uno.", "Primera respuesta."]);
+				expect(texts().slice(-4)).toEqual(["Respuesta P tres, R uno.", "Uno.", "Respuesta P uno, R uno.", "Primera respuesta."]);
 				expect([0, 1, 2].map((n) => existsSync(log(`play-${n}.audio`)))).toEqual([true, true, true]);
 				expect(reader.statuses.filter(Boolean)).toEqual([
 					"Reading P2.R1 on local · Esc stops",
-					"Reading P3.R1 on local · Esc stops",
+					"Reading P2.R1 on local · 1 waiting · Esc stops",
+					"Reading P2.R1 on local · 2 waiting · Esc stops",
+					"Reading P3.R1 on local · 1 waiting · Esc stops",
 					"Reading P1.R1 on local · Esc stops",
 				]);
 				expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
@@ -808,8 +1020,8 @@ describe("reply-reader extension", () => {
 					expect(texts()).not.toContain("Primera respuesta.");
 					expect(reader.statuses.filter(Boolean)).toEqual(
 						how === "another manual /read"
-							? ["Reading P2.R1 on local · Esc stops", "Reading P9.R1 on local · Esc stops"]
-							: ["Reading P2.R1 on local · Esc stops"],
+							? ["Reading P2.R1 on local · Esc stops", "Reading P2.R1 on local · 1 waiting · Esc stops", "Reading P9.R1 on local · Esc stops"]
+							: ["Reading P2.R1 on local · Esc stops", "Reading P2.R1 on local · 1 waiting · Esc stops"],
 					);
 				});
 			}
@@ -820,7 +1032,7 @@ describe("reply-reader extension", () => {
 				await reader.run("read-auto", "on");
 				await reader.run("read");
 				await waitFor(() => has(0));
-				reader.turn([user("a"), assistant("Uno.")]);
+				await reader.turn([user("a"), assistant("Uno.")]);
 				await reader.run("read", "P1.R1");
 				await reader.run("read-auto", "off");
 				rmSync(log("hold"));
@@ -835,7 +1047,7 @@ describe("reply-reader extension", () => {
 				await reader.run("read-auto", "on");
 				await reader.run("read");
 				await waitFor(() => has(0));
-				reader.turn([user("a"), assistant("Uno.")]);
+				await reader.turn([user("a"), assistant("Uno.")]);
 				await reader.run("read", "P1.R1");
 				reader.bus.emit(READER_EVENTS.read, { v: 1, id: "P9.R1", text: "Nueve." });
 				await waitFor(() => reader.asked.length === 2 && !reader.asking());
@@ -843,7 +1055,7 @@ describe("reply-reader extension", () => {
 				expect(alive(pid(0))).toBe(true);
 				expect(has(1)).toBe(false);
 				expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
-				expect(reader.statuses).toEqual(["Reading P2.R1 on local · Esc stops"]);
+				expect(reader.statuses).toEqual(["Reading P2.R1 on local · Esc stops", "Reading P2.R1 on local · 1 waiting · Esc stops"]);
 				// The waiting auto-read was not dropped; the dismissed requests never play.
 				rmSync(log("hold"));
 				await ended(reader, 2);
@@ -904,7 +1116,11 @@ describe("reply-reader extension", () => {
 				await wait();
 				// "Ocho" was an explicit reading: it dropped the request waiting after the first answer.
 				expect(texts()).not.toContain("Nueve.");
-				expect(reader.statuses.filter(Boolean)).toEqual(["Reading P2.R1 on local · Esc stops", "Reading P8.R1 on local · Esc stops"]);
+				expect(reader.statuses.filter(Boolean)).toEqual([
+					"Reading P2.R1 on local · Esc stops",
+					"Reading P2.R1 on local · 1 waiting · Esc stops",
+					"Reading P8.R1 on local · Esc stops",
+				]);
 				expect(reader.notes).toEqual([]);
 			});
 
@@ -1000,15 +1216,28 @@ describe("reply-reader extension", () => {
 				await r.run("read-auto", "on");
 				await r.run("read");
 				await waitFor(() => has(0));
-				r.turn([user("a"), assistant("Uno.")]);
-				r.turn([user("b"), assistant("Dos.")]);
+				await r.turn([user("a"), assistant("Uno.")]);
+				await r.turn([user("b"), assistant("Dos.")]);
 				await r.run("read", "P1.R1");
-				r.turn([user("c"), assistant("Tres.")]);
+				await r.turn([user("c"), assistant("Tres.")]);
 				await wait();
 				expect(has(1)).toBe(false);
 				rmSync(log("hold"));
 				await ended(r, 5);
-				expect(r.statuses.filter(Boolean)).toEqual(["P2.R1", "P3.R1", "P4.R1", "P1.R1", "P5.R1"].map((id) => `Reading ${id} on local · Esc stops`));
+				// S14 (T38): the footer counts what waits, which drops by one as each starts.
+				expect(r.statuses.filter(Boolean)).toEqual(
+					[
+						["P2.R1", 0],
+						["P2.R1", 1],
+						["P2.R1", 2],
+						["P2.R1", 3],
+						["P2.R1", 4],
+						["P3.R1", 3],
+						["P4.R1", 2],
+						["P1.R1", 1],
+						["P5.R1", 0],
+					].map(([id, waiting]) => `Reading ${id} on local · ${waiting ? `${waiting} waiting · ` : ""}Esc stops`),
+				);
 			});
 
 			it("Read after it is dropped by the session's end and by Esc in another session (S8 c)", async () => {
@@ -1054,7 +1283,7 @@ describe("reply-reader extension", () => {
 				await a.run("read");
 				await waitFor(() => has(0));
 				await c.run("read-auto", "on");
-				c.turn([user("a"), assistant("Uno.")]);
+				await c.turn([user("a"), assistant("Uno.")]);
 				const asked = b.run("read", "P1.R1");
 				await waitFor(b.asking);
 				process.kill(pid(0), "SIGTERM");
