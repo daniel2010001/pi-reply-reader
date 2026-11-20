@@ -103,6 +103,11 @@ const SPANISH_WORDS = new Set(
 let words: Phrasebook;
 /** Where `renderNarration` collects diagnostics during its run, and the source line of the block being rendered. */
 let diagnosis: { diagnostics: Diagnostic[]; line: number } | undefined;
+/**
+ * (k5) The tags of the text being rendered, in the order the renderer meets them: a first run records them, and
+ * `paired` then says which opening and closing tags match, for the run that is kept.
+ */
+let tagging: { seen: { name: string; closing: boolean }[]; paired?: boolean[]; next: number } | undefined;
 
 /** (S12) The blocks of `markdown`, language-free: fences, table rows and one block per other line. */
 export function narrationPlan(markdown: string): NarrationPlan {
@@ -145,27 +150,58 @@ export function narrationPlan(markdown: string): NarrationPlan {
  * as at a blank line), split into fragments, with the tokens no reading class claimed.
  */
 export function renderNarration(plan: NarrationPlan, language: Language): Narration {
-	const previous = { words, diagnosis };
+	const previous = { words, diagnosis, tagging };
 	words = PHRASEBOOKS[language];
-	diagnosis = { diagnostics: [], line: 0 };
 	try {
-		const lines: SpokenLine[] = [];
-		for (const block of plan.blocks) {
-			diagnosis.line = block.line;
-			const role = block.role === "break" ? "paragraph" : block.role;
-			lines.push({ text: numbersInWords(finished(blockText(block))), role });
-			// A heading or bold-only line ends its section, so playback pauses as at a blank line; trim drops a last one.
-			if (block.role === "heading") lines.push({ text: "", role });
+		tagging = undefined;
+		// (k5) A closing tag anywhere means a pair may span blocks: a first run finds which tags match.
+		if (plan.blocks.some((block) => CLOSING_TAG.test("source" in block ? block.source : "cells" in block ? block.cells.join(" ") : ""))) {
+			tagging = { seen: [], next: 0 };
+			rendered(plan, language);
+			tagging = { seen: [], paired: pairedTags(tagging.seen), next: 0 };
 		}
-		const text = lines
-			.map((line) => line.text)
-			.join("\n")
-			.replace(/\n{3,}/g, "\n\n")
-			.trim();
-		return { text, language, fragments: fragmentsOf(lines), diagnostics: diagnosis.diagnostics };
+		return rendered(plan, language);
 	} finally {
-		({ words, diagnosis } = previous);
+		({ words, diagnosis, tagging } = previous);
 	}
+}
+
+const CLOSING_TAG = /<\/\p{L}[\p{L}\p{N}-]*>/u;
+
+/** (k5) Which of `seen` belong to a pair: each closing tag matches the nearest open tag of the same name before it. */
+function pairedTags(seen: readonly { name: string; closing: boolean }[]): boolean[] {
+	const paired = seen.map(() => false);
+	const open = new Map<string, number[]>();
+	seen.forEach(({ name, closing }, index) => {
+		const key = name.toLowerCase();
+		const stack = open.get(key) ?? [];
+		open.set(key, stack);
+		if (!closing) stack.push(index);
+		else {
+			const start = stack.pop();
+			if (start !== undefined) paired[start] = paired[index] = true;
+		}
+	});
+	return paired;
+}
+
+/** One run of the renderer over `plan`, with the current phrasebook. */
+function rendered(plan: NarrationPlan, language: Language): Narration {
+	diagnosis = { diagnostics: [], line: 0 };
+	const lines: SpokenLine[] = [];
+	for (const block of plan.blocks) {
+		diagnosis.line = block.line;
+		const role = block.role === "break" ? "paragraph" : block.role;
+		lines.push({ text: numbersInWords(finished(blockText(block))), role });
+		// A heading or bold-only line ends its section, so playback pauses as at a blank line; trim drops a last one.
+		if (block.role === "heading") lines.push({ text: "", role });
+	}
+	const text = lines
+		.map((line) => line.text)
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+	return { text, language, fragments: fragmentsOf(lines), diagnostics: diagnosis.diagnostics };
 }
 
 /** (S12) Text already meant for speech, split as playback speaks it: every fragment a paragraph's. */
@@ -287,7 +323,7 @@ interface Phrasebook {
 	everythingIn: string;
 	/** (k4) Any other `*` in a glob: "lab algo". */
 	something: string;
-	/** (k5) An HTML tag by its name: "la etiqueta iframe". */
+	/** (k5) A lone closing or self-closing tag by its name: "la etiqueta iframe". */
 	tag: (name: string) => string;
 }
 
@@ -699,6 +735,17 @@ function inline(text: string): string {
 		.replace(/\uE000(\d+)\uE001/g, (_m, code: string) => String.fromCodePoint(Number(code)))
 		.replace(/\uE002(\d+)\uE003/g, (_m, index: string) => spans[Number(index)])
 		.replace(/[ \t]*\uE008/g, "")
+		// (k5) The pauses around `<< text >>`, now that code spans are back in the line.
+		.replace(QUOTE_OPENING, (_m, offset: number, whole: string) => {
+			const before = whole.slice(0, offset).replace(KEPT_MARKS, "");
+			if (before === "" || /[([{"'“«¿¡]$/u.test(before)) return "";
+			return /[\p{L}\p{N}]$/u.test(before) ? ", " : " ";
+		})
+		.replace(QUOTE_CLOSING, (match: string, offset: number, whole: string) => {
+			const after = whole.slice(offset + match.length).replace(KEPT_MARKS, "");
+			if (after === "" || /^[)\]}.,;:!?…"'”»]/u.test(after)) return "";
+			return /[.,;:!?…]$/u.test(whole.slice(0, offset)) ? " " : ", ";
+		})
 		// (j1) A host keeps its digits: its marks become the kept-text marks `numbersInWords` drops.
 		.replace(/\uE006/g, "\uE00A")
 		.replace(/\uE007/g, "\uE00B");
@@ -717,6 +764,7 @@ function codeSpan(code: string, before: string, after: string): string {
 function speakable(text: string, before = "", after = ""): string {
 	const urls: string[] = [];
 	let out = text.replace(/\S*:\/\/\S*/g, (url) => `\uE004${urls.push(url) - 1}\uE005`);
+	out = tags(angleQuotes(out), before, after);
 	out = identifierSpaces(
 		out.replace(/\S+/g, (token: string, offset: number, whole: string) =>
 			tokenReading(token, previousWord(before + whole.slice(0, offset)), nextWord(whole.slice(offset + token.length) + after)),
@@ -802,7 +850,7 @@ const NUMERIC = /^~?[\d.,:/]+$/;
 /** `noun` is the English noun right after the token, which the reading then leaves out ("the read command"). */
 function classified(core: string, previous: string, noun: string): string | undefined {
 	if (previous === "rama" || previous === "branch") return nameWords(core);
-	const moment = clockTime(core) ?? calendarDate(core) ?? htmlTag(core, previous, noun);
+	const moment = clockTime(core) ?? calendarDate(core);
 	if (moment !== undefined) return moment;
 	const line = /^(.+):(\d+)$/.exec(core);
 	const file = line && (pathReading(line[1], previous) ?? fileName(line[1]));
@@ -851,12 +899,62 @@ function calendarDate(core: string): string | undefined {
 	return words.date(words.cardinal(d), words.months[m - 1], words.cardinal(y));
 }
 
-/** (k5) `<iframe>`, `</a>` and `<br/>` read "la etiqueta iframe" ("the iframe tag"); only the name after "etiqueta"/"tag". */
-function htmlTag(core: string, previous: string, noun: string): string | undefined {
-	const tag = /^<(\/?)(\p{L}[\p{L}\p{N}-]*)(\/?)>$/u.exec(core);
-	if (!tag || (tag[1] !== "" && tag[3] !== "")) return undefined;
-	const name = tag[2].replace(/-+/g, " ");
-	return previous === "etiqueta" || previous === "tag" || noun === "tag" ? name : words.tag(name);
+/** (k5) Where the pauses around `<< text >>` go, placed by `inline` once code spans are back in the line. */
+const QUOTE_OPEN = String.fromCharCode(0xe00c);
+const QUOTE_CLOSE = String.fromCharCode(0xe00d);
+const QUOTE_OPENING = new RegExp(`[ \\t]*${QUOTE_OPEN}[ \\t]*`, "g");
+const QUOTE_CLOSING = new RegExp(`[ \\t]*${QUOTE_CLOSE}[ \\t]*`, "g");
+
+/**
+ * (k5) `<< text >>`, a format models use, reads like quotes: the marks are silent and the text has a short pause
+ * around it. It needs a letter inside and a `>>` on the same line, so a shift such as `a << b` or `x << 2 >> 1`
+ * keeps its reading and swallows nothing.
+ */
+function angleQuotes(text: string): string {
+	return text.replace(
+		/(?<![^\s([{"'“«])<<(?!<)[ \t]*([^<>\n]*?\p{L}[^<>\n]*?)[ \t]*>>(?![>\p{L}\p{N}_])/gu,
+		(_m, inside: string) => ` ${QUOTE_OPEN} ${inside} ${QUOTE_CLOSE} `,
+	);
+}
+
+/** (k5) A tag name: letters, digits and `-`, starting with a letter. */
+const TAG = /<(\/?)(\p{L}[\p{L}\p{N}-]*)(\/?)>/gu;
+/**
+ * A tag glued to a letter, digit or `_` (`a<b>c`, `List<String>`) is not one: markup or a generic type. So is one
+ * glued to a code span, URL or escape parked behind a private-use mark (`` `x`<br>`y` ``).
+ */
+const TAG_GLUE = /[\p{L}\p{N}_\uE000-\uE00F]/u;
+
+/**
+ * (k5) Tags, HTML or not. A pair `<name>…</name>` of the same text reads "name: " and then the content, the closing
+ * tag silent; the opening tag may be glued to the content, the closing one to the content before it. A lone
+ * `<name>` reads its name (`<archivo>` "archivo"); a lone `</name>` or `<name/>` reads "la etiqueta name" ("the
+ * name tag"), only the name right after "etiqueta"/"tag". Lone tags glued to other text (`a<b>c`) are not tags.
+ */
+function tags(text: string, before: string, after: string): string {
+	return text.replace(TAG, (match: string, closing: string, rawName: string, selfClosing: string, offset: number, whole: string) => {
+		if (closing !== "" && selfClosing !== "") return match;
+		const prior = offset === 0 ? "" : whole[offset - 1];
+		const next = whole[offset + match.length] ?? "";
+		const apartBefore = prior === "" || !TAG_GLUE.test(prior);
+		const apartAfter = next === "" || !TAG_GLUE.test(next);
+		const name = rawName.replace(/-+/g, " ");
+		let paired = false;
+		// An opening tag may start a pair only where a word could start, a closing one end it only where a word could end.
+		if (selfClosing === "" && tagging && (closing === "" ? apartBefore : apartAfter)) {
+			const index = tagging.next++;
+			tagging.seen.push({ name: rawName, closing: closing !== "" });
+			paired = tagging.paired?.[index] ?? false;
+		}
+		if (paired) return closing === "" ? `${name}:${next === "" || /\s/.test(next) ? "" : " "}` : "";
+		// Alone, a tag right after another tag's `>` (`height="450"></iframe>`) is still markup, and one between `/`
+		// (`/catalog/<id>`) is part of a path, whose reading gives the name.
+		if (!apartBefore || !apartAfter || prior === ">" || next === "<" || prior === "/" || next === "/") return match;
+		if (closing === "" && selfClosing === "") return name;
+		const said = previousWord(before + whole.slice(0, offset)).toLowerCase();
+		const noun = words === ENGLISH && /^\s/.test(next) ? nextWord(whole.slice(offset + match.length) + after).toLowerCase() : "";
+		return said === "etiqueta" || said === "tag" || noun === "tag" ? name : words.tag(name);
+	});
 }
 
 /**
@@ -864,7 +962,8 @@ function htmlTag(core: string, previous: string, noun: string): string | undefin
  * "todo lo de" plus the folder (`bin/*` "todo lo de bin"), any other `*` "algo" (`lab-*` "lab algo").
  */
 function glob(core: string): string | undefined {
-	if (!core.includes("*") || !/^[\p{L}\p{N}._~/*-]+$/u.test(core) || !/\p{L}/u.test(core)) return undefined;
+	// (L114, L124) `**negrita**` and `*nota*`, only letters inside, are Markdown emphasis written as code, not globs.
+	if (!core.includes("*") || !/^[\p{L}\p{N}._~/*-]+$/u.test(core) || !/\p{L}/u.test(core) || /^(\*{1,2})\p{L}+\1$/u.test(core)) return undefined;
 	const folder = /^(.*[^/*])\/\*+$/.exec(core)?.[1];
 	if (folder !== undefined && !folder.includes("*")) return `${words.everythingIn} ${pathReading(`${folder}/`, "carpeta") ?? nameWords(folder)}`;
 	if (!core.startsWith("*")) return globWords(core);
@@ -1005,11 +1104,15 @@ function commitHash(core: string, previous: string): string | undefined {
 	return previous === "commit" || previous === "commits" ? "" : words.aCommit;
 }
 
-/** Other paths, such as `@scope/pkg`, `lab-*` globs or `/a/<id>/b`, keep (d)'s reading: their parts as words. */
+/** Other paths, such as `@scope/pkg` or `/a/<id>/b`, keep (d)'s reading: their parts as words. */
 function slashWords(core: string): string | undefined {
 	if (!/^(?:~|\.{1,2})?\//.test(core) && !/\p{L}\/[\p{L}\p{N}]|[\p{L}\p{N}]\/\p{L}/u.test(core)) return undefined;
 	const parts = core.split("/").map((part) => part.replace(/^[~.]+/, "")).filter((part) => part !== "");
-	return parts.join(" ").replace(/(?<=[\p{L}\p{N}])[-_]+(?=[\p{L}\p{N}])/gu, " ");
+	// (k5) A placeholder in a path reads by its name: `/catalog/download/<id>` "catalog download id".
+	return parts
+		.join(" ")
+		.replace(/<(\p{L}[\p{L}\p{N}-]*)>/gu, "$1")
+		.replace(/(?<=[\p{L}\p{N}])[-_]+(?=[\p{L}\p{N}])/gu, " ");
 }
 
 /** The word right before a token, across spaces, opening quotes and emphasis markers. */
