@@ -303,6 +303,8 @@ voice, saved speed, outputs and one-reading-per-machine rule as `/read`. `-` rea
 | `--output <name>` | where it sounds: `local` (default) or a name from `outputs.json` |
 | `--speed <n>` | voice speed from 0.5 to 2.0 for this run only; settings.json is not changed |
 | `--voice male\|female` | the voice (default male) |
+| `--download-voice` | download the voice and exit; asks `[y/N]` first, so it needs a terminal |
+| `--serve` | act as a listener: play what an agent host sends over SSH (see [Synthesize on the listener](#synthesize-on-the-listener)) |
 | `-h`, `--help` | usage |
 
 If the voice is missing, the command asks `[y/N]` before downloading it. Without a terminal, or when reading
@@ -439,7 +441,8 @@ in `$XDG_CONFIG_HOME/pi-reply-reader/outputs.json` (`~/.config/pi-reply-reader/o
 ```
 
 - Names use letters, digits and `-`, and `local` is built in, so it cannot be redefined.
-- Each value must be a non-empty string.
+- Each value must be a non-empty string, or an object `{ "ssh": "you@host", "fallback": "<PULSE_SERVER>" }`
+  for a listener that synthesizes the reading itself (see [Synthesize on the listener](#synthesize-on-the-listener)).
 - The first `/read` of a session asks `Where should readings sound?` when there is more than one output;
   `/read-output` switches later, and completes the names.
 - An entry that breaks a rule is skipped with a warning such as
@@ -496,6 +499,60 @@ server, enable lingering for your user there (`loginctl enable-linger`).
 
 The desktop needs only PipeWire (with pipewire-pulse) or PulseAudio and an SSH server. It needs no TTS, no
 Pi and no change to its configuration. A new client is one more unit and one more entry in `outputs.json`.
+
+## Synthesize on the listener
+
+In the setup above, the machine that runs Pi (the **agent host**) synthesizes every reading and only the audio
+travels. When the agent host is slow (a small VPS, a loaded server), readings start late and stutter. A
+**listener** output moves the synthesis to the machine where you listen: the agent host sends each reading's
+cleaned text, voice, speed and pauses over SSH to `reply-reader --serve` on the listener, which synthesizes
+and plays it there. Example: Pi on a home server, a desktop as the listener.
+
+On the listener:
+
+1. Install the command and its voice (Node 22.19 or newer, PipeWire with pipewire-pulse or PulseAudio, `paplay`):
+
+   ```sh
+   npm i -g pi-reply-reader
+   reply-reader --download-voice
+   ```
+
+2. Make sure `reply-reader` is on the `PATH` of a non-interactive SSH command: from the agent host,
+   `ssh you@listener reply-reader --help` must print the usage.
+
+On the agent host:
+
+3. The agent host must reach the listener with `ssh` and a key, without a password prompt (it runs
+   `ssh -o BatchMode=yes … you@listener reply-reader --serve --client-name=pi-reply-reader`).
+4. Name the output in `~/.config/pi-reply-reader/outputs.json`, with a fallback (optional, recommended):
+
+   ```json
+   { "desktop": { "ssh": "you@listener", "fallback": "tcp:127.0.0.1:4714" } }
+   ```
+
+   `ssh` is what you would type after `ssh` (a host, `user@host`, or a `Host` alias of your SSH client
+   configuration); it cannot start with `-` or hold spaces. `fallback` is a `PULSE_SERVER` value, such as the
+   tunnel above. Any other key is reported and the entry skipped.
+5. In Pi, `/read-output desktop`, then `/read` (or `reply-reader --output desktop notes.md`).
+
+Everything else works as for any output: the line and its order, the announcements, prompts read aloud,
+pause and resume (from the sentence being heard on the listener), `/read-stop` and a new reading from any
+session (they end the `ssh` child, which ends the reading on the listener), and the player timeout. The
+listener respects its own turn: while it reads something of its own, the agent host's reading waits. A
+reading of its own started on the listener ends the one it serves.
+
+**The fallback.** When the listener does not answer (no route, a refused key, `ssh` not installed, nothing
+heard within the player timeout), lacks `reply-reader`, its voice or `paplay`, runs an incompatible version,
+or fails while reading, the reading goes on from the sentence last heard: synthesized on the agent host and
+played through `fallback`, with one warning per session such as
+`Output "desktop": the listener did not answer; reading here through its fallback.` or, without the voice,
+`Output "desktop": the listener has no voice (install it there with "reply-reader --download-voice"); reading here through its fallback.`
+Without a fallback the reading fails with `Playback on "desktop" failed: <reason>`. The agent host still
+needs its own voice for the fallback.
+
+`reply-reader --serve` never downloads and writes no file besides the reading lock under
+`$XDG_RUNTIME_DIR/pi-reply-reader/`. It only plays what it is sent; whoever can run `ssh` as you to the
+listener can make it speak.
 
 ## Requirements
 

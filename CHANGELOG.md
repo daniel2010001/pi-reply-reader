@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Synthesis on the listener: an output in `outputs.json` can be `{ "ssh": "you@host", "fallback": "<PULSE_SERVER>" }`.
+  The agent host sends each reading's fragments over SSH to `reply-reader --serve` on the listener, which
+  synthesizes and plays them, so a slow agent host no longer delays readings. Pause/resume, `/read-stop`, the
+  line, announcements and the player timeout behave as for any output. When the listener does not answer,
+  lacks `reply-reader`, its voice or `paplay`, or fails mid-reading, the reading goes on from the sentence last
+  heard on the agent host through `fallback`, with one warning per session; without a fallback it fails with
+  `Playback on "<output>" failed: <reason>`. The listener waits while it reads something of its own. Bad `ssh`
+  values (empty, a leading `-`, whitespace) and unknown keys are reported and the entry skipped.
+- `reply-reader --download-voice` downloads the voice (asking `[y/N]` on a terminal) and exits; a listener
+  without its voice names it in the warning.
+
 - Readings say their project when it changes: a reading whose project (the folder name of its Git root, or of
   its working folder outside a repository) differs from the last reading's on the machine, or the first one,
   starts with the project's name, then its announcement if it waited ("pi-reply-reader. Respuesta P tres, R

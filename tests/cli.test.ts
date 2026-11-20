@@ -33,6 +33,8 @@ const MODEL_FILES = [
 ];
 
 const USAGE = `Usage: reply-reader [options] <file.md | ->
+       reply-reader --download-voice
+       reply-reader --serve
 
 Reads a Markdown file aloud with local text-to-speech; "-" reads standard input.
 
@@ -40,6 +42,8 @@ Options:
   --output <name>      where it sounds: local (default) or a name from outputs.json
   --speed <n>          voice speed from 0.5 to 2.0 for this run (default: the saved speed, else 1.1)
   --voice male|female  the voice (default: male)
+  --download-voice     download the voice (asks first, so it needs a terminal) and exit
+  --serve              act as a listener: play what an agent host sends over SSH (a listener output in outputs.json)
   -h, --help           show this help
 
 Ctrl+C stops the reading.
@@ -329,6 +333,10 @@ describe("reply-reader command (S6)", () => {
 			[["notes.md", "--output"], "--output needs a value"],
 			[["--speed"], "--speed needs a value"],
 			[["notes.md", "--voice"], "--voice needs a value"],
+			// S20: the listener's and the voice's own modes take nothing else; elsewhere they are not file options.
+			[["--serve", "notes.md"], '--serve takes no other arguments ("notes.md")'],
+			[["--download-voice", "notes.md"], '--download-voice takes no other arguments ("notes.md")'],
+			[["notes.md", "--serve"], 'unknown option "--serve"'],
 		];
 		for (const [argv, problem] of cases) {
 			expect(await finished(argv)).toEqual({ code: 2, out: "", err: `reply-reader: ${problem}.\n\n${USAGE}`, asked: [] });

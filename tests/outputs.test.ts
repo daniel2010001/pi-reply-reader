@@ -75,3 +75,68 @@ describe("loadOutputs", () => {
 		});
 	});
 });
+
+const SSH_HINT = '"ssh" must be a host such as "you@host", without spaces or a leading "-"';
+const FALLBACK_HINT = '"fallback" must be a PULSE_SERVER string such as "unix:/run/user/1000/reply-reader-pulse.sock"';
+
+describe("loadOutputs: a listener that synthesizes (S20)", () => {
+	it("accepts { ssh, fallback } and { ssh } beside string values, labelled with the listener", () => {
+		configure(
+			'{ "desktop": { "ssh": "you@host", "fallback": "unix:/run/user/1000/reply-reader-pulse.sock" }, "phone": { "ssh": "phone.lan" }, "tunnel": "tcp:z" }',
+		);
+		expect(loadOutputs(env, "hs-node")).toEqual({
+			outputs: [
+				local,
+				{
+					name: "desktop",
+					label: "desktop (listener you@host)",
+					ssh: "you@host",
+					fallback: "unix:/run/user/1000/reply-reader-pulse.sock",
+				},
+				{ name: "phone", label: "phone (listener phone.lan)", ssh: "phone.lan" },
+				{ name: "tunnel", label: "tunnel (tcp:z)", pulseServer: "tcp:z" },
+			],
+			problems: [],
+		});
+	});
+
+	it("skips an object whose ssh is missing, empty, starts with -, or holds whitespace or a newline, and names why", () => {
+		configure(
+			JSON.stringify({
+				none: {},
+				empty: { ssh: "" },
+				option: { ssh: "-oProxyCommand=touch x" },
+				space: { ssh: "you@host other" },
+				newline: { ssh: "you@host\nother" },
+				tab: { ssh: "you@host\t" },
+				number: { ssh: 22 },
+				good: { ssh: "you@host" },
+			}),
+		);
+		const { outputs, problems } = loadOutputs(env, "hs-node");
+		expect(outputs.map((o) => o.name)).toEqual(["local", "good"]);
+		expect(problems).toEqual(
+			["none", "empty", "option", "space", "newline", "tab", "number"].map((name) => `Ignored output "${name}" in ${file()}: ${SSH_HINT}.`),
+		);
+	});
+
+	it("skips an object with an unknown key or a fallback that is not a non-empty string, and names why", () => {
+		configure(
+			JSON.stringify({
+				extra: { ssh: "you@host", fallbak: "tcp:x" },
+				empty: { ssh: "you@host", fallback: "" },
+				number: { ssh: "you@host", fallback: 4713 },
+				array: ["you@host"],
+			}),
+		);
+		expect(loadOutputs(env, "hs-node")).toEqual({
+			outputs: [local],
+			problems: [
+				`Ignored output "extra" in ${file()}: unknown key "fallbak" (use "ssh" and "fallback").`,
+				`Ignored output "empty" in ${file()}: ${FALLBACK_HINT}.`,
+				`Ignored output "number" in ${file()}: ${FALLBACK_HINT}.`,
+				`Ignored output "array" in ${file()}: the value must be a PULSE_SERVER string such as "tcp:192.168.1.50:4713".`,
+			],
+		});
+	});
+});

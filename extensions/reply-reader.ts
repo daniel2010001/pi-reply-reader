@@ -7,7 +7,8 @@ import { type Component, type KeyId, SelectList } from "@earendil-works/pi-tui";
 import { createAutoQueue, type StartResult } from "../src/auto-queue.ts";
 import { loadOutputs, type Output } from "../src/outputs.ts";
 import { keyName, loadPauseKey } from "../src/pause-key.ts";
-import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
+import { startOutputReading } from "../src/listener.ts";
+import type { Reading, SherpaTts } from "../src/playback.ts";
 import { playerTimeoutMs, reapOrphans } from "../src/player.ts";
 import { questionsSection } from "../src/questions.ts";
 import { projectChanged, projectOf } from "../src/project.ts";
@@ -210,6 +211,8 @@ export function createReplyReader(
 		let sessionSpeed: number | undefined;
 		/** Whether this session already reported a problem in settings.json. */
 		let speedWarned = false;
+		/** Whether this session already warned that a listener output read through its fallback (S20: once per session). */
+		let fallbackWarned = false;
 		/** The pause key (S15, L147): settings.json `pauseKey`, else Alt+M; read once, as Pi registers shortcuts at load. */
 		const pauseKey = loadPauseKey(env);
 		const pauseName = keyName(pauseKey.key);
@@ -574,7 +577,7 @@ export function createReplyReader(
 			};
 			/** Plays from fragment `from`; the gap before a reading that waited only comes before its very start (S14). */
 			const play = (from: number, leadSilence?: number): void => {
-				const reading = startReading({
+				const reading = startOutputReading({
 					voice,
 					speaker: voiceOf,
 					fragments: fragments.slice(from),
@@ -589,6 +592,13 @@ export function createReplyReader(
 						if (state.reading !== reading) return;
 						if (claim && !claim.setPlayer(pid)) stoppedElsewhere();
 					},
+					// A listener output that cannot read goes on through its fallback (S20), said once per session.
+					onFallback: (message) => {
+						if (fallbackWarned) return;
+						fallbackWarned = true;
+						ctx.ui.notify(message, "warning");
+					},
+					lost: () => current !== state || state.reading !== reading || (claim?.lost() ?? false),
 				});
 				state.reading = reading;
 				state.from = from;
@@ -828,7 +838,11 @@ export function createReplyReader(
 			getArgumentCompletions: (prefix) =>
 				loadOutputs(env, hostname)
 					.outputs.filter((output) => output.name.startsWith(prefix.trim()))
-					.map((output) => ({ value: output.name, label: output.name, description: output.pulseServer ?? `this machine (${hostname})` })),
+					.map((output) => ({
+						value: output.name,
+						label: output.name,
+						description: output.ssh ? `listener ${output.ssh}` : (output.pulseServer ?? `this machine (${hostname})`),
+					})),
 			handler: async (args, ctx) => {
 				const list = outputs(ctx);
 				const name = args.trim();
@@ -1081,6 +1095,7 @@ export function createReplyReader(
 			warned = false;
 			sessionSpeed = undefined;
 			speedWarned = false;
+			fallbackWarned = false;
 			if (pauseKey.problem && ctx.hasUI && !pauseKeyWarned) {
 				pauseKeyWarned = true;
 				ctx.ui.notify(pauseKey.problem, "warning");
