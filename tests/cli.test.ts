@@ -490,6 +490,19 @@ describe("reply-reader command (S6)", () => {
 		expect(await exited).toBe("SIGTERM");
 	});
 
+	it("(S13 e) a lock takeover kills a TERM-ignoring player elsewhere before the command finishes", { timeout: 15000 }, async () => {
+		installVoice();
+		note("notes.md", "Hola.");
+		const otherPlayer = spawn("/bin/sh", ["-c", "trap '' TERM; while :; do sleep 0.1; done", "paplay", PLAYER_MARK], { stdio: "ignore" });
+		spawned.push(otherPlayer);
+		const ended = new Promise((done) => otherPlayer.on("exit", (_code, signal) => done(signal)));
+		await sleep(200);
+		const other = openReadingLock(env)!.claim();
+		expect(other.setPlayer(otherPlayer.pid!)).toBe(true);
+		expect((await finished(["notes.md"])).code).toBe(0);
+		expect(await Promise.race([ended, sleep(300).then(() => "still running")])).toBe("SIGKILL");
+	});
+
 	it("drops the auto-reads waiting in Pi sessions when it starts reading, as a manual /read does, and never asks (S8)", async () => {
 		installVoice();
 		note("notes.md", "Hola.");
@@ -512,6 +525,22 @@ describe("reply-reader command (S6)", () => {
 		expect(seen()).toEqual({ statuses: [], notes: [["Auto-read on: full replies.", "info"]], asked: [], waiting: true });
 	}, 20000);
 });
+
+const TIMEOUT_HINT = "REPLY_READER_PLAYER_TIMEOUT must be a number of seconds from 5 to 86400; using 15.";
+
+/**
+ * A marked player left by a reader that is gone (S13): it ignores SIGTERM, and its PI_REPLY_READER_OWNER names a
+ * process that already exited.
+ */
+function deadOwnersPlayer(): ChildProcess {
+	const gone = execFileSync("/bin/sh", ["-c", "echo $$"], { encoding: "utf8" }).trim();
+	const child = spawn("/bin/sh", ["-c", "trap '' TERM; while :; do sleep 0.1; done", "paplay", PLAYER_MARK], {
+		stdio: "ignore",
+		env: { PATH: "/usr/bin:/bin", PI_REPLY_READER_OWNER: `${gone}:` },
+	});
+	spawned.push(child);
+	return child;
+}
 
 const EXTENSION = pathToFileURL(resolve(import.meta.dirname, "..", "extensions", "reply-reader.ts")).href;
 
@@ -712,6 +741,28 @@ registerHooks({
 		expect(await result.code).toBe(130);
 		await waitFor(() => !alive(pid));
 		expect(result.err).toBe("");
+	});
+
+	it("(S13 e) does not exit before a TERM-ignoring orphan it reaped has been SIGKILLed", { timeout: 15000 }, async () => {
+		installVoice();
+		note("notes.md", "Hola.");
+		const orphan = deadOwnersPlayer();
+		const ended = new Promise((done) => orphan.on("exit", (_code, signal) => done(signal)));
+		await sleep(200);
+		const result = launch(["notes.md"]);
+		expect(await result.code).toBe(0);
+		expect(await Promise.race([ended, sleep(500).then(() => "still running")])).toBe("SIGKILL");
+		expect(result.err).toBe("");
+	});
+
+	it("(S13 f) REPLY_READER_PLAYER_TIMEOUT=3000000 warns once on stderr, uses 15 s and still plays", async () => {
+		installVoice();
+		note("notes.md", "Hola.");
+		env.REPLY_READER_PLAYER_TIMEOUT = "3000000";
+		const result = launch(["notes.md"]);
+		expect(await result.code).toBe(0);
+		expect(result.err).toBe(`${TIMEOUT_HINT}\n`);
+		expect(readFileSync(join(root, "play.audio"))).toHaveLength(2);
 	});
 
 	for (const [signal, code] of [["SIGTERM", 143], ["SIGHUP", 129]] as const) {

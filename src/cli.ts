@@ -3,6 +3,7 @@ import { hostname as osHostname } from "node:os";
 import { resolve } from "node:path";
 import { loadOutputs } from "./outputs.ts";
 import { type SherpaTts, startReading } from "./playback.ts";
+import { playerTimeoutMs, signalledPlayersEnded } from "./player.ts";
 import { openReadingLock } from "./reading-lock.ts";
 import { loadSpeed, parseSpeed, SPEED_HINT } from "./settings.ts";
 import { speechNarration } from "./speech-text.ts";
@@ -181,6 +182,9 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 	}
 	if (signal?.aborted) return INTERRUPTED;
 
+	// An invalid REPLY_READER_PLAYER_TIMEOUT is reported once and the default used (S13 f).
+	const timeoutMs = playerTimeoutMs(env, say);
+
 	// Without a usable XDG_RUNTIME_DIR there is no claim, and only Ctrl+C stops this reading. Like a manual /read it drops
 	// the auto-reads waiting in Pi sessions (S8, T33); it never asks.
 	const claim = openReadingLock(env)?.claim({ dropWaiting: true });
@@ -193,6 +197,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 		env,
 		loadSherpa: deps.loadSherpa,
 		speed,
+		timeoutMs,
 		onPlayer: (pid) => {
 			if (claim && !claim.setPlayer(pid)) reading.stop();
 		},
@@ -216,6 +221,9 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 		clearInterval(watch || undefined);
 		signal?.removeEventListener("abort", interrupt);
 		claim?.release();
+		// A player this command signalled (a reaped orphan, the reading it took over) gets its SIGKILL before the
+		// command exits (S13 e).
+		await signalledPlayersEnded();
 	}
 	return interrupted ? INTERRUPTED : OK;
 }

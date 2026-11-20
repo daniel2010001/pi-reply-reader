@@ -1,3 +1,4 @@
+import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1625,15 +1626,15 @@ describe("reply-reader extension", () => {
 		expect(reader.notes).toEqual([]);
 	});
 
-	it("(S13) a hung player is ended after the timeout, with the timed-out error", { timeout: 10000 }, async () => {
+	it("(S13) a hung player is ended after the timeout, with the timed-out error", { timeout: 15000 }, async () => {
 		installVoice("trap '' TERM; exec sleep 600;");
-		env.REPLY_READER_PLAYER_TIMEOUT = "0.3";
+		env.REPLY_READER_PLAYER_TIMEOUT = "5";
 		const reader = load();
 		await reader.run("read");
 		await waitFor(() => existsSync(log("play-0.pid")) && read("play-0.pid").trim() !== "");
 		const player = Number(read("play-0.pid"));
 		try {
-			await waitFor(() => reader.notes.length > 0, 5000);
+			await waitFor(() => reader.notes.length > 0, 10000);
 			expect(alive(player)).toBe(false);
 		} finally {
 			try {
@@ -1641,6 +1642,62 @@ describe("reply-reader extension", () => {
 			} catch {}
 		}
 		expect(reader.notes).toEqual([['Playback on "local" failed: timed out', "error"]]);
+	});
+
+	for (const how of ["Esc", "/read-stop"] as const) {
+		it(`(S13 b) ${how} kills a player that ignores SIGTERM, 2 s after the SIGTERM`, { timeout: 10000 }, async () => {
+			installVoice("trap '' TERM; exec sleep 600;");
+			const reader = load();
+			await reader.run("read");
+			await waitFor(() => existsSync(log("play-0.pid")) && read("play-0.pid").trim() !== "");
+			const player = Number(read("play-0.pid"));
+			try {
+				if (how === "Esc") expect(reader.key("\x1b")).toEqual({ consume: true });
+				else await reader.run("read-stop");
+				await new Promise((done) => setTimeout(done, 1500));
+				expect(alive(player)).toBe(true);
+				await waitFor(() => !alive(player), 2000);
+			} finally {
+				try {
+					process.kill(player, "SIGKILL");
+				} catch {}
+			}
+		});
+	}
+
+	it("(S13 h) a session start ends a player whose reader is gone, without any reading", { timeout: 10000 }, async () => {
+		const gone = execFileSync("/bin/sh", ["-c", "echo $$"], { encoding: "utf8" }).trim();
+		const orphan = spawn("/bin/sh", ["-c", "while :; do sleep 0.1; done", "paplay", "--client-name=pi-reply-reader"], {
+			stdio: "ignore",
+			env: { PATH: "/usr/bin:/bin", PI_REPLY_READER_OWNER: `${gone}:` },
+		});
+		const ended = new Promise((done) => orphan.on("exit", (_code, signal) => done(signal)));
+		try {
+			await new Promise((done) => setTimeout(done, 200));
+			const reader = load();
+			expect(await Promise.race([ended, new Promise((done) => setTimeout(() => done("still running"), 1000))])).toBe("SIGTERM");
+			expect(reader.notes).toEqual([]);
+		} finally {
+			orphan.kill("SIGKILL");
+		}
+	});
+
+	it("(S13 f) an invalid REPLY_READER_PLAYER_TIMEOUT warns once per process and readings still play", async () => {
+		installVoice();
+		env.REPLY_READER_PLAYER_TIMEOUT = "abc";
+		const reader = load();
+		await reader.run("read");
+		await reader.settled();
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-1.audio")));
+		await reader.settled();
+		const again = load();
+		await again.run("read");
+		await waitFor(() => existsSync(log("play-2.audio")));
+		await again.settled();
+		expect(reader.notes).toEqual([["REPLY_READER_PLAYER_TIMEOUT must be a number of seconds from 5 to 86400; using 15.", "warning"]]);
+		expect(again.notes).toEqual([]);
+		expect(read("play-0.audio").length).toBeGreaterThan(0);
 	});
 
 	it("Esc stops a reading and is consumed only while one plays", async () => {

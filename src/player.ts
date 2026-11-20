@@ -1,5 +1,5 @@
-import type { ChildProcess } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { type ChildProcess, spawnSync } from "node:child_process";
+import { readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 
 /** Every player we start carries this argument, so a pid can be told apart from an unrelated process. */
 export const PLAYER_MARK = "--client-name=pi-reply-reader";
@@ -37,9 +37,15 @@ export function terminate(child: ChildProcess): void {
 	child.once("exit", () => clearTimeout(timer));
 }
 
+/** How often a player signalled by pid is checked for having ended during its grace. */
+const POLL_MS = 50;
+/** Players signalled by terminatePid whose grace has not run out, each settling when it ended or was SIGKILLed. */
+const signalled = new Set<Promise<void>>();
+
 /**
  * SIGTERM to the player `pid` (started at `start`), then SIGKILL after KILL_GRACE_MS if that same player of ours is
- * still there. The timer does not keep this process alive. Never throws.
+ * still there. Its timer does not keep this process alive: a process about to exit awaits signalledPlayersEnded()
+ * first. Never throws.
  */
 export function terminatePid(pid: number, start: string | undefined): void {
 	try {
@@ -47,12 +53,37 @@ export function terminatePid(pid: number, start: string | undefined): void {
 	} catch {
 		return;
 	}
-	setTimeout(() => {
-		if (!isPlayer(pid, start)) return;
-		try {
-			process.kill(pid, "SIGKILL");
-		} catch {}
-	}, KILL_GRACE_MS).unref();
+	const began = Date.now();
+	const ended = new Promise<void>((done) => {
+		const timer = setInterval(() => {
+			if (isPlayer(pid, start) && Date.now() - began < KILL_GRACE_MS) return;
+			clearInterval(timer);
+			if (isPlayer(pid, start)) {
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {}
+			}
+			done();
+		}, POLL_MS);
+		timer.unref();
+	});
+	signalled.add(ended);
+	ended.then(() => signalled.delete(ended));
+}
+
+/**
+ * Settles once every player this process signalled with terminatePid (a reaped orphan, a lock takeover) has exited or
+ * been SIGKILLed (S13 e), so a command that exits right after never cuts the SIGKILL short.
+ */
+export async function signalledPlayersEnded(): Promise<void> {
+	if (signalled.size === 0) return;
+	// The grace timers are unref'd so they never hold Pi; this one holds the event loop while we wait for them.
+	const hold = setInterval(() => {}, KILL_GRACE_MS);
+	try {
+		await Promise.all([...signalled]);
+	} finally {
+		clearInterval(hold);
+	}
 }
 
 const live = new Set<ChildProcess>();
@@ -77,12 +108,16 @@ export function track(child: ChildProcess): void {
 }
 
 /**
- * Ends every player whose reader is gone (S13): a process of this user whose command line carries PLAYER_MARK and
- * whose OWNER_VAR names a process that no longer runs (a Pi killed with SIGKILL, say). A paplay without both marks,
- * or whose reader still runs, is never touched. Returns the pids it signalled; nothing where /proc is missing.
+ * Ends every player whose reader is gone (S13): a process of this user, in this process's PID namespace, whose command
+ * line carries PLAYER_MARK and whose OWNER_VAR names a process that no longer runs (a Pi killed with SIGKILL, say). A
+ * paplay without both marks, whose reader still runs, or in another PID namespace (or one that cannot be read: an
+ * owner pid means something only in its own namespace, so a reader in a sandbox keeps its player), is never touched.
+ * Returns the pids it signalled; nothing where /proc is missing.
  */
 export function reapOrphans(): number[] {
 	let names: string[];
+	const namespace = pidNamespace("self");
+	if (namespace === undefined) return [];
 	try {
 		names = readdirSync("/proc");
 	} catch {
@@ -97,6 +132,7 @@ export function reapOrphans(): number[] {
 		try {
 			if (uid !== undefined && statSync(`/proc/${pid}`).uid !== uid) continue;
 			if (!readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").includes(PLAYER_MARK)) continue;
+			if (pidNamespace(String(pid)) !== namespace) continue;
 			const tag = readFileSync(`/proc/${pid}/environ`, "utf8")
 				.split("\0")
 				.find((entry) => entry.startsWith(`${OWNER_VAR}=`));
@@ -110,6 +146,66 @@ export function reapOrphans(): number[] {
 		} catch {}
 	}
 	return reaped;
+}
+
+/** The PID namespace of `/proc/<pid>` ("self" for this process), as `pid:[inode]`; undefined when unreadable. */
+function pidNamespace(pid: string): string | undefined {
+	try {
+		return readlinkSync(`/proc/${pid}/ns/pid`);
+	} catch {
+		return undefined;
+	}
+}
+
+/** The player timeout of S13 when REPLY_READER_PLAYER_TIMEOUT is unset or invalid. */
+const DEFAULT_TIMEOUT_SECONDS = 15;
+const MIN_TIMEOUT_SECONDS = 5;
+const MAX_TIMEOUT_SECONDS = 86400;
+/** The warning for an invalid REPLY_READER_PLAYER_TIMEOUT (S13 f). */
+export const PLAYER_TIMEOUT_HINT = `REPLY_READER_PLAYER_TIMEOUT must be a number of seconds from ${MIN_TIMEOUT_SECONDS} to ${MAX_TIMEOUT_SECONDS}; using ${DEFAULT_TIMEOUT_SECONDS}.`;
+
+/**
+ * The player timeout of S13 in milliseconds: REPLY_READER_PLAYER_TIMEOUT, whole or fractional seconds from 5 to 86400,
+ * else 15 s; any value set but outside that (empty, `0`, `abc`, `3000000`) also returns the warning.
+ */
+export function playerTimeout(env: NodeJS.ProcessEnv): { ms: number; problem?: string } {
+	const value = env.REPLY_READER_PLAYER_TIMEOUT;
+	if (value === undefined) return { ms: DEFAULT_TIMEOUT_SECONDS * 1000 };
+	const text = value.trim();
+	const seconds = /^\d+(\.\d+)?$/.test(text) ? Number(text) : Number.NaN;
+	if (seconds >= MIN_TIMEOUT_SECONDS && seconds <= MAX_TIMEOUT_SECONDS) return { ms: Math.round(seconds * 1000) };
+	return { ms: DEFAULT_TIMEOUT_SECONDS * 1000, problem: PLAYER_TIMEOUT_HINT };
+}
+
+let timeoutWarned = false;
+
+/** playerTimeout's milliseconds, telling `warn` about an invalid value once per process (S13 f). */
+export function playerTimeoutMs(env: NodeJS.ProcessEnv, warn: (message: string) => void): number {
+	const { ms, problem } = playerTimeout(env);
+	if (problem && !timeoutWarned) {
+		timeoutWarned = true;
+		warn(problem);
+	}
+	return ms;
+}
+
+const deathSignal = new Map<string, boolean>();
+
+/**
+ * The command and arguments that start `command` so it gets SIGKILL when this process dies (S13 h), however it dies:
+ * `setpriv --pdeathsig KILL` when setpriv (`setpriv`, found by the caller on PATH) runs and supports it, else
+ * `command` alone. Checked under Pi's Bun (T37): a player started through it from the JS thread is not cut while its
+ * reader runs, and dies when the reader is SIGKILLed.
+ */
+export function withDeathSignal(setpriv: string | undefined, command: string, args: string[]): [string, string[]] {
+	if (!setpriv) return [command, args];
+	let works = deathSignal.get(setpriv);
+	if (works === undefined) {
+		const check = spawnSync(setpriv, ["--pdeathsig", "KILL", "/bin/sh", "-c", ":"], { stdio: "ignore", timeout: 2000 });
+		works = check.status === 0;
+		deathSignal.set(setpriv, works);
+	}
+	return works ? [setpriv, ["--pdeathsig", "KILL", command, ...args]] : [command, args];
 }
 
 /** A live process of this user with that pid, started when recorded (when recorded). */

@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import type { Output } from "./outputs.ts";
-import { OWNER_VAR, ownerTag, PLAYER_MARK, reapOrphans, terminate, track } from "./player.ts";
+import { OWNER_VAR, ownerTag, PLAYER_MARK, playerTimeout, reapOrphans, terminate, track, withDeathSignal } from "./player.ts";
 import { DEFAULT_SPEED } from "./settings.ts";
 import type { Boundary, Fragment } from "./speech-text.ts";
 import { onPath, type Speaker, type Voice } from "./voice.ts";
@@ -46,9 +47,10 @@ const SEED = 42;
  * A player that hangs (S13), such as paplay waiting forever on a Pulse server behind a broken SSH tunnel, is ended:
  * when it takes no audio for the player timeout (REPLY_READER_PLAYER_TIMEOUT seconds in `env`, 15 by default) while
  * audio waits for it, or does not end within the audio's length plus that timeout once it has all of it, it is killed
- * and `done` rejects with `Playback on "<output>" failed: timed out`. Every kill is SIGTERM, then SIGKILL two seconds
- * later; a player left by a reader that died is ended when the next reading starts, and this process's player dies
- * with it.
+ * and `done` rejects with `Playback on "<output>" failed: timed out` (a player that had already exited by then is
+ * not). Every kill is SIGTERM, then SIGKILL two seconds later; a player left by a reader that died is ended when the
+ * next reading starts, and this process's player dies with it (through `setpriv --pdeathsig KILL` when available, so
+ * even a reader killed outright takes it along).
  */
 export function startReading(options: {
 	voice: Voice;
@@ -61,12 +63,21 @@ export function startReading(options: {
 	speed?: number;
 	/** Told the player's pid once it starts, so another session can stop this reading (T21). */
 	onPlayer?: (pid: number) => void;
+	/**
+	 * The player timeout of S13 in milliseconds; REPLY_READER_PLAYER_TIMEOUT in `env` (or 15 s) when not given. Callers
+	 * pass playerTimeoutMs(env, warn), which also warns about an invalid value.
+	 */
+	timeoutMs?: number;
 }): Reading {
 	const { voice, speaker, fragments: list, output, env, loadSherpa = loadSherpaTts, speed = DEFAULT_SPEED, onPlayer } = options;
 	let player: ChildProcess | undefined;
 	let stopped = false;
 	/** Set by the watchdog (S13): the player took no audio, or did not end, in time. */
 	let timedOut = false;
+	/** Set when the deadline passed after the player exited (S13 g): it settles on its exit, not on its pipes. */
+	let overdue = false;
+	/** Settles `done` from the player's exit status once it exited; set by `finished`. */
+	let settleExited: (() => void) | undefined;
 
 	const run = async (): Promise<void> => {
 		const paplay = onPath("paplay", env);
@@ -84,7 +95,9 @@ export function startReading(options: {
 		const args = ["--raw", "--format=s16le", `--rate=${tts.sampleRate}`, "--channels=1", PLAYER_MARK, "--stream-name=reply"];
 		// Players left playing or hung by a reader that died (S13) go before this one starts.
 		reapOrphans();
-		const child = spawn(paplay, args, { env: playerEnv, stdio: ["pipe", "ignore", "pipe"] });
+		// Through setpriv, the player gets SIGKILL when this process dies however it dies (S13 h).
+		const [command, commandArgs] = withDeathSignal(onPath("setpriv", env), paplay, args);
+		const child = spawn(command, commandArgs, { env: playerEnv, stdio: ["pipe", "ignore", "pipe"] });
 		player = child;
 		track(child);
 		// A player that quits early closes its stdin; writing to it must not crash Pi.
@@ -101,17 +114,25 @@ export function startReading(options: {
 		child.once("exit", () => (playerGone = true));
 
 		// The watchdog (S13): armed while a chunk waits for the player, and once all audio is handed over.
-		const timeout = playerTimeoutMs(env);
+		const timeout = options.timeoutMs ?? playerTimeout(env).ms;
 		let watchdog: NodeJS.Timeout | undefined;
 		const arm = (ms: number): void => {
 			clearTimeout(watchdog);
+			// setTimeout takes at most 2^31-1 ms (about 24.8 days); a longer wait would fire at once.
 			watchdog = setTimeout(() => {
 				if (stopped) return;
+				// A player that already exited is not hung (S13 g): settle on how it exited, without waiting for pipes a
+				// process it left behind may still hold.
+				if (exited(child)) {
+					overdue = true;
+					settleExited?.();
+					return;
+				}
 				timedOut = true;
 				playerGone = true;
 				terminate(child);
 				taken?.();
-			}, ms);
+			}, Math.min(ms, MAX_TIMER_MS));
 		};
 		gone.then(() => clearTimeout(watchdog));
 
@@ -223,30 +244,41 @@ export function startReading(options: {
 		let stderr = "";
 		child.stderr?.on("data", (chunk: Buffer) => (stderr = (stderr + chunk.toString()).slice(-4096)));
 		return new Promise((resolve, reject) => {
-			child.on("error", (error) => reject(new Error(`${prefix}: ${error.message}`)));
-			// After stop or a timeout, do not wait for pipes a grandchild may still hold open.
-			child.on("exit", () => {
-				if (stopped) resolve();
-				else if (timedOut) reject(new Error(`${prefix}: timed out`));
-			});
-			child.on("close", (code, signal) => {
+			const settle = (code: number | null, signal: NodeJS.Signals | null): void => {
 				if (stopped) return resolve();
 				if (timedOut) return reject(new Error(`${prefix}: timed out`));
 				if (code === 0) return resolve();
 				const last = stderr.trim().split("\n").at(-1)?.trim();
 				reject(new Error(`${prefix}: ${last || (signal ? `killed by ${signal}` : `exit code ${code}`)}`));
+			};
+			settleExited = () => {
+				if (child.exitCode !== null || child.signalCode !== null) settle(child.exitCode, child.signalCode);
+			};
+			child.on("error", (error) => reject(new Error(`${prefix}: ${error.message}`)));
+			// After stop, a timeout or a passed deadline, do not wait for pipes a grandchild may still hold open.
+			child.on("exit", (code, signal) => {
+				if (stopped || timedOut || overdue) settle(code, signal);
 			});
+			child.on("close", settle);
 		});
 	}
 }
 
-/** The player timeout of S13 when REPLY_READER_PLAYER_TIMEOUT is unset or not a positive number of seconds. */
-const PLAYER_TIMEOUT_SECONDS = 15;
+/** The longest delay setTimeout takes; a longer one fires at once with a TimeoutOverflowWarning. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
-/** REPLY_READER_PLAYER_TIMEOUT (seconds, may be fractional) in milliseconds, or the default. */
-function playerTimeoutMs(env: NodeJS.ProcessEnv): number {
-	const seconds = Number(env.REPLY_READER_PLAYER_TIMEOUT);
-	return (Number.isFinite(seconds) && seconds > 0 ? seconds : PLAYER_TIMEOUT_SECONDS) * 1000;
+/**
+ * Whether `child` already exited: its exit was seen, or it is a zombie whose exit event has not come yet (the deadline
+ * and the exit can land in the same turn of the event loop).
+ */
+function exited(child: ChildProcess): boolean {
+	if (child.exitCode !== null || child.signalCode !== null) return true;
+	try {
+		const stat = readFileSync(`/proc/${child.pid}/stat`, "utf8");
+		return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) === "Z";
+	} catch {
+		return false;
+	}
 }
 
 /** Bytes per write to the player: about 0.37 s of audio at 44.1 kHz, well under a Linux pipe's 64 KiB. */
