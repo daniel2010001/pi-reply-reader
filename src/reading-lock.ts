@@ -51,6 +51,8 @@ export interface WaitingItem {
 export interface MachineWaiting extends WaitingItem {
 	session: string;
 	token: string;
+	/** When its session last published its line (its heartbeat, S16); undefined from a version that does not beat. */
+	beat?: number;
 }
 
 /** One reading's hold on the machine. Nothing here throws. */
@@ -94,9 +96,16 @@ export interface ReadingLock {
 	 * nothing is being read.
 	 */
 	togglePause(): "paused" | "resumed" | "stopped" | "unsupported" | undefined;
-	/** Publishes the line of the session `token` (S16); an empty line removes it. */
-	publishLine(token: string, session: string, items: readonly WaitingItem[]): void;
-	/** Every reading waiting on the machine, in the order each joined its line; dropped ones and dead sessions' are left out. */
+	/**
+	 * Publishes the line of the session `token` (S16), stamped with the time as its heartbeat; an empty line removes it.
+	 * `tag` (a few characters of Pi's session id) tells it apart from another session with the same label; the token's
+	 * last four characters otherwise.
+	 */
+	publishLine(token: string, session: string, items: readonly WaitingItem[], tag?: string): void;
+	/**
+	 * Every reading waiting on the machine, in the order each joined its line; dropped ones and dead sessions' are left
+	 * out. Two sessions with the same label are told apart as `<label> #<tag>` (S16, L135).
+	 */
 	waitingList(): MachineWaiting[];
 }
 
@@ -233,14 +242,20 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 
 	/** The hold of the reading whose entry `mine` was just written. */
 	const held = (mine: Entry): Claim => {
+		/**
+		 * Whether the entry was written. Once it was, a missing entry means another reading took over and already ended
+		 * (a paused reading has no player to kill, so this is how it learns, S15/S16); if it never was (writes fail), the
+		 * reading keeps to itself as without a lock.
+		 */
+		const written = read()?.token === mine.token;
 		const lost = (): boolean => {
 			const entry = read();
-			return entry !== undefined && entry.token !== mine.token;
+			return entry === undefined ? written : entry.token !== mine.token;
 		};
 		/** The entry as it is now (a pause request may have changed it), when still this reading's. */
 		const own = (): Entry | undefined => {
 			const entry = read();
-			if (entry === undefined) return mine;
+			if (entry === undefined) return written ? undefined : mine;
 			return entry.token === mine.token ? entry : undefined;
 		};
 		const setPlayer = (pid: number): boolean => {
@@ -337,14 +352,14 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 			};
 			return exclusive(toggle, toggle);
 		},
-		publishLine(token, session, items) {
+		publishLine(token, session, items, tag) {
 			if (items.length === 0) {
 				try {
 					unlinkSync(lineFile(token));
 				} catch {}
 				return;
 			}
-			put(lineFile(token), token, { token, session, pid: process.pid, pidStart: startTime(process.pid), items });
+			put(lineFile(token), token, { token, session, tag: tag || token.slice(-4), beat: Date.now(), pid: process.pid, pidStart: startTime(process.pid), items });
 		},
 		waitingList() {
 			let names: string[];
@@ -355,11 +370,16 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 			}
 			const mark = waitingMark();
 			const all: MachineWaiting[] = [];
+			/** Each listed session's tag, by token, and the tokens under each label. */
+			const tags = new Map<string, string>();
+			const labels = new Map<string, Set<string>>();
 			for (const name of names) {
 				try {
 					const line = JSON.parse(readFileSync(join(dir, name), "utf8")) as {
 						token?: unknown;
 						session?: unknown;
+						tag?: unknown;
+						beat?: unknown;
 						pid?: unknown;
 						pidStart?: unknown;
 						items?: unknown;
@@ -377,10 +397,14 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 						const itemMark = typeof item.mark === "string" ? item.mark : undefined;
 						// Dropped by an explicit action since it was queued (S8): it will never play.
 						if (itemMark !== mark) continue;
-						all.push({ name: item.name, at: item.at, mark: itemMark, session: line.session, token: line.token });
+						const beat = typeof line.beat === "number" ? line.beat : undefined;
+						all.push({ name: item.name, at: item.at, mark: itemMark, session: line.session, token: line.token, beat });
+						tags.set(line.token, typeof line.tag === "string" && line.tag ? line.tag : line.token.slice(-4));
+						labels.set(line.session, (labels.get(line.session) ?? new Set<string>()).add(line.token));
 					}
 				} catch {}
 			}
+			for (const item of all) if ((labels.get(item.session)?.size ?? 0) > 1) item.session = `${item.session} #${tags.get(item.token)}`;
 			return all.sort((a, b) => a.at - b.at);
 		},
 	};

@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripTerminalSequences, Text, TuiMainScreen } from "@earendil-works/pi-tui";
@@ -2164,6 +2164,65 @@ describe("reply-reader extension", () => {
 			await wait();
 			await a.run("read-queue");
 			expect(a.notes.at(-1)).toEqual(["Nothing waits to be read.", "info"]);
+		});
+
+		it("two unnamed sessions in the same folder are told apart in /read-queue by a tag; the list keeps their order (L135)", async () => {
+			shared();
+			holding();
+			const a = load();
+			const b = load();
+			await a.run("read-auto", "on");
+			await b.run("read-auto", "on");
+			await a.run("read");
+			await waitFor(() => has(0));
+			await a.turn([user("a"), assistant("Uno.")]);
+			await b.turn([user("b"), assistant("Dos.")]);
+			await a.run("read-queue");
+			await b.run("read-queue");
+			const [title, first, second] = a.notes.at(-1)![0].split("\n");
+			expect(title).toBe("Waiting on this machine:");
+			const tagA = /^1\. P3\.R1 · work #(\w{4}) \(this session\)$/.exec(first)?.[1];
+			const tagB = /^2\. P3\.R1 · work #(\w{4})$/.exec(second)?.[1];
+			expect([typeof tagA, typeof tagB]).toEqual(["string", "string"]);
+			expect(tagA).not.toBe(tagB);
+			expect(b.notes.at(-1)).toEqual([["Waiting on this machine:", `1. P3.R1 · work #${tagA}`, `2. P3.R1 · work #${tagB} (this session)`].join("\n"), "info"]);
+			await a.run("read-stop");
+		});
+
+		it("/name still wins, and a session whose label no other shares is listed without a tag (L135)", async () => {
+			shared();
+			holding();
+			const a = load({ session: "alfa" });
+			const b = load();
+			await a.run("read-auto", "on");
+			await b.run("read-auto", "on");
+			await a.run("read");
+			await waitFor(() => has(0));
+			await a.turn([user("a"), assistant("Uno.")]);
+			await b.turn([user("b"), assistant("Dos.")]);
+			await b.run("read-queue");
+			expect(b.notes.at(-1)).toEqual(["Waiting on this machine:\n1. P3.R1 · alfa\n2. P3.R1 · work (this session)", "info"]);
+			await a.run("read-stop");
+		});
+
+		it("/reload (session_shutdown, then session_start) leaves no line of the old session behind (S16)", async () => {
+			shared();
+			holding();
+			const a = load();
+			await a.run("read-auto", "on");
+			await a.run("read");
+			await waitFor(() => has(0));
+			await a.turn([user("a"), assistant("Uno.")]);
+			const lines = () => readdirSync(join(root, "run", "pi-reply-reader")).filter((name) => name.startsWith("line-"));
+			expect(lines()).toHaveLength(1);
+			a.shutdown();
+			expect(lines()).toEqual([]);
+			a.restart();
+			const b = load();
+			await b.run("read-queue");
+			expect(b.notes.at(-1)).toEqual(["Nothing waits to be read.", "info"]);
+			await wait();
+			expect(lines()).toEqual([]);
 		});
 
 		it("without XDG_RUNTIME_DIR, /read-queue lists this session's line and says so", async () => {

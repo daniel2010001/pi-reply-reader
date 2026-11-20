@@ -49,6 +49,14 @@ const CUT_AFTER = "Read after it";
 const CUT_CHOICES = [CUT_NOW, CUT_AFTER];
 /** Just the question, centred over whatever is open (pi-reply-thread's Alt+R view is a capturing overlay too). */
 const CUT_OVERLAY = { anchor: "center", width: 48 } as const;
+/**
+ * Play order (S16, L135): a session's next waiting reading yields to an earlier one of another session while that
+ * session's line was published (its heartbeat, every WATCH_MS while it has readings waiting) within FRESH_MS, so a
+ * frozen or dead session stops holding the line about FRESH_MS after its last beat; 2 s leaves room for a loaded
+ * machine's late timers. YIELD_CAP_MS bounds the wait for one reading even for a session that beats but never starts.
+ */
+const FRESH_MS = 2000;
+const YIELD_CAP_MS = 10_000;
 /** Seconds of silence before a reading that waited in the line, which then says which it is (S14). */
 const GAP_SECONDS = 1.5;
 /** What /read-pause, /read-stop and /read-next say (S1, S15, S16). */
@@ -139,7 +147,13 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * answered with ready, ready is also sent at each session start, and a read request reads its text like `/read`.
  */
 export function createReplyReader(
-	deps: { env?: NodeJS.ProcessEnv; hostname?: string; loadSherpa?: (voice: Voice) => Promise<SherpaTts> } = {},
+	deps: {
+		env?: NodeJS.ProcessEnv;
+		hostname?: string;
+		loadSherpa?: (voice: Voice) => Promise<SherpaTts>;
+		/** Test seam: while it returns true, this session's line starts nothing, as a session slow to claim (S16). */
+		holdLine?: () => boolean;
+	} = {},
 ) {
 	const env = deps.env ?? process.env;
 	const hostname = deps.hostname ?? osHostname();
@@ -232,9 +246,41 @@ export function createReplyReader(
 		}
 		/** Whether a reading plays (or is starting) in this session or anywhere on the machine. */
 		const playing = (): boolean => current !== undefined || (openReadingLock(env)?.busy() ?? false);
+		/** The first reading of this line while it yields to an earlier one elsewhere, and since when (S16). */
+		let yielding: { at: number; since: number } | undefined;
+		/**
+		 * Whether this line's first reading lets an earlier one of another session go first, so readings play in
+		 * /read-queue's order (S16, L135): while that session still beats (FRESH_MS), and YIELD_CAP_MS at most per reading.
+		 */
+		const yields = (): boolean => {
+			const head = queue.items[0];
+			const lock = head ? openReadingLock(env) : undefined;
+			const now = Date.now();
+			const earlier =
+				head !== undefined &&
+				(lock?.waitingList() ?? []).some((item) => item.token !== lineToken && item.at < head.at && item.beat !== undefined && now - item.beat < FRESH_MS);
+			if (!head || !earlier) {
+				yielding = undefined;
+				return false;
+			}
+			if (yielding?.at !== head.at) yielding = { at: head.at, since: now };
+			return now - yielding.since < YIELD_CAP_MS;
+		};
+		/** Republishes this session's line every WATCH_MS while it has readings waiting: its heartbeat (S16). */
+		let beating: ReturnType<typeof setInterval> | undefined;
+		const heartbeat = (): void => {
+			if (queue.size === 0 && !queue.starting) {
+				clearInterval(beating);
+				beating = undefined;
+				return;
+			}
+			if (beating) return;
+			beating = setInterval(() => publish(), WATCH_MS);
+			beating.unref?.();
+		};
 		/** This session's waiting auto-reads; without a usable XDG_RUNTIME_DIR it only waits for this session's readings. */
 		const queue = createAutoQueue<Waiting>({
-			busy: playing,
+			busy: () => playing() || (deps.holdLine?.() ?? false) || yields(),
 			start: (item, still, waited) =>
 				readAloud(item.ctx, item.name, item.label, item.markdown, item.language, {
 					mark: item.mark,
@@ -247,7 +293,10 @@ export function createReplyReader(
 				}),
 			retryMs: WATCH_MS,
 			// The footer follows at each place that changes the line, as before, and other sessions' lines on its checks.
-			onChange: () => publish(),
+			onChange: () => {
+				publish();
+				heartbeat();
+			},
 		});
 
 		/** This session as /read-queue names it: its name (Pi's /name), else its working folder. */
@@ -257,10 +306,20 @@ export function createReplyReader(
 			const named = (ctx.sessionManager as Partial<ExtensionContext["sessionManager"]>).getSessionName?.();
 			return named || basename(ctx.cwd) || ctx.cwd;
 		};
+		/**
+		 * What tells this session apart from another with the same label in /read-queue (S16): the last four characters of
+		 * Pi's session id (its random part), else of this line's token.
+		 */
+		const sessionTag = (): string | undefined => {
+			const id = (latest?.sessionManager as Partial<ExtensionContext["sessionManager"]> | undefined)?.getSessionId?.();
+			return typeof id === "string" && id ? id.replace(/-/g, "").slice(-4) : undefined;
+		};
 		/** Publishes this session's line next to the reading lock, so every session sees the machine's (S16). */
 		const publish = (): void => {
-			const items: WaitingItem[] = queue.items.map((item) => ({ name: item.name, at: item.at, mark: item.mark }));
-			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), items);
+			// The one being started stays listed until it claims the machine, so no other session takes its turn meanwhile.
+			const line = queue.starting && !current ? [queue.starting, ...queue.items] : queue.items;
+			const items: WaitingItem[] = line.map((item) => ({ name: item.name, at: item.at, mark: item.mark }));
+			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), items, sessionTag());
 		};
 		/** How many readings wait: on the machine, or in this session's line without a usable XDG_RUNTIME_DIR (S16). */
 		const waitingCount = (): number => {
@@ -501,6 +560,8 @@ export function createReplyReader(
 				: undefined;
 			state.watch?.unref();
 			current = state;
+			// Started: it no longer waits in the machine's list (S16).
+			publish();
 			footer();
 			return "done";
 		};

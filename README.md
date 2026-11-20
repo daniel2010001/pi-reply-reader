@@ -124,7 +124,8 @@ a Pi session); /read-stop ends it.`.
 
 `/read-queue` lists what waits on the machine, in the order each joined its line: the reply ID, file name or
 prompt kind (`question`, `command confirmation`, `dialog`), and the session (its `/name`, else its working
-folder; yours is marked):
+folder; yours is marked). Two sessions with the same label are told apart by the last four characters of their
+Pi session ID (`api #3f9c`, `api #a1d0`):
 
 ```text
 Waiting on this machine:
@@ -135,11 +136,14 @@ Waiting on this machine:
 
 With nothing waiting it says `Nothing waits to be read.`. Each session publishes its line next to the
 reading entry in `$XDG_RUNTIME_DIR/pi-reply-reader/` (`line-<id>.json`, removed when the line empties or the
-session ends; a dead session's is ignored). One session's readings play in order; when several sessions have
-readings waiting, the one whose session sees the machine free first plays next, usually the first listed but
-not guaranteed. Without a usable `XDG_RUNTIME_DIR` no session can see another's line, so `/read-queue` lists
-this session's only and says so (`Waiting in this session (other sessions are not visible without
-XDG_RUNTIME_DIR):`), and the footer counts this session's.
+session ends, `/reload` included; a dead session's is ignored and removed). Readings play in the listed order:
+while a session has readings waiting it republishes its line every 250 ms (a heartbeat), and a session whose
+next reading has an earlier one of another session before it lets that one go first for as long as that
+session's heartbeat is under 2 seconds old, 10 seconds at most per reading. A reading being started keeps its
+place until it plays. A frozen, hung or dead session stops beating, so it holds the others about 2 seconds at
+most; then the next reading plays. Without a usable `XDG_RUNTIME_DIR` no session can see
+another's line, so `/read-queue` lists this session's only and says so (`Waiting in this session (other
+sessions are not visible without XDG_RUNTIME_DIR):`), and the footer counts this session's.
 
 `/read-next` ends the reading, playing or paused, in this or another session, without dropping the line: the
 next reading waiting starts after the usual 1.5 s of silence, saying which it is. It says `Skipped to the next

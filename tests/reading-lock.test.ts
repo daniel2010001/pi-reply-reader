@@ -39,7 +39,9 @@ const loadSherpa = async () => {
 };
 const registered = new Map();
 const events = new Map();
-createReplyReader({ env, hostname: "hs-node", loadSherpa })({
+// While <root>/slow-<name> exists, the session's line starts nothing, as a session slow to claim (S16).
+const holdLine = () => existsSync(root + "/slow-" + name);
+createReplyReader({ env, hostname: "hs-node", loadSherpa, holdLine })({
 	registerCommand: (n, o) => registered.set(n, o),
 	on: (e, h) => events.set(e, h),
 });
@@ -372,8 +374,13 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 		go("go-b");
 		await b.exited;
 		expect(lines()).toEqual([`start ${a.child.pid}`, `end ${a.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`]);
-		// S16: the footer counts what waits on the machine, here the other session's two replies.
-		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", "Reading P2.R1 on local · 2 waiting · Esc pauses", null] });
+		// S16: the footer counts what waits on the machine, here the other session's two replies. Its 250 ms check may
+		// also catch the moment only the first had joined.
+		const footers = a.seen().statuses.filter((status) => status !== "Reading P2.R1 on local · 1 waiting · Esc pauses");
+		expect({ notes: a.seen().notes, footers }).toEqual({
+			notes: [],
+			footers: ["Reading P2.R1 on local · Esc pauses", "Reading P2.R1 on local · 2 waiting · Esc pauses", null],
+		});
 		expect(b.seen().notes).toEqual([["Auto-read on: full replies.", "info"]]);
 	});
 
@@ -566,6 +573,130 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		go("go-b");
 		await b.exited;
 		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc pauses", null] });
+	});
+
+	describe("play order follows /read-queue's list (S16, L135)", () => {
+		/** A plays /read with auto-read on; B's reply joins the line, then A's own reply joins after it, while A plays. */
+		const lineUp = async () => {
+			const a = start("a", ["read-auto on", "read", "await turn-a", "turn Dos.", "await go-a"]);
+			const playerA = await playerOf(a.child);
+			const b = auto("b", ["Uno."]);
+			await noted(b);
+			await wait();
+			go("turn-a");
+			await waitFor(() => a.seen().statuses.some((status) => status?.includes("· 2 waiting ·") ?? false));
+			return { a, b, playerA };
+		};
+		const nulls = (s: Session) => s.seen().statuses.filter((x) => x === null).length;
+
+		it("when a session's reading ends, another session's earlier reply plays before its own next one", async () => {
+			const { a, b, playerA } = await lineUp();
+			finish(playerA);
+			await playThrough(() => nulls(a) === 2 && nulls(b) === 1);
+			go("go-a");
+			go("go-b");
+			await Promise.all([a.exited, b.exited]);
+			expect(lines()).toEqual([
+				`start ${a.child.pid}`,
+				`end ${a.child.pid}`,
+				`start ${b.child.pid}`,
+				`end ${b.child.pid}`,
+				`start ${a.child.pid}`,
+				`end ${a.child.pid}`,
+			]);
+		});
+
+		it("a live session slow to claim keeps its turn: the other session waits for it while it beats, past 1 s", async () => {
+			const { a, b, playerA } = await lineUp();
+			go("slow-b");
+			finish(playerA);
+			await new Promise((resolve) => setTimeout(resolve, 2500));
+			// B could not start yet, and A did not take B's turn.
+			expect(lines()).toEqual([`start ${a.child.pid}`, `end ${a.child.pid}`]);
+			rmSync(join(root, "slow-b"));
+			await playThrough(() => nulls(a) === 2 && nulls(b) === 1);
+			go("go-a");
+			go("go-b");
+			await Promise.all([a.exited, b.exited]);
+			expect(lines()).toEqual([
+				`start ${a.child.pid}`,
+				`end ${a.child.pid}`,
+				`start ${b.child.pid}`,
+				`end ${b.child.pid}`,
+				`start ${a.child.pid}`,
+				`end ${a.child.pid}`,
+			]);
+		});
+
+		it("a frozen session's earlier reply delays the next reading only until its heartbeat is stale (2 s), then it plays", async () => {
+			const { a, b, playerA } = await lineUp();
+			b.child.kill("SIGSTOP");
+			try {
+				const from = Date.now();
+				finish(playerA);
+				const pidFile = join(root, `play-${a.child.pid}.pid`);
+				await waitFor(() => readFileSync(pidFile, "utf8").trim() !== "" && Number(readFileSync(pidFile, "utf8")) !== playerA);
+				const delay = Date.now() - from;
+				// It yielded until B's last beat (at most 250 ms before the freeze) was 2 s old, checked every 250 ms, and
+				// not much longer: a frozen session cannot hold the line.
+				expect(delay).toBeGreaterThanOrEqual(1500);
+				expect(delay).toBeLessThan(4000);
+				expect(hasPlayer(b)).toBe(false);
+				finish(Number(readFileSync(pidFile, "utf8")));
+			} finally {
+				b.child.kill("SIGCONT");
+				b.child.kill("SIGKILL");
+			}
+			go("go-a");
+			await a.exited;
+		});
+	});
+
+	it("(S15, L135 PROBE1) a paused session that is SIGKILLed frees the machine: the other session's waiting reply starts within 1.5 s", async () => {
+		const a = start("a", ["read", "await esc-a", "esc", "await go-a"]);
+		const playerA = await playerOf(a.child);
+		const b = auto("b", ["Uno."]);
+		await noted(b);
+		await wait();
+		go("esc-a");
+		await waitFor(() => !alive(playerA));
+		const file = join(root, "run", "pi-reply-reader", "reading.json");
+		await waitFor(() => (JSON.parse(readFileSync(file, "utf8")) as { paused?: boolean }).paused === true);
+		expect(hasPlayer(b)).toBe(false);
+		const from = Date.now();
+		a.child.kill("SIGKILL");
+		await waitFor(() => hasPlayer(b), 1500);
+		expect(Date.now() - from).toBeLessThan(1500);
+		await playThrough(() => b.seen().statuses.includes(null));
+		go("go-b");
+		await b.exited;
+		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc pauses", null] });
+	});
+
+	it("(S16, L135 PROBE3) /read-next from another session while a reading is paused ends it and the next one waiting starts", async () => {
+		const a = start("a", ["read", "await esc-a", "esc", "await go-a"]);
+		const playerA = await playerOf(a.child);
+		const c = auto("c", ["Uno."]);
+		await noted(c);
+		await wait();
+		go("esc-a");
+		await waitFor(() => !alive(playerA));
+		const file = join(root, "run", "pi-reply-reader", "reading.json");
+		await waitFor(() => (JSON.parse(readFileSync(file, "utf8")) as { paused?: boolean }).paused === true);
+		await wait();
+		expect(hasPlayer(c)).toBe(false);
+		const b = start("b", ["read-next"]);
+		expect((await ran(b)).notes).toEqual([["Skipped to the next reading.", "info"]]);
+		await playerOf(c.child);
+		await playThrough(() => c.seen().statuses.includes(null));
+		// The paused session learns it was ended even when the next reading already ended and released the machine.
+		await waitFor(() => a.seen().statuses.at(-1) === null);
+		go("go-a");
+		go("go-c");
+		await Promise.all([a.exited, b.exited, c.exited]);
+		expect(lines()).toEqual([`start ${a.child.pid}`, `term ${a.child.pid}`, `start ${c.child.pid}`, `end ${c.child.pid}`]);
+		expect(a.seen().notes).toEqual([["esc", { consume: true }]]);
+		expect(c.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc pauses", null] });
 	});
 
 	it("with auto-read on, a manual /read still stops another session's reading at once (S1)", async () => {

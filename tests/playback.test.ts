@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Output } from "../src/outputs.ts";
 import { type SherpaRequest, type SherpaTts, startReading } from "../src/playback.ts";
 import { speechText, spokenFragments } from "../src/speech-text.ts";
@@ -467,6 +467,67 @@ describe("startReading with Supertonic 3", () => {
 			startReading({ voice, speaker: male, fragments: spokenFragments("Uno. Dos."), output: local, env, loadSherpa }).done,
 		).rejects.toThrow("Speech synthesis failed: bad input");
 		await waitFor(() => !alive(Number(read("paplay.pid"))));
+	});
+});
+
+describe("(S15) where a paused reading resumes: position()", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	/**
+	 * Three one-second sentences at 1000 samples a second, handed over while the clock stands at `T`, so each is heard
+	 * right after the one before it: fragment 0 at 0-1000 ms, its 0.35 s pause (counted as fragment 1) at 1000-1350,
+	 * fragment 1 at 1350-2350, its pause at 2350-2700, fragment 2 at 2700-3700. `position()` is read 0.5 s later than
+	 * the moment heard, the player's lag.
+	 */
+	const T = 1_000_000;
+	const reading = (leadSilence?: number) => {
+		fakePaplay();
+		let now = T;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		let release: () => void = () => {};
+		const loaded = new Promise<void>((resolve) => (release = resolve));
+		const loadSherpa = async (): Promise<SherpaTts> => {
+			await loaded;
+			return { sampleRate: 1000, generateAsync: async () => ({ samples: new Float32Array(tone(1000)) }) };
+		};
+		const started = startReading({ voice, speaker: male, fragments: spokenFragments("Uno. Dos. Tres."), output: local, env, loadSherpa, leadSilence });
+		return {
+			started,
+			release,
+			/** The fragment `position()` gives when what is heard is `ms` into the reading. */
+			at: (ms: number) => {
+				now = T + ms + 500;
+				const index = started.position();
+				// The clock stands at T again for whatever is handed over next.
+				now = T;
+				return index;
+			},
+		};
+	};
+
+	it("inside a fragment, resumes at that fragment's start", async () => {
+		const { started, release, at } = reading();
+		release();
+		await started.done;
+		expect([at(0), at(999), at(1350), at(1800), at(2349), at(2700), at(3300)]).toEqual([0, 0, 1, 1, 1, 2, 2]);
+	});
+
+	it("in the pause after a fragment, resumes at the next fragment", async () => {
+		const { started, release, at } = reading();
+		release();
+		await started.done;
+		expect([at(1000), at(1200), at(2350), at(2650)]).toEqual([1, 1, 2, 2]);
+		// After the last fragment there is nothing after it: it is the last one.
+		expect(at(10_000)).toBe(2);
+	});
+
+	it("before the first audio, resumes at the start: nothing handed over yet, within the player's lag, or in the lead silence", async () => {
+		const { started, release, at } = reading(1.5);
+		expect(at(5000)).toBe(0);
+		release();
+		await started.done;
+		// 1.5 s of lead silence (S14) comes first; the first fragment is heard from 1500 ms.
+		expect([at(-400), at(0), at(1499), at(1500), at(2600)]).toEqual([0, 0, 0, 0, 1]);
 	});
 });
 

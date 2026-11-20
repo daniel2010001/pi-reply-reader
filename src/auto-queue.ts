@@ -35,6 +35,8 @@ export interface AutoQueue<T> {
 	readonly size: number;
 	/** The replies waiting, in order (S16). */
 	readonly items: readonly T[];
+	/** The reply being started, until its start settles (S16: it keeps its place in the machine's list meanwhile). */
+	readonly starting: T | undefined;
 }
 
 export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
@@ -62,11 +64,11 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 			return later();
 		}
 		const entry = items.shift() as { item: T; waited: boolean };
-		options.onChange?.();
 		const { item } = entry;
 		const mine = generation;
 		const current = () => mine === generation;
 		starting = { item };
+		options.onChange?.();
 		const attempt = (async () => options.start(item, current, entry.waited))().catch((): StartResult => "done");
 		void attempt.then((result) => {
 			starting = undefined;
@@ -77,6 +79,7 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 				options.onChange?.();
 				return later();
 			}
+			options.onChange?.();
 			// The reading just started makes the machine busy, so the next reply waits for it; anything pushed while this
 			// start was in flight is looked at now.
 			pump();
@@ -108,6 +111,9 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 		},
 		get items() {
 			return items.map((entry) => entry.item);
+		},
+		get starting() {
+			return starting?.item;
 		},
 	};
 }
