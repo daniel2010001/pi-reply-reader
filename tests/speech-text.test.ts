@@ -851,12 +851,9 @@ describe("S2 (k1)-(k5): readings, round 3 (L112)", () => {
 		expect(narration.diagnostics).toEqual([{ line: 1, token: "a+b" }]);
 	});
 
-	it("(k4) a token that starts and ends with * (Markdown emphasis in code) is not a glob (L114)", () => {
-		expect(speechText("Escribí `**negrita**` o `*nota*`, no `*.md`.")).toBe("Escribí **negrita** o *nota*, no cualquier md.");
-		expect(speechNarration("Escribí `**negrita**` o `*nota*`.", "es").diagnostics).toEqual([
-			{ line: 1, token: "**negrita**" },
-			{ line: 1, token: "*nota*" },
-		]);
+	it("(k4) letters wrapped in * or ** in code (Markdown emphasis) read only the letters, not as a glob (L114, L128)", () => {
+		expect(speechText("Escribí `**negrita**`, `*nota*` y `**matrícula**`, no `*.md`.")).toBe("Escribí negrita, nota y matrícula, no cualquier md.");
+		expect(speechNarration("Escribí `**negrita**` o `*nota*`.", "es").diagnostics).toEqual([]);
 		// Only letters inside count as emphasis; real globs wrapped in * stay globs (L124).
 		expect(speechText("Probá `*_test*` y `*.bak-20261026-*`.")).toBe(
 			"Probá cualquier test algo y cualquier bak veinte millones doscientos sesenta y un mil veintiséis algo.",

@@ -304,8 +304,8 @@ agent", "the branch origin main", "a commit", ", line 42", "1 point 1", "approxi
   keeps its slashes ("diecisiete/diez"), eight-digit stamps such as `20261026` are read as one number, and an
   English thousands comma in Spanish text (`1,044`) reads as a decimal.
 - Times, globs and tags are guessed from their shape: a ratio such as `1:30` reads as a time; a token of only
-  letters wrapped in `*` or `**` is taken for Markdown written as code (`**negrita**` stays as written), not a
-  glob; inline HTML pairs read like any other pair (`<em>todas</em>` becomes
+  letters wrapped in `*` or `**` is taken for Markdown written as code and reads only its letters
+  (`**negrita**` becomes "negrita"), not a glob; inline HTML pairs read like any other pair (`<em>todas</em>` becomes
   "em: todas"); and a tag glued to a word (`a<b>c`, `List<String>`) stays as written.
 - The voice speaks with Spanish pronunciation, also for English text (only the words the cleanup adds
   switch to English there).

@@ -869,6 +869,7 @@ function classified(core: string, previous: string, noun: string): string | unde
 		command(core, previous, noun) ??
 		fileName(core) ??
 		commitHash(core, previous) ??
+		emphasis(core) ??
 		glob(core) ??
 		slashWords(core)
 	);
@@ -957,13 +958,17 @@ function tags(text: string, before: string, after: string): string {
 	});
 }
 
+/** (k4, L128) Markdown emphasis written as code, `**negrita**` or `*nota*`, reads only its letters: "negrita". */
+function emphasis(core: string): string | undefined {
+	return /^(\*{1,2})(\p{L}+)\1$/u.exec(core)?.[2];
+}
+
 /**
  * (k4) A glob with a letter: a leading `*` reads "cualquier" (`*.hs.lan` "cualquier hs punto lan"), a trailing `/*`
  * "todo lo de" plus the folder (`bin/*` "todo lo de bin"), any other `*` "algo" (`lab-*` "lab algo").
  */
 function glob(core: string): string | undefined {
-	// (L114, L124) `**negrita**` and `*nota*`, only letters inside, are Markdown emphasis written as code, not globs.
-	if (!core.includes("*") || !/^[\p{L}\p{N}._~/*-]+$/u.test(core) || !/\p{L}/u.test(core) || /^(\*{1,2})\p{L}+\1$/u.test(core)) return undefined;
+	if (!core.includes("*") || !/^[\p{L}\p{N}._~/*-]+$/u.test(core) || !/\p{L}/u.test(core)) return undefined;
 	const folder = /^(.*[^/*])\/\*+$/.exec(core)?.[1];
 	if (folder !== undefined && !folder.includes("*")) return `${words.everythingIn} ${pathReading(`${folder}/`, "carpeta") ?? nameWords(folder)}`;
 	if (!core.startsWith("*")) return globWords(core);

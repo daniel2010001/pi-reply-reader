@@ -10,7 +10,7 @@
   punto"); dates with a year read in full (`2026-10-27` and `27/10/2026` "veintisiete de octubre de dos mil
   veintiséis", "October twenty seven, two thousand twenty six"); globs (`*.hs.lan` "cualquier hs punto lan",
   `bin/*` "todo lo de bin", `lab-*` "lab algo"; `**negrita**` and `*x*`, only letters inside `*` or `**`, are
-  not globs); tags, HTML or not: a pair reads its name and content (`<command>ls -la</command>` "command:
+  not globs and read only the letters: "negrita"); tags, HTML or not: a pair reads its name and content (`<command>ls -la</command>` "command:
   ls -la"), a lone `<archivo>` or `<iframe>` only its name ("archivo", "iframe"), a lone `</a>` or `<br/>`
   "la etiqueta a" ("the a tag"); `<< text >>` reads like quotes, only the text. Diagnostics no longer report
   globs and tags.
