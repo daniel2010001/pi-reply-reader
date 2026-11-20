@@ -27,6 +27,11 @@ export interface Reading {
 	/** Settles when the audio ends or the reading is stopped; rejects with a message for the user. */
 	readonly done: Promise<void>;
 	stop(): void;
+	/**
+	 * The index, in the fragments given, of the fragment being heard now (S15: a paused reading resumes from its start),
+	 * or of the next one during a pause after its fragment. 0 before any audio.
+	 */
+	position(): number;
 }
 
 const PAPLAY_MISSING =
@@ -34,6 +39,12 @@ const PAPLAY_MISSING =
 
 /** Supertonic's default seed is random; a fixed one makes the same text always sound the same. */
 const SEED = 42;
+
+/**
+ * How far behind the time since a fragment was handed over the player is taken to be (S15): its connection, Pulse's
+ * buffer and pipe make what is heard lag what was written, so a pause rather resumes a little early than skip words.
+ */
+const HEARD_LAG_MS = 500;
 
 /**
  * Speaks `fragments` (from `speechNarration`, or `spokenFragments` for plain text) with `speaker` at `speed` (Supertonic's voice speed, 1.1 by default; our pauses do not
@@ -83,6 +94,17 @@ export function startReading(options: {
 	let overdue = false;
 	/** Settles `done` from the player's exit status once it exited; set by `finished`. */
 	let settleExited: (() => void) | undefined;
+	/**
+	 * When each fragment handed to the player starts being heard (S15), modelled as real-time playback that waits for
+	 * audio when it runs out: a fragment starts when it is handed over or when the one before it ends, whichever is later.
+	 */
+	const heard: { index: number; at: number }[] = [];
+	let heardUntil = 0;
+	const handed = (index: number, samples: number, sampleRate: number): void => {
+		const at = Math.max(Date.now(), heardUntil);
+		heard.push({ index, at });
+		heardUntil = at + (samples / sampleRate) * 1000;
+	};
 
 	const run = async (): Promise<void> => {
 		const paplay = onPath("paplay", env);
@@ -191,7 +213,10 @@ export function startReading(options: {
 		};
 
 		const lead = Math.round((options.leadSilence ?? 0) * tts.sampleRate);
-		if (lead > 0) send(new Float32Array(lead));
+		if (lead > 0) {
+			handed(0, lead, tts.sampleRate);
+			send(new Float32Array(lead));
+		}
 		// Samples of pause already written after the last audible fragment; undefined before the first one.
 		let paused: number | undefined;
 		for (const [index, fragment] of list.entries()) {
@@ -218,12 +243,15 @@ export function startReading(options: {
 			// A silent fragment is dropped, but a stronger boundary it ends still counts: top up the pause written.
 			if (!speech) {
 				if (paused !== undefined && after > paused) {
+					handed(index + 1, after - paused, tts.sampleRate);
 					send(new Float32Array(after - paused));
 					paused = after;
 				}
 				continue;
 			}
 			// Each pause goes right after its own fragment, so the next synthesis overlaps it too.
+			handed(index, speech.length, tts.sampleRate);
+			if (after) handed(index + 1, after, tts.sampleRate);
 			send(after ? concat(speech, new Float32Array(after)) : speech);
 			paused = after;
 		}
@@ -243,6 +271,15 @@ export function startReading(options: {
 		stop() {
 			stopped = true;
 			if (player) terminate(player);
+		},
+		position() {
+			const now = Date.now() - HEARD_LAG_MS;
+			let index = 0;
+			for (const segment of heard) {
+				if (segment.at > now) break;
+				index = segment.index;
+			}
+			return Math.min(index, Math.max(0, list.length - 1));
 		},
 	};
 

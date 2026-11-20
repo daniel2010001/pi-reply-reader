@@ -17,6 +17,8 @@ export interface AutoQueueOptions<T> {
 	start: (item: T, current: () => boolean, waited: boolean) => Promise<StartResult>;
 	/** How often a waiting line checks again whether the machine is free. */
 	retryMs: number;
+	/** Called whenever the line changes (S16: the session publishes it for /read-queue and the footer). */
+	onChange?: () => void;
 }
 
 export interface AutoQueue<T> {
@@ -31,6 +33,8 @@ export interface AutoQueue<T> {
 	kick(): void;
 	/** How many replies wait. */
 	readonly size: number;
+	/** The replies waiting, in order (S16). */
+	readonly items: readonly T[];
 }
 
 export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
@@ -58,6 +62,7 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 			return later();
 		}
 		const entry = items.shift() as { item: T; waited: boolean };
+		options.onChange?.();
 		const { item } = entry;
 		const mine = generation;
 		const current = () => mine === generation;
@@ -69,6 +74,7 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 				// Taken between the check and the claim: try again on the next check, not in a tight loop. It waits for
 				// that reading too.
 				items.unshift({ item, waited: true });
+				options.onChange?.();
 				return later();
 			}
 			// The reading just started makes the machine busy, so the next reply waits for it; anything pushed while this
@@ -80,10 +86,12 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 	return {
 		push(item) {
 			items.push({ item, waited: false });
+			options.onChange?.();
 			pump();
 		},
 		clear(keep) {
 			items = keep ? items.filter((entry) => keep(entry.item)) : [];
+			options.onChange?.();
 			if (!keep || !starting || !keep(starting.item)) generation++;
 			clearTimeout(timer);
 			timer = undefined;
@@ -97,6 +105,9 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 		},
 		get size() {
 			return items.length;
+		},
+		get items() {
+			return items.map((entry) => entry.item);
 		},
 	};
 }

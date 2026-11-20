@@ -238,7 +238,7 @@ describe("one reading per machine (T21)", { timeout: 30000 }, () => {
 		start("b", ["read P1.R1"]);
 		await a.exited;
 		expect(alive(playerA)).toBe(false);
-		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc stops", null], consumedEsc: [null] });
+		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", null], consumedEsc: [null] });
 	});
 
 	it("a reading still loading the voice when a newer one starts never plays, and ends quietly", async () => {
@@ -251,7 +251,7 @@ describe("one reading per machine (T21)", { timeout: 30000 }, () => {
 		await a.exited;
 		const file = join(root, `play-${a.child.pid}.pid`);
 		if (existsSync(file)) expect(alive(Number(readFileSync(file, "utf8")))).toBe(false);
-		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc stops", null], consumedEsc: [null] });
+		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", null], consumedEsc: [null] });
 		expect(alive(playerB)).toBe(true);
 	});
 
@@ -262,7 +262,7 @@ describe("one reading per machine (T21)", { timeout: 30000 }, () => {
 		expect((await ran(b)).notes).toEqual([["Reading stopped.", "info"]]);
 		await a.exited;
 		expect(alive(playerA)).toBe(false);
-		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc stops", null], consumedEsc: [null] });
+		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", null], consumedEsc: [null] });
 		const c = start("c", ["read-stop"]);
 		expect((await ran(c)).notes).toEqual([["Nothing is being read.", "info"]]);
 	});
@@ -335,6 +335,8 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 	const go = (file: string) => writeFileSync(join(root, file), "");
 	/** Lets the player `pid` play to its end. */
 	const finish = (pid: number) => writeFileSync(join(root, `end-${pid}`), "");
+	/** Footers without the waiting count (S16), where which session reads first is not fixed. */
+	const plain = (statuses: (string | null)[]) => statuses.map((status) => status?.replace(/ · \d+ waiting/, "") ?? null);
 	const lines = () => (existsSync(join(root, "log")) ? readFileSync(join(root, "log"), "utf8").trim().split("\n") : []);
 	const hasPlayer = (s: Session) => existsSync(join(root, `play-${s.child.pid}.pid`));
 	/** What the session's footer showed, once it showed `n` readings and cleared after the last. */
@@ -366,11 +368,12 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 		finish(playerA);
 		await a.exited;
 		await playThrough(() => b.seen().statuses.filter((x) => x === null).length === 2);
-		expect(await readings(b, 2)).toEqual(["Reading P3.R1 on local · 1 waiting · Esc stops", null, "Reading P4.R1 on local · Esc stops", null]);
+		expect(await readings(b, 2)).toEqual(["Reading P3.R1 on local · 1 waiting · Esc pauses", null, "Reading P4.R1 on local · Esc pauses", null]);
 		go("go-b");
 		await b.exited;
 		expect(lines()).toEqual([`start ${a.child.pid}`, `end ${a.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`]);
-		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc stops", null] });
+		// S16: the footer counts what waits on the machine, here the other session's two replies.
+		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", "Reading P2.R1 on local · 2 waiting · Esc pauses", null] });
 		expect(b.seen().notes).toEqual([["Auto-read on: full replies.", "info"]]);
 	});
 
@@ -393,7 +396,8 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 		// Never two players at once: every start is followed by its own end.
 		for (let i = 0; i < log.length; i += 2) expect(log[i + 1]).toBe(log[i].replace("start", "end"));
 		expect(log).toHaveLength(6);
-		for (const s of [b, c]) expect(s.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc stops", null] });
+		// Which of the two goes first is not fixed, so the machine-wide count (S16) is left out.
+		for (const s of [b, c]) expect({ ...s.seen(), statuses: plain(s.seen().statuses) }).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc pauses", null] });
 	});
 
 	for (const [what, commands, notes] of [
@@ -417,50 +421,46 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 			go("go-b");
 			go("go-c");
 			await Promise.all([a.exited, b.exited, c.exited]);
-			expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P5.R1 on local · Esc stops", null] });
+			expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P5.R1 on local · Esc pauses", null] });
 			expect(c.seen().notes).toEqual(notes);
-			expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc stops", null] });
+			expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", "Reading P2.R1 on local · 2 waiting · Esc pauses", null] });
 		});
 	}
 
-	it("Esc in the session reading stops it and drops every waiting reply on the machine; later ones are read", async () => {
-		const a = start("a", ["read", "await esc-a", "esc"]);
+	it("Esc pauses the reading (S15): it keeps the machine with no player, the waiting replies wait, and play after it resumes", async () => {
+		const a = start("a", ["read", "await esc-a", "esc", "await esc2-a", "esc"]);
 		const playerA = await playerOf(a.child);
-		const b = auto("b", ["Uno."], ["await later-b", "turn Dos."]);
+		const b = auto("b", ["Uno."]);
 		await noted(b);
 		await wait();
 		go("esc-a");
 		await waitFor(() => !alive(playerA));
-		await a.exited;
+		const file = join(root, "run", "pi-reply-reader", "reading.json");
+		await waitFor(() => (JSON.parse(readFileSync(file, "utf8")) as { paused?: boolean }).paused === true);
+		const entry = JSON.parse(readFileSync(file, "utf8")) as { pid: number; player?: number; paused?: boolean };
+		expect([entry.pid, entry.player, entry.paused]).toEqual([a.child.pid, undefined, true]);
 		await wait();
 		expect(hasPlayer(b)).toBe(false);
-		go("later-b");
+		go("esc2-a");
+		const pidFile = join(root, `play-${a.child.pid}.pid`);
+		await waitFor(() => readFileSync(pidFile, "utf8").trim() !== "" && Number(readFileSync(pidFile, "utf8")) !== playerA);
+		finish(Number(readFileSync(pidFile, "utf8")));
+		await a.exited;
 		await playThrough(() => b.seen().statuses.includes(null));
 		go("go-b");
 		await b.exited;
-		expect(a.seen()).toMatchObject({ notes: [["esc", { consume: true }]], statuses: ["Reading P2.R1 on local · Esc stops", null] });
-		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P4.R1 on local · Esc stops", null] });
-	});
-
-	it("Esc drops the waiting replies before it frees the machine, so no waiter slips in between (S8)", async () => {
-		const a = start("a", ["read", "await esc-a", "esc"]);
-		await playerOf(a.child);
-		const dir = join(root, "run", "pi-reply-reader");
-		// The player is recorded in the entry; nothing else writes it until Esc.
-		await waitFor(() => existsSync(join(dir, "reading.json")) && readFileSync(join(dir, "reading.json"), "utf8").includes('"player"'));
-		const events: string[] = [];
-		// inotify reports changes in the order they happened.
-		const watcher = watch(dir, (_type, file) => {
-			if (file === "waiting.json" || file === "reading.json") events.push(file);
-		});
-		try {
-			go("esc-a");
-			await a.exited;
-			await waitFor(() => events.includes("waiting.json") && events.includes("reading.json"));
-		} finally {
-			watcher.close();
-		}
-		expect(events[0]).toBe("waiting.json");
+		expect(a.seen().notes).toEqual([
+			["esc", { consume: true }],
+			["esc", { consume: true }],
+		]);
+		expect(a.seen().statuses).toEqual([
+			"Reading P2.R1 on local · Esc pauses",
+			"Reading P2.R1 on local · 1 waiting · Esc pauses",
+			"Paused P2.R1 · 1 waiting · Esc resumes · /read-stop ends",
+			"Reading P2.R1 on local · 1 waiting · Esc pauses",
+			null,
+		]);
+		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc pauses", null] });
 	});
 
 	it("a leftover mutex that cannot be deleted (read-only folder) never hangs: auto-read is busy, /read goes ahead (S1, S8)", () => {
@@ -508,7 +508,8 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		const log = lines();
 		expect(log).toHaveLength(10);
 		for (let i = 0; i < log.length; i += 2) expect(log[i + 1]).toBe(log[i].replace("start", "end"));
-		expect(b.seen().statuses).toEqual(["Reading P3.R1 on local · 1 waiting · Esc stops", null, "Reading P4.R1 on local · Esc stops", null]);
+		// The machine-wide count (S16) depends on which session goes first, so it is left out.
+		expect(plain(b.seen().statuses)).toEqual(["Reading P3.R1 on local · Esc pauses", null, "Reading P4.R1 on local · Esc pauses", null]);
 	});
 
 	it("a manual /read cancelled at the output question drops nothing and stops nothing (S8)", async () => {
@@ -564,7 +565,7 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		await playThrough(() => b.seen().statuses.includes(null));
 		go("go-b");
 		await b.exited;
-		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc stops", null] });
+		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Esc pauses", null] });
 	});
 
 	it("with auto-read on, a manual /read still stops another session's reading at once (S1)", async () => {
@@ -576,7 +577,7 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		expect(alive(playerB)).toBe(true);
 		expect((await ran(b)).notes).toEqual([["Auto-read on: full replies.", "info"]]);
 		await a.exited;
-		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc stops", null] });
+		expect(a.seen()).toMatchObject({ notes: [], statuses: ["Reading P2.R1 on local · Esc pauses", null] });
 	});
 
 	describe("ask before cutting (T33, S8)", () => {
@@ -595,7 +596,7 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 			go("go-b");
 			await Promise.all([a.exited, b.exited]);
 			expect(lines()).toEqual([`start ${a.child.pid}`, `end ${a.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`]);
-			expect(b.seen()).toMatchObject({ notes: [], statuses: ["Reading P1.R1 on local · Esc stops", null] });
+			expect(b.seen()).toMatchObject({ notes: [], statuses: ["Reading P1.R1 on local · Esc pauses", null] });
 		});
 
 		it("dismissing it in another process changes nothing: the reading plays on, the waiting auto-reads stay, nothing else plays", async () => {

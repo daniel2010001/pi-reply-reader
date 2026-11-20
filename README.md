@@ -7,7 +7,8 @@ Read a [Pi](https://github.com/earendil-works/pi) or Gentle Shell reply aloud, o
 another machine you reach over SSH. `/read notes.md` reads a Markdown file the same way.
 
 - **Nothing plays by itself.** A reading starts only with `/read`. A new reading stops the one playing, even
-  in another Pi session on the same machine, so two never overlap, and `/read-stop` or Esc stops it.
+  in another Pi session on the same machine, so two never overlap. Esc or `/read-pause` pauses it and
+  resumes it; `/read-stop` ends it.
 - **Local and offline after setup.** Speech is synthesized on the machine that runs Pi, on the CPU, with no
   API key. Your replies never leave the machine (except as audio to an output you configured).
 - **Nothing enters the model context.**
@@ -54,31 +55,36 @@ sentence is synthesized, about 1-2 s.
 | `/read <id>` | | Reads one reply by ID (see below). |
 | `/read <file.md>` | | Reads a Markdown file (see below). |
 | `/read <target>#<section> [rest]` | | Reads one section of a file or reply (see [Reading one section](#reading-one-section)). |
-| `/read-stop` | Stop the reading playing, in this or another Pi session (Esc or a new /read stop it too) | Stops the reading playing, in any Pi session of yours on this machine, and says `Reading stopped.`; with nothing playing anywhere, says `Nothing is being read.` |
+| `/read-stop` | End the reading, playing or paused, in this or another Pi session, and drop the ones waiting (a new /read ends it too) | Ends the reading playing or paused, in any Pi session of yours on this machine, drops every reading waiting on the machine, and says `Reading stopped.`; with nothing playing anywhere, says `Nothing is being read.` |
+| `/read-pause` | Pause the reading playing, in this or another Pi session, or resume it from the sentence it was in (Esc too) | See [Pause and resume](#pause-and-resume). |
+| `/read-queue` | List the readings waiting on this machine, in order, with their sessions | See [The line](#the-line). |
+| `/read-next` | End the reading, playing or paused, in this or another Pi session, and go on with the next one waiting | See [The line](#the-line). |
 | `/read-auto [on\|questions\|off]` | Read each new reply aloud as soon as it is written, and each prompt that waits for you, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles | See [Auto-read](#auto-read). |
 | `/read-output [name]` | Choose where readings sound: local or an output from outputs.json | With a name, switches to that output; without one, asks. See [Outputs](#outputs). |
 | `/read-voice [male\|female]` | Choose the voice for the next readings: male (default) or female | With a name, switches the voice; without one, asks. |
 | `/read-speed [n]` | Choose the voice speed for the next readings, 0.5 to 2.0 (default 1.1); saved for later sessions | With a number, sets that speed; without one, offers 0.8 to 1.5. See [Speed](#speed). |
 
-While a reading plays, the footer shows `Reading P12.R1 on local · Esc stops` (or the file name, as in
-`Reading notes.md on local · Esc stops`). While readings wait in this session's line (auto-reads and
-**Read after it**, see [Auto-read](#auto-read)), it adds how many: `Reading P12.R2 on local · 2 waiting · Esc stops`.
+While a reading plays, the footer shows `Reading P12.R1 on local · Esc pauses` (or the file name, as in
+`Reading notes.md on local · Esc pauses`); while it is paused, `Paused P12.R1 · Esc resumes · /read-stop ends`.
+While readings wait on the machine (auto-reads, **Read after it** and prompts, in any session, see
+[Auto-read](#auto-read)), it adds how many: `Reading P12.R2 on local · 2 waiting · Esc pauses`.
 
-- **Esc** stops the reading. While a reading plays, Esc is taken by the reader, so it does not also
-  interrupt a running agent turn at that moment; press it again for that.
-- **`/read-stop`** stops the reading and says `Reading stopped.`; with nothing playing it says
+- **Esc** pauses the reading, and resumes it when paused (see [Pause and resume](#pause-and-resume)). While a
+  reading plays or is paused, Esc is taken by the reader, so it does not also interrupt a running agent turn
+  at that moment; press it again for that.
+- **`/read-stop`** ends the reading, playing or paused, and says `Reading stopped.`; with nothing playing it says
   `Nothing is being read.` and changes nothing.
 - **A new `/read`** while something is being read, here or in another session, first asks
   `Something is being read.`: **Stop it and read now** stops the reading playing and starts the new one;
   **Read after it** waits like an auto-read (see [Auto-read](#auto-read)) and plays once nothing does; Esc
   dismisses the question and changes nothing. With nothing playing, or without a UI, `/read` reads at once.
-  `/read-stop` and Esc never ask.
+  `/read-stop`, `/read-pause`, `/read-next` and Esc never ask.
 - **One reading per machine.** The last reading wins across every Pi or Gentle Shell session of your user on
   the machine: a new `/read` in one session (answered **Stop it and read now**) stops a reading playing in
   another, and `/read-stop` stops it too. The session whose reading was stopped just clears its footer, with no error. Sessions find each other
   through a small file in `$XDG_RUNTIME_DIR/pi-reply-reader/` (an entry left by a session that is gone is
-  ignored). Without a usable `XDG_RUNTIME_DIR`, each session only stops its own readings. Esc only stops the
-  reading of the session you press it in.
+  ignored). Without a usable `XDG_RUNTIME_DIR`, each session only stops its own readings. Esc only pauses the
+  reading of the session you press it in; `/read-pause` reaches any session's.
 - The output and the voice last for the session. A new session starts with the male voice and asks for the
   output again on its first reading (only when there is more than `local` to choose from).
 - **A player that hangs is ended.** When `paplay` takes no audio for 15 s while audio waits for it (say, its
@@ -94,6 +100,50 @@ While a reading plays, the footer shows `Reading P12.R1 on local · Esc stops` (
   starts or the next reading starts. Only players started by this package (marked with
   `--client-name=pi-reply-reader` and the `PI_REPLY_READER_OWNER` variable naming a process that is gone, in
   the same PID namespace) are touched.
+
+### Pause and resume
+
+`/read-pause` pauses the reading playing, in this or any other Pi session of yours on the machine, and says
+`Reading paused.`; run again, it resumes it and says `Reading resumed.`. Esc does the same for the reading of
+the session you press it in. With nothing playing or paused it says `Nothing is being read.`.
+
+Pausing ends the player (`paplay` cannot be paused cleanly), so the timeout above never fires on a paused
+reading. The reading keeps its turn on the machine: nothing waiting starts while it is paused. Resuming
+synthesizes again from the start of the sentence, list item or table row that was being heard, with the same
+voice, speed and output, so it repeats a few words rather than skipping any (the position is estimated from
+the time each part was handed to the player, half a second early). `/read-stop` ends a paused reading as it
+ends a playing one, and drops what waits.
+
+A prompt's reading (see [Prompts that wait for you](#prompts-that-wait-for-you)) is not paused: `/read-pause`
+or Esc ends it, says `Reading stopped: a prompt is not paused.` (Esc says nothing), and the next reading
+waiting starts. A reading of the standalone `reply-reader` command (or of a Pi running an older version of
+this package) cannot be paused from Pi: `/read-pause` says `The reading playing cannot be paused (it is not in
+a Pi session); /read-stop ends it.`.
+
+### The line
+
+`/read-queue` lists what waits on the machine, in the order each joined its line: the reply ID, file name or
+prompt kind (`question`, `command confirmation`, `dialog`), and the session (its `/name`, else its working
+folder; yours is marked):
+
+```text
+Waiting on this machine:
+1. P12.R2 · api (this session)
+2. notes.md · docs
+3. question · api (this session)
+```
+
+With nothing waiting it says `Nothing waits to be read.`. Each session publishes its line next to the
+reading entry in `$XDG_RUNTIME_DIR/pi-reply-reader/` (`line-<id>.json`, removed when the line empties or the
+session ends; a dead session's is ignored). One session's readings play in order; when several sessions have
+readings waiting, the one whose session sees the machine free first plays next, usually the first listed but
+not guaranteed. Without a usable `XDG_RUNTIME_DIR` no session can see another's line, so `/read-queue` lists
+this session's only and says so (`Waiting in this session (other sessions are not visible without
+XDG_RUNTIME_DIR):`), and the footer counts this session's.
+
+`/read-next` ends the reading, playing or paused, in this or another session, without dropping the line: the
+next reading waiting starts after the usual 1.5 s of silence, saying which it is. It says `Skipped to the next
+reading.`, or `Reading stopped; nothing else waits.` when nothing waits, or `Nothing is being read.`.
 
 ### Reply IDs
 
@@ -139,23 +189,24 @@ read once, in order. `/read-auto questions` reads only each reply's closing **Ne
 (nothing when a reply has none); `/read-auto off` stops.
 `/read-auto` alone toggles (off → on in full, on → off). It is per session and starts off in every new
 session. Replies from before you turned it on are never read. Auto-readings use the same output, voice,
-speed, footer and stop keys (Esc, `/read-stop`) as `/read`, and still follow one reading per machine.
+speed, footer and keys (Esc pauses, `/read-stop` ends) as `/read`, and still follow one reading per machine.
 
 Auto-read never interrupts. A reply that is due while a reading plays, in this session or in any other Pi or
 Gentle Shell session or `reply-reader` command on the machine, waits and is read once nothing plays; one
-session's replies are read in order. While replies wait, the footer of the session reading counts its own
-waiting ones (`· 2 waiting ·`); another session's waiting replies are not counted. When a reading ends and
+session's replies are read in order. While readings wait, the footer of the session reading counts every one
+waiting on the machine (`· 2 waiting ·`), and `/read-queue` lists them (see [The line](#the-line)). When a reading ends and
 another waits, there is about 1.5 s of silence, then the next one starts by saying which it is, in its own
 language: `Respuesta P12.R2.` / `Reply P12.R2.` for a reply, `Archivo notas.md.` / `File notes.md.` for a
 file. A reading with nothing before it starts at once, with no announcement. Explicit actions still win: a manual
-`/read` (or a read from pi-reply-thread's Alt+R view) answered **Stop it and read now**, `/read-stop` and Esc
-stop the reading playing, as always, and also drop every auto-read waiting on the machine at that moment; replies due after that are read
+`/read` (or a read from pi-reply-thread's Alt+R view) answered **Stop it and read now** and `/read-stop`
+end the reading playing, as always, and also drop every auto-read waiting on the machine at that moment; replies due after that are read
 as usual. The standalone `reply-reader` command drops them too when it starts reading. `/read-auto off` and the
 end of the session drop that session's waiting replies. Without a usable `XDG_RUNTIME_DIR`, a reply only waits
-for its own session's readings.
+for its own session's readings. Esc and `/read-pause` drop nothing: a paused reading keeps the machine, so what
+waits keeps waiting; `/read-next` skips to it.
 
 A manual `/read` (or a read from Alt+R) that you answer **Read after it** joins the same line: it is read after
-the replies already waiting in its session, once nothing plays, and `/read-stop`, Esc or another manual reading
+the replies already waiting in its session, once nothing plays, and `/read-stop` or another manual reading
 drops it, here or in any session. It is not an auto-read, so `/read-auto off` keeps it; the end of the session
 drops it.
 
@@ -222,7 +273,8 @@ voice, saved speed, outputs and one-reading-per-machine rule as `/read`. `-` rea
 If the voice is missing, the command asks `[y/N]` before downloading it. Without a terminal, or when reading
 standard input, it exits with an error instead of downloading. Ctrl+C, `kill` or closing the terminal stops
 the reading. A new `/read` or `/read-stop` in any Pi session stops a command reading, and the command stops a
-Pi reading without asking, dropping the auto-reads waiting in Pi sessions as a manual `/read` does.
+Pi reading without asking, dropping the auto-reads waiting in Pi sessions as a manual `/read` does. Ctrl+C
+stops it; it has no pause, and `/read-pause` in Pi cannot pause it.
 
 Exit codes: 0 read (or nothing to read, or stopped by another reading), 1 cannot read, download or play,
 2 bad arguments, 129/130/143 stopped by SIGHUP, Ctrl+C or SIGTERM.

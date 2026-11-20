@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Pause and resume: `/read-pause` pauses the reading playing, in this or any other Pi session on the machine
+  (`Reading paused.`), and run again resumes it (`Reading resumed.`); with nothing playing it says `Nothing is
+  being read.`. Esc now pauses and resumes the reading of its session instead of stopping it, and no longer
+  drops what waits. A paused reading's player is ended (so the player timeout never fires on it) but it keeps
+  its turn on the machine: nothing waiting starts. Resuming starts again from the sentence, item or row that was
+  being heard, with the same voice and speed. The footer reads `Reading P12.R1 on local · Esc pauses`, and
+  while paused `Paused P12.R1 · Esc resumes · /read-stop ends`. `/read-stop` ends a reading, playing or paused,
+  and drops what waits, as before. A prompt's reading is ended instead of paused (`Reading stopped: a prompt is
+  not paused.`); a `reply-reader` command reading cannot be paused from Pi.
+- See and skip the line: `/read-queue` lists the readings waiting on the machine, in order, with their session
+  (`Waiting on this machine:` / `1. P12.R2 · api (this session)`), or says `Nothing waits to be read.`;
+  `/read-next` ends the reading, playing or paused, here or in another session, and the next one waiting starts
+  with its announcement (`Skipped to the next reading.`; `Reading stopped; nothing else waits.` when nothing
+  does). Each session publishes its line under `$XDG_RUNTIME_DIR/pi-reply-reader/`, and the footer's
+  `· N waiting ·` now counts every session's; without a usable `XDG_RUNTIME_DIR` both stay per session.
 - Auto-read also reads the prompts that wait for you, through the same line: an `ask_user_question` /
   `ask_user_choice` call reads each question with its option labels only ("Pregunta 1 de 2: ¿Cómo suena?
   Opciones: uno, Bien; dos, Mal."), a command confirmation reads only the program ("Confirmación de comando:
@@ -13,7 +28,7 @@
 - Between queued readings (auto-reads and **Read after it**): about 1.5 s of silence, then the next reading
   says which it is, in its language (`Respuesta P12.R2.` / `Reply P12.R2.`, `Archivo notas.md.` / `File
   notes.md.`). A reading with nothing before it starts as before. While readings wait, the footer counts them:
-  `Reading P12.R2 on local · 2 waiting · Esc stops`.
+  `Reading P12.R2 on local · 2 waiting · Esc pauses`.
 - A player that hangs no longer piles up: when `paplay` takes no audio for 15 s (say, a Pulse server behind an
   SSH tunnel whose far side does not answer), or does not finish within the audio's length plus 15 s, the
   reading fails with `Playback on "<output>" failed: timed out`. `REPLY_READER_PLAYER_TIMEOUT` sets the 15 s
