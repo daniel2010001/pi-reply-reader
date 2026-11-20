@@ -4,9 +4,10 @@ import { resolve } from "node:path";
 import { loadOutputs } from "./outputs.ts";
 import { type SherpaTts, startReading } from "./playback.ts";
 import { playerTimeoutMs, signalledPlayersEnded } from "./player.ts";
+import { projectChanged, projectOf } from "./project.ts";
 import { openReadingLock } from "./reading-lock.ts";
 import { loadSpeed, parseSpeed, SPEED_HINT } from "./settings.ts";
-import { speechNarration } from "./speech-text.ts";
+import { projectAnnouncement, speechNarration } from "./speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice, VOICE_ARCHIVE, type VoiceArchive } from "./voice.ts";
 
 /** What `reply-reader --help` prints (S6). */
@@ -188,11 +189,15 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 	// Without a usable XDG_RUNTIME_DIR there is no claim, and only Ctrl+C stops this reading. Like a manual /read it drops
 	// the auto-reads waiting in Pi sessions (S8, T33); it never asks.
 	const claim = openReadingLock(env)?.claim({ dropWaiting: true });
+	// A project other than the last reading's on the machine is said first (S19); without XDG_RUNTIME_DIR this process
+	// remembers none, so it always is.
+	const project = projectOf(deps.cwd ?? process.cwd());
+	const said = projectChanged(env, project, {}) ? projectAnnouncement(project, narration.language) : [];
 	let interrupted = false;
 	const reading = startReading({
 		voice,
 		speaker,
-		fragments: narration.fragments,
+		fragments: [...said, ...narration.fragments],
 		output,
 		env,
 		loadSherpa: deps.loadSherpa,

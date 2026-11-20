@@ -187,6 +187,19 @@ export function announcement(kind: "reply" | "file", name: string, language: Lan
 	return fragments;
 }
 
+/**
+ * (S19) What a reading of another project than the last one says first: the project's name, read like any text in
+ * `language` ("pi-reply-reader.", "p uno."), with a section break after it.
+ */
+export function projectAnnouncement(project: string, language: Language): Fragment[] {
+	// As inline code, so a name's own `_` or `*` is not read as emphasis.
+	const named = project.includes("`") ? project : `\`${project}\``;
+	const fragments = speechNarration(`${named}.`, language).fragments;
+	const last = fragments.at(-1);
+	if (last) last.after = "paragraph";
+	return fragments;
+}
+
 /** (S12) Text already meant for speech, split as playback speaks it: every fragment a paragraph's. */
 export function spokenFragments(text: string): Fragment[] {
 	return fragmentsOf(text.split("\n").map((line) => ({ text: line, role: "paragraph" })));

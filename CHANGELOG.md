@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Readings say their project when it changes: a reading whose project (the folder name of its Git root, or of
+  its working folder outside a repository) differs from the last reading's on the machine, or the first one,
+  starts with the project's name, then its announcement if it waited ("pi-reply-reader. Respuesta P tres, R
+  dos."). Readings of the same project say none. Every Pi session and the `reply-reader` command share the
+  memory under `$XDG_RUNTIME_DIR/pi-reply-reader/`; resuming does not repeat it.
+- `pauseKey` refuses `ctrl` with a digit and any `super` key (one warning, Alt+M is used): terminals without
+  the Kitty keyboard protocol never send them, so they silently never fired.
 - Esc is Pi's again: the reader never takes it. Esc interrupts the agent and closes dialogs and screens
   (pi-reply-thread's Alt+R view, `ask_user_question`) even while a reading plays or is paused. Before, a reading
   took every Esc and paused or resumed instead, so a view could not be closed and the agent could not be

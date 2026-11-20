@@ -10,13 +10,22 @@ import { keyName, loadPauseKey } from "../src/pause-key.ts";
 import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
 import { playerTimeoutMs, reapOrphans } from "../src/player.ts";
 import { questionsSection } from "../src/questions.ts";
+import { projectChanged, projectOf } from "../src/project.ts";
 import { askedQuestions, commandMarkdown, commandProgram, dialogTitle, QUESTION_TOOLS, questionsMarkdown } from "../src/prompts.ts";
 import { isPing, parseReadRequest, READER_EVENTS, READER_EVENTS_VERSION } from "../src/reader-events.ts";
 import { type Claim, openReadingLock, type WaitingItem } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { sectionFrom } from "../src/sections.ts";
 import { formatSpeed, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSpeed } from "../src/settings.ts";
-import { announcement, detectLanguage, type Fragment, type Language, languageOfWords, speechNarration } from "../src/speech-text.ts";
+import {
+	announcement,
+	detectLanguage,
+	type Fragment,
+	type Language,
+	languageOfWords,
+	projectAnnouncement,
+	speechNarration,
+} from "../src/speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
 
 const STATUS = "reply-reader";
@@ -138,7 +147,8 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * interrupts (S8 Queue, T32): a reply due while a reading plays here or in another session waits, in order, and is read
  * once the machine is free; an explicit /read (or read request) or /read-stop drops every reply waiting on the
  * machine (the pause key pauses instead, S15), and /read-auto off or the session's end drops this session's. A reading that waited in this line starts after
- * 1.5 s of silence by saying which reply or file it is, and the footer counts what waits (S14, T38).
+ * 1.5 s of silence by saying which reply or file it is, and the footer counts what waits (S14, T38). A reading whose
+ * project (its Git root's folder name, src/project.ts) differs from the last reading's on the machine says it first (S19).
  * Ask before cutting (S8, T33): a manual /read or read request while a reading plays anywhere asks "Something is being
  * read.": "Stop it and read now" (the above), "Read after it" (it waits like an auto-read, after this session's waiting
  * replies, and explicit actions drop it), or dismissed (nothing changes). Without a UI, or with nothing playing, it reads.
@@ -159,11 +169,15 @@ export function createReplyReader(
 		holdLine?: () => boolean;
 		/** Test seam: replaces YIELD_CAP_MS (S16). */
 		yieldCapMs?: number;
+		/** Test seam: the project this process remembers at first, without XDG_RUNTIME_DIR (S19), as after a reading of it. */
+		lastProject?: string;
 	} = {},
 ) {
 	const yieldCapMs = deps.yieldCapMs ?? YIELD_CAP_MS;
 	const env = deps.env ?? process.env;
 	const hostname = deps.hostname ?? osHostname();
+	/** The last reading's project when there is no usable XDG_RUNTIME_DIR to share it through: this process's (S19). */
+	const lastProject: { last?: string } = { last: deps.lastProject };
 
 	return (pi: ExtensionAPI): void => {
 		/** This session's reading, playing or paused (S15). */
@@ -545,10 +559,14 @@ export function createReplyReader(
 			const timeoutMs = playerTimeoutMs(env, (message) => ctx.ui.notify(message, "warning"));
 			// Resuming (S15) uses the voice, speed and output the reading started with.
 			const voiceOf = SPEAKERS[speaker];
-			const fragments: readonly Fragment[] =
-				auto?.announce && auto.announce !== "prompt"
-					? [...announcement(auto.announce, name, narration.language), ...narration.fragments]
-					: narration.fragments;
+			// Started: a project other than the last reading's on the machine is said first (S19), then which it is (S14).
+			const project = projectOf(ctx.cwd);
+			const said = projectChanged(env, project, lastProject) ? projectAnnouncement(project, narration.language) : [];
+			const fragments: readonly Fragment[] = [
+				...said,
+				...(auto?.announce && auto.announce !== "prompt" ? announcement(auto.announce, name, narration.language) : []),
+				...narration.fragments,
+			];
 			const state: Current = { ctx, claim, name, output: output.name, prompt: auto?.prompt, from: 0, play: () => {} };
 			/** Stopped by another session: no message, just the footer. */
 			const stoppedElsewhere = (): void => {
@@ -585,7 +603,8 @@ export function createReplyReader(
 						stop();
 					});
 			};
-			state.play = (from) => play(from);
+			// Resuming never says the project again, even when paused while it was being said (S19).
+			state.play = (from) => play(Math.max(from, said.length));
 			play(0, auto?.announce ? GAP_SECONDS : undefined);
 			// Another session's /read-stop, newer reading, /read-next or /read-pause (S1, S15, S16) reach this reading through
 			// its entry; the footer also follows what waits on the machine.

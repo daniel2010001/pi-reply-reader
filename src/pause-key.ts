@@ -12,8 +12,14 @@ export const DEFAULT_PAUSE_KEY = "alt+m";
 
 const SETTINGS = "settings.json";
 const MODIFIERS = ["ctrl", "alt", "shift", "super"] as const;
-/** A letter, a digit or F1 to F12: keys every terminal sends with their modifiers. */
+/**
+ * A letter, a digit or F1 to F12. With ctrl or alt (and maybe shift), terminals send these, with two exceptions
+ * `parsePauseKey` rejects: ctrl with a digit and any super key, which only terminals speaking the Kitty keyboard
+ * protocol deliver.
+ */
 const KEY = /^(?:[a-z0-9]|f(?:[1-9]|1[0-2]))$/;
+/** Why a key only the Kitty keyboard protocol delivers cannot be the pause key. */
+const KITTY_ONLY = "terminals without the Kitty keyboard protocol never send it";
 
 /** Pi's default keybindings with a modifier, every platform (docs/keybindings.md), normalized. */
 const PI_KEYS = [
@@ -58,8 +64,9 @@ export function parsePauseKey(text: string): { key: string } | { problem: string
 	const last = parts.pop() ?? "";
 	const known = parts.every((part) => (MODIFIERS as readonly string[]).includes(part)) && new Set(parts).size === parts.length;
 	if (!known || !KEY.test(last) || !parts.some((part) => part !== "shift")) {
-		return { problem: "it is not a key the reader can use (ctrl, alt or super, maybe with shift, plus a letter, digit or F1-F12, as alt+m)" };
+		return { problem: "it is not a key the reader can use (ctrl or alt, maybe with shift, plus a letter, digit or F1-F12, as alt+m)" };
 	}
+	if (parts.includes("super") || (parts.includes("ctrl") && /^[0-9]$/.test(last))) return { problem: KITTY_ONLY };
 	const key = normalize(text.trim());
 	const owner = TAKEN.get(key);
 	return owner ? { problem: `${owner} already uses it` } : { key };

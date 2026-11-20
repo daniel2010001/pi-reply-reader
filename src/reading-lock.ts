@@ -12,6 +12,7 @@ export { PLAYER_MARK } from "./player.ts";
  * reused by a newer process does not count as the one recorded. Next to it, `waiting.json` holds the waiting mark of
  * the auto-read queue (S8, T32) and `reading.lock` is a short mutex around each check-and-write. Each Pi session
  * publishes what waits in its line as `line-<token>.json` (S16), so `/read-queue` and the footer see the machine's.
+ * `project.json` remembers the project of the last reading that started (S19).
  *
  * Pause (S15): `paused` asks the reading's own session to pause it (its player ends, the entry keeps the machine with
  * no player) or, once cleared, to resume it. Only entries marked `pausable` (a Pi session that knows how) take it; a
@@ -109,6 +110,11 @@ export interface ReadingLock {
 	 * out. Two sessions with the same label are told apart as `<label> #<tag>` (S16, L135).
 	 */
 	waitingList(): MachineWaiting[];
+	/**
+	 * Makes `project` the one of the last reading that started on the machine (S19) and returns the one remembered
+	 * before it, undefined when none was.
+	 */
+	swapProject(project: string): string | undefined;
 }
 
 /** How long an explicit action waits for the mutex before acting anyway; an auto-read just tries later. */
@@ -135,6 +141,8 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 	const marks = join(dir, "waiting.json");
 	/** Held for the few microseconds of a check-and-write, so two sessions never both take a free machine (T32). */
 	const mutex = join(dir, "reading.lock");
+	/** `{ project }`: the project of the last reading that started, by any session or the command (S19). */
+	const projects = join(dir, "project.json");
 
 	const read = (): Entry | undefined => {
 		try {
@@ -326,6 +334,18 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 				},
 				() => "busy",
 			);
+		},
+		swapProject(project) {
+			const swap = (): string | undefined => {
+				let previous: string | undefined;
+				try {
+					const saved = (JSON.parse(readFileSync(projects, "utf8")) as { project?: unknown })?.project;
+					if (typeof saved === "string") previous = saved;
+				} catch {}
+				if (previous !== project) put(projects, randomUUID(), { project });
+				return previous;
+			};
+			return exclusive(swap, swap);
 		},
 		busy,
 		waitingMark,

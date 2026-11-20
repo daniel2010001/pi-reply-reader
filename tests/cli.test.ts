@@ -64,6 +64,9 @@ beforeEach(() => {
 		XDG_CONFIG_HOME: join(root, "config"),
 		XDG_RUNTIME_DIR: join(root, "run"),
 	};
+	// The machine already remembers the project of `<root>/work`, as after an earlier reading there, so tests of other
+	// rules hear no project (S19); the S19 tests read elsewhere or without XDG_RUNTIME_DIR.
+	openReadingLock(env)!.swapProject("work");
 });
 
 afterEach(async () => {
@@ -143,6 +146,8 @@ interface RunOptions {
 	confirm?: (message: string) => Promise<boolean>;
 	signal?: AbortSignal;
 	archive?: VoiceArchive;
+	/** Where the command runs (S19 names its project); `<root>/work` by default. */
+	cwd?: string;
 }
 
 /** Runs main() the way bin/reply-reader.ts does, capturing what it prints and its exit code. */
@@ -153,7 +158,7 @@ function run(argv: string[], options: RunOptions = {}) {
 	const confirm = options.confirm ?? (async () => false);
 	const code = main(argv, {
 		env,
-		cwd: join(root, "work"),
+		cwd: options.cwd ?? join(root, "work"),
 		hostname: "hs-node",
 		stdin: Readable.from(options.stdin === undefined ? [] : [Buffer.from(options.stdin)]),
 		stdout: { write: (text: string) => ((out += text), true) },
@@ -527,6 +532,32 @@ describe("reply-reader command (S6)", () => {
 		await sleep(900);
 		expect(seen()).toEqual({ statuses: [], notes: [["Auto-read on: full replies.", "info"]], asked: [], waiting: true });
 	}, 20000);
+
+	it("(S19) says the project (its working folder's Git root) when it differs from the last reading's on the machine", async () => {
+		installVoice();
+		for (const repo of ["p1", "p2"]) mkdirSync(join(root, repo, ".git"), { recursive: true });
+		mkdirSync(join(root, "p1", "docs"));
+		writeFileSync(join(root, "notas.md"), "Hola.");
+		const file = join(root, "notas.md");
+		const readIn = async (cwd: string) => {
+			const before = synthesized.length;
+			expect(await finished([file], { cwd })).toEqual({ code: 0, out: "", err: "", asked: [] });
+			return texts().slice(before);
+		};
+		expect(await readIn(join(root, "p1", "docs"))).toEqual(["p uno.", "Hola."]);
+		expect(await readIn(join(root, "p1"))).toEqual(["Hola."]);
+		expect(await readIn(join(root, "p2"))).toEqual(["p dos.", "Hola."]);
+		expect(await readIn(join(root, "p1"))).toEqual(["p uno.", "Hola."]);
+	});
+
+	it("(S19) without a usable XDG_RUNTIME_DIR each run is its own process: it always says the project", async () => {
+		installVoice();
+		delete env.XDG_RUNTIME_DIR;
+		note("notes.md", "Hola.");
+		expect((await finished(["notes.md"])).code).toBe(0);
+		expect((await finished(["notes.md"])).code).toBe(0);
+		expect(texts()).toEqual(["work.", "Hola.", "work.", "Hola."]);
+	});
 });
 
 const TIMEOUT_HINT = "REPLY_READER_PLAYER_TIMEOUT must be a number of seconds from 5 to 86400; using 15.";

@@ -112,9 +112,10 @@ says `Nothing is being read.`. Alt+M does exactly the same, with the same messag
 
 The pause key is Alt+M unless `settings.json` (the file `/read-speed` saves to, see [Speed](#speed)) names
 another as `"pauseKey"`, for example `{ "speed": 1.1, "pauseKey": "alt+o" }`. It is read when Pi loads the
-extension, so a change applies the next time Pi starts. A key is `ctrl`, `alt` or `super`, maybe
-with `shift`, plus a letter, digit or F1-F12 (`alt+o`, `ctrl+shift+e`, `super+f5`). A key that is not like
-that, or that Pi (on any platform), gentle-pi, pi-reply-thread (Alt+R) or the terminal (as `ctrl+s`) already
+extension, so a change applies the next time Pi starts. A key is `ctrl` or `alt`, maybe with `shift`, plus a
+letter, digit or F1-F12 (`alt+o`, `alt+5`, `ctrl+shift+e`, `ctrl+f5`). `ctrl` with a digit and any `super` key are
+refused: terminals without the Kitty keyboard protocol never send them, so they would never fire. A key that is
+not like that, or that Pi (on any platform), gentle-pi, pi-reply-thread (Alt+R) or the terminal (as `ctrl+s`) already
 uses, gets one warning when the session starts, such as
 `Ignored pauseKey "alt+r" in …/settings.json: pi-reply-thread already uses it. Alt+M pauses and resumes readings.`,
 and Alt+M is used. Alt+M is the default because it is free in all of them, and terminals send it reliably.
@@ -246,6 +247,20 @@ stopped if it plays; other waiting readings stay. A prompt that waited starts af
 silence, without an announcement (it says what it is). The reader's own questions (output, voice, speed,
 download, **Something is being read.**) are never read. With auto-read off, nothing of this plays.
 
+#### Which project
+
+A reading's project is the folder name of the Git root its session's working folder is in (the folder holding
+`.git`; outside a repository, the working folder's own name). Two sessions of the same repository are the same
+project, and so is a linked worktree of it (named by the main repository's folder); a submodule is a project of
+its own, named by its own folder. The machine
+remembers the project of the last reading that started, in any Pi session or `reply-reader` command (in
+`$XDG_RUNTIME_DIR/pi-reply-reader/`). A reading of another project, or the first one when none is remembered,
+starts by saying the project's name, read like any text in the reading's language, then its announcement if it
+waited: `pi-reply-reader. Respuesta P tres, R dos.`. A reading of the same project says no project, so with
+one project you never hear it again. This applies to replies, files, prompts and command readings alike; a
+resumed reading does not say it again. Without a usable `XDG_RUNTIME_DIR`, each Pi process (and each command
+run) remembers only its own.
+
 ### pi-reply-thread
 
 Once [`pi-reply-thread`](https://github.com/daniel2010001/pi-reply-thread) supports it, `s` in its Alt+R view
@@ -294,7 +309,8 @@ If the voice is missing, the command asks `[y/N]` before downloading it. Without
 standard input, it exits with an error instead of downloading. Ctrl+C, `kill` or closing the terminal stops
 the reading. A new `/read` or `/read-stop` in any Pi session stops a command reading, and the command stops a
 Pi reading without asking, dropping the auto-reads waiting in Pi sessions as a manual `/read` does. Ctrl+C
-stops it; it has no pause, and `/read-pause` in Pi cannot pause it.
+stops it; it has no pause, and `/read-pause` in Pi cannot pause it. Its project is that of the folder it runs
+in, said first when it differs from the last reading's (see [Which project](#which-project)).
 
 Exit codes: 0 read (or nothing to read, or stopped by another reading), 1 cannot read, download or play,
 2 bad arguments, 129/130/143 stopped by SIGHUP, Ctrl+C or SIGTERM.

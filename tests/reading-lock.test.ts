@@ -803,6 +803,20 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 			expect(hasPlayer(a)).toBe(false);
 		});
 
+		it("(L149 PROBE-C) /read-auto off while the reading's start waits on the output question: no line file is left", async () => {
+			go("ask-a");
+			const a = start("a", ["read-auto on", "turn Uno.", "await off-a", "read-auto off", "await go-a"], twoOutputs());
+			await waitFor(() => existsSync(join(root, "asked-a")) && lineFiles().length === 1);
+			go("off-a");
+			await new Promise((resolve) => setTimeout(resolve, 1500));
+			expect(lineFiles()).toEqual([]);
+			rmSync(join(root, "ask-a"));
+			go("go-a");
+			await a.exited;
+			expect(lineFiles()).toEqual([]);
+			expect(hasPlayer(a)).toBe(false);
+		});
+
 		it("a session waiting on a human (the output question) is not waited for: another session's readings start at once", async () => {
 			go("ask-a");
 			const a = start("a", ["read-auto on", "turn Uno.", "await go-a"], twoOutputs());

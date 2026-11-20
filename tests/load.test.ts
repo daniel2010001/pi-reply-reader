@@ -1,12 +1,14 @@
 import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { stripTerminalSequences, Text, TuiMainScreen } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import replyReader, { createReplyReader } from "../extensions/reply-reader.ts";
 import type { SherpaRequest, SherpaTts } from "../src/playback.ts";
+import { main } from "../src/cli.ts";
 import { READER_EVENTS } from "../src/reader-events.ts";
+import { openReadingLock } from "../src/reading-lock.ts";
 import { speechText } from "../src/speech-text.ts";
 import { endProcessesOf } from "./processes.ts";
 
@@ -161,6 +163,13 @@ function load(
 		ui?: Record<string, unknown>;
 		/** The session's name, as Pi's /name sets it (S16 lists it). */
 		session?: string;
+		/** The session's working folder (S19 names its project); `<root>/work` by default. */
+		cwd?: string;
+		/**
+		 * The project the machine (or, without XDG_RUNTIME_DIR, this process) already remembers, as after an earlier
+		 * reading of it: "work" by default, so tests of other rules hear no project (S19); null for a fresh memory.
+		 */
+		remembered?: string | null;
 	} = {},
 	start: unknown[] = branch,
 ) {
@@ -176,7 +185,9 @@ function load(
 		on: (event: string, handler: Handler) => events.set(event, handler),
 		events: { emit: bus.emit, on: bus.on },
 	};
-	createReplyReader({ env, hostname: "hs-node", loadSherpa })(pi as never);
+	const remembered = answers.remembered === undefined ? "work" : (answers.remembered ?? undefined);
+	if (remembered !== undefined) openReadingLock(env)?.swapProject(remembered);
+	createReplyReader({ env, hostname: "hs-node", loadSherpa, lastProject: remembered })(pi as never);
 
 	const notes: [string, string | undefined][] = [];
 	const selects: [string, string[]][] = [];
@@ -197,7 +208,7 @@ function load(
 	const ctx = {
 		hasUI: answers.hasUI ?? true,
 		mode: answers.mode ?? "tui",
-		cwd: join(root, "work"),
+		cwd: answers.cwd ?? join(root, "work"),
 		sessionManager: { getBranch: () => entries, ...(answers.session ? { getSessionName: () => answers.session } : {}) },
 		ui: {
 			notify: (message: string, type?: string) => notes.push([message, type]),
@@ -2091,14 +2102,28 @@ describe("reply-reader extension", () => {
 				rmSync(log("hold"));
 			});
 
+			// (L149) Kept: alt with a digit, and ctrl with an F key, still work.
+			it("alt with a digit and ctrl with an F key are still valid pause keys, with no warning", () => {
+				for (const key of ["alt+5", "ctrl+f5"]) {
+					writeSettings(JSON.stringify({ pauseKey: key }));
+					const reader = load();
+					expect([...reader.shortcuts.keys()]).toEqual([key]);
+					expect(reader.notes).toEqual([]);
+				}
+			});
+
 			for (const [value, reason] of [
-				['"banana"', "it is not a key the reader can use (ctrl, alt or super, maybe with shift, plus a letter, digit or F1-F12, as alt+m)"],
-				['"shift+x"', "it is not a key the reader can use (ctrl, alt or super, maybe with shift, plus a letter, digit or F1-F12, as alt+m)"],
+				['"banana"', "it is not a key the reader can use (ctrl or alt, maybe with shift, plus a letter, digit or F1-F12, as alt+m)"],
+				['"shift+x"', "it is not a key the reader can use (ctrl or alt, maybe with shift, plus a letter, digit or F1-F12, as alt+m)"],
 				["5", 'it must be a string, as "alt+m"'],
 				['"alt+r"', "pi-reply-thread already uses it"],
 				['"shift+ctrl+p"', "Pi already uses it"],
 				['"alt+k"', "gentle-pi already uses it"],
 				['"ctrl+s"', "the terminal already uses it"],
+				['"ctrl+5"', "terminals without the Kitty keyboard protocol never send it"],
+				['"ctrl+shift+0"', "terminals without the Kitty keyboard protocol never send it"],
+				['"super+m"', "terminals without the Kitty keyboard protocol never send it"],
+				['"super+shift+f5"', "terminals without the Kitty keyboard protocol never send it"],
 			] as const) {
 				it(`an invalid or taken pauseKey (${value}) warns once and Alt+M is used`, async () => {
 					writeSettings(`{"pauseKey": ${value}}`);
@@ -3136,6 +3161,176 @@ describe("reply-reader extension", () => {
 		await reader.run("read");
 		await reader.settled();
 		expect(reader.notes).toEqual([['Playback on "local" failed: Connection refused', "error"]]);
+	});
+
+	describe("say the project when it changes (T44, S19)", { timeout: 20000 }, () => {
+		const texts = () => synthesized.map((request) => request.text);
+		const shared = () => {
+			env.XDG_RUNTIME_DIR = join(root, "run");
+			mkdirSync(env.XDG_RUNTIME_DIR, { recursive: true });
+		};
+		/** A folder `<root>/<path>`, made a Git repository's root when `git` says so (its `.git` a folder). */
+		const folder = (path: string, git?: "dir"): string => {
+			const dir = join(root, path);
+			mkdirSync(dir, { recursive: true });
+			if (git === "dir") mkdirSync(join(dir, ".git"), { recursive: true });
+			return dir;
+		};
+		/**
+		 * A checkout at `<root>/<path>` whose `.git` file points at `gitdir` (as git writes it, absolute or relative); a
+		 * linked worktree's gitdir holds `commondir`, a submodule's does not.
+		 */
+		const checkout = (path: string, gitdir: string, commondir?: string): string => {
+			const dir = folder(path);
+			writeFileSync(join(dir, ".git"), `gitdir: ${gitdir}\n`);
+			const resolved = resolve(dir, gitdir);
+			mkdirSync(resolved, { recursive: true });
+			if (commondir !== undefined) writeFileSync(join(resolved, "commondir"), `${commondir}\n`);
+			return dir;
+		};
+		/** What one reading synthesized: runs it to its end and returns its texts. */
+		const reading = async (reader: ReturnType<typeof load>, args = ""): Promise<string[]> => {
+			const before = synthesized.length;
+			const ends = reader.statuses.filter((status) => status === undefined).length;
+			await reader.run("read", args);
+			await waitFor(() => reader.statuses.filter((status) => status === undefined).length === ends + 1);
+			return texts().slice(before);
+		};
+
+		it("a reading's project is its Git root's folder name; two sessions of one repo are one project, a linked worktree too; a submodule is its own; outside a repo, its working folder", async () => {
+			installVoice();
+			shared();
+			folder("p1", "dir");
+			const deep = load({ remembered: null, cwd: folder("p1/src/deep") });
+			expect(await reading(deep)).toEqual(["p uno.", "Segunda.", "auto read listo."]);
+			const top = load({ remembered: null, cwd: join(root, "p1") });
+			expect(await reading(top)).toEqual(["Segunda.", "auto read listo."]);
+			// A linked worktree elsewhere is the same repo: its gitdir's commondir leads to p1's .git.
+			const worktree = load({ remembered: null, cwd: checkout("trees/wt", join(root, "p1", ".git", "worktrees", "wt"), "../..") });
+			expect(await reading(worktree)).toEqual(["Segunda.", "auto read listo."]);
+			const plain = load({ remembered: null, cwd: folder("plain/notas") });
+			expect(await reading(plain)).toEqual(["notas.", "Segunda.", "auto read listo."]);
+			expect(await reading(load({ remembered: null, cwd: checkout("trees/wt2", join(root, "p1", ".git", "worktrees", "wt2"), "../..") }))).toEqual([
+				"p uno.",
+				"Segunda.",
+				"auto read listo.",
+			]);
+			// A submodule (gitdir under .git/modules, no commondir) keeps its own folder name.
+			const sub = load({ remembered: null, cwd: checkout("p1/libs/sub", "../../.git/modules/sub") });
+			expect(await reading(sub)).toEqual(["sub.", "Segunda.", "auto read listo."]);
+		});
+
+		it("p1 a1 says p1, p1 a2 no project, p2 a3 p2, p1 a4 p1 again, across two sessions; in the reading's language", async () => {
+			installVoice();
+			shared();
+			const p1 = load({ remembered: null, cwd: folder("p1", "dir") });
+			const p2 = load({ remembered: null, cwd: folder("p2", "dir") });
+			expect(await reading(p1)).toEqual(["p uno.", "Segunda.", "auto read listo."]);
+			expect(await reading(p1, "P1.R1")).toEqual(["Primera respuesta."]);
+			expect(await reading(p2)).toEqual(["p dos.", "Segunda.", "auto read listo."]);
+			p1.entries.push(user("en"), assistant("The build is done and the tests pass for the new parser."));
+			expect(await reading(p1)).toEqual(["p one.", "The build is done and the tests pass for the new parser."]);
+		});
+
+		it("a file read in another project says the project first; a Markdown file of the same project says none", async () => {
+			installVoice();
+			shared();
+			const dir = folder("pi-reply-reader", "dir");
+			writeFileSync(join(dir, "notas.md"), "Hola.");
+			const reader = load({ remembered: null, cwd: dir });
+			expect(await reading(reader, "notas.md")).toEqual(["pi-reply-reader.", "Hola."]);
+			expect(await reading(reader, "notas.md")).toEqual(["Hola."]);
+		});
+
+		it("a reading that waited says the project, then its ID: pi-reply-reader. Respuesta P tres, R uno.; /read-next's next follows the rule", async () => {
+			writeFileSync(log("hold"), "");
+			installVoice(`while [ -e "${root}/hold" ]; do sleep 0.02; done;`);
+			shared();
+			const other = load({ remembered: null, cwd: folder("p1", "dir") });
+			const mine = load({ remembered: null, cwd: folder("pi-reply-reader", "dir") });
+			await mine.run("read-auto", "on");
+			await other.run("read");
+			await waitFor(() => existsSync(log("play-0.pid")));
+			await mine.turn([user("a"), assistant("Uno.")]);
+			await waitFor(() => mine.statuses.length > 0 || other.statuses.some((status) => status?.includes("1 waiting") ?? false));
+			await other.run("read-next");
+			await waitFor(() => existsSync(log("play-1.pid")));
+			rmSync(log("hold"));
+			await waitFor(() => mine.statuses.at(-1) === undefined && mine.statuses.length > 0);
+			expect(texts()).toEqual(["p uno.", "Segunda.", "auto read listo.", "pi-reply-reader.", "Respuesta P tres, R uno.", "Uno."]);
+		});
+
+		it("a blocking prompt's reading says the project when it changed, then the question (S18)", async () => {
+			installVoice();
+			shared();
+			const p1 = load({ remembered: null, cwd: folder("p1", "dir") });
+			const p2 = load({ remembered: null, cwd: folder("p2", "dir") });
+			await reading(p1);
+			await p2.run("read-auto", "on");
+			const before = synthesized.length;
+			p2.event("tool_execution_start", {
+				toolCallId: "c1",
+				toolName: "ask_user_question",
+				args: { questions: [{ header: "Plan", question: "¿Seguimos?", multiSelect: false, options: [{ label: "Sí" }, { label: "No" }] }] },
+			});
+			await waitFor(() => p2.statuses.at(-1) === undefined && p2.statuses.length > 0);
+			expect(texts().slice(before)).toEqual(["p dos.", "Pregunta: ¿Seguimos?", "Opciones: uno, Sí; dos, No."]);
+		});
+
+		it("a resumed reading does not say the project again (S15)", async () => {
+			writeFileSync(log("hold"), "");
+			installVoice(`while [ -e "${root}/hold" ]; do sleep 0.02; done;`);
+			const reader = load({ remembered: null, cwd: folder("p1", "dir") });
+			await reader.run("read");
+			await waitFor(() => existsSync(log("play-0.pid")));
+			await waitFor(() => synthesized.length === 3);
+			await reader.run("read-pause");
+			await waitFor(() => !alive(Number(read("play-0.pid"))));
+			await reader.run("read-pause");
+			await waitFor(() => existsSync(log("play-1.pid")));
+			rmSync(log("hold"));
+			await reader.settled();
+			expect(texts().slice(0, 3)).toEqual(["p uno.", "Segunda.", "auto read listo."]);
+			expect(texts().slice(3)).not.toContain("p uno.");
+			expect(texts().length).toBeGreaterThan(3);
+		});
+
+		it("without a usable XDG_RUNTIME_DIR the memory is the process's: each reader remembers its own last project", async () => {
+			installVoice();
+			const p1 = load({ remembered: null, cwd: folder("p1", "dir") });
+			expect(await reading(p1)).toEqual(["p uno.", "Segunda.", "auto read listo."]);
+			expect(await reading(p1)).toEqual(["Segunda.", "auto read listo."]);
+			const again = load({ remembered: null, cwd: join(root, "p1") });
+			expect(await reading(again)).toEqual(["p uno.", "Segunda.", "auto read listo."]);
+		});
+
+		it("the reply-reader command shares the memory with Pi sessions (S6)", async () => {
+			installVoice();
+			shared();
+			const p1 = folder("p1", "dir");
+			writeFileSync(join(p1, "notas.md"), "Hola.");
+			const cli = (cwd: string) =>
+				main(["notas.md"], {
+					env,
+					cwd,
+					hostname: "hs-node",
+					stdin: (async function* () {})(),
+					stdout: { write: () => true },
+					stderr: { write: () => true },
+					isTTY: false,
+					confirm: async () => false,
+					loadSherpa,
+				});
+			expect(await cli(p1)).toBe(0);
+			expect(texts()).toEqual(["p uno.", "Hola."]);
+			const session = load({ remembered: null, cwd: p1 });
+			expect(await reading(session)).toEqual(["Segunda.", "auto read listo."]);
+			const p2 = load({ remembered: null, cwd: folder("p2", "dir") });
+			expect(await reading(p2)).toEqual(["p dos.", "Segunda.", "auto read listo."]);
+			const before = synthesized.length;
+			expect(await cli(p1)).toBe(0);
+			expect(texts().slice(before)).toEqual(["p uno.", "Hola."]);
+		});
 	});
 });
 
