@@ -60,6 +60,30 @@ export function askedQuestions(toolName: string, args: unknown): AskedQuestion[]
 	return questions;
 }
 
+/** What an assistant message wrote and the tool calls it made (S18 Context, T48). */
+export interface WrittenCalls {
+	/** Its text blocks joined with a blank line, trimmed; "" when it wrote nothing (thinking is never text). */
+	text: string;
+	/** The IDs of its tool calls. */
+	calls: string[];
+}
+
+/**
+ * The text an assistant message wrote before its tool calls, with the calls' IDs, from the message itself (as
+ * `message_end` carries it). Undefined for any other message.
+ */
+export function writtenCalls(message: unknown): WrittenCalls | undefined {
+	if (!isRecord(message) || message.role !== "assistant" || !Array.isArray(message.content)) return undefined;
+	const texts: string[] = [];
+	const calls: string[] = [];
+	for (const block of message.content) {
+		if (!isRecord(block)) continue;
+		if (block.type === "text" && typeof block.text === "string") texts.push(block.text);
+		else if (block.type === "toolCall" && typeof block.id === "string") calls.push(block.id);
+	}
+	return { text: texts.join("\n\n").trim(), calls };
+}
+
 /** A sentence's end: "." added unless it already ends in `. ? ! …`; a final `:` or `;` becomes ".". */
 const closed = (text: string): string => (/[.?!…]$/.test(text) ? text : `${text.replace(/[:;,]+$/, "")}.`);
 

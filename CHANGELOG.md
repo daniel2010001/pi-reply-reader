@@ -49,10 +49,12 @@
   ends or drops its line stops beating at once, even mid-start. Two sessions with the
   same label are listed with a tag from their session ID (`api #3f9c`).
 - Auto-read also reads the prompts that wait for you, through the same line: an `ask_user_question` /
-  `ask_user_choice` call reads each question with its option labels only ("Pregunta 1 de 2: ¿Cómo suena?
-  Opciones: uno, Bien; dos, Mal."), a command confirmation reads only the program ("Confirmación de comando:
+  `ask_user_choice` call reads the text written before it in the same message (cleaned like a reply, on its own; not in
+  `questions` mode), then each
+  question with its option labels only ("Pregunta 1 de 2: ¿Cómo suena? Opciones: uno, Bien; dos, Mal."); text
+  before other tool calls is not read; a command confirmation reads only the program ("Confirmación de comando:
   git." / "Command confirmation: git."), and any other dialog its title. Once answered, a prompt's reading is
-  dropped, or stopped if it plays. The reader's own questions are not read.
+  dropped, or stopped if it plays, as a whole. The reader's own questions are not read.
 - Auto-read reads every new reply, each once and in order, as soon as it is written, even while the agent keeps
   working. Before, only the last reply of a run was read: a reply followed by a background-job or subagent
   notice that started another turn was skipped.

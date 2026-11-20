@@ -238,12 +238,12 @@ something, that prompt is read through the same line, in the conversation's lang
 
 | Prompt | What is read |
 |---|---|
-| `ask_user_question` / `ask_user_choice` | Each question with its option labels, never descriptions or values: "Pregunta 1 de 2: ¿Cómo suena? Opciones: uno, Bien; dos, Mal." ("Pregunta: …" for a single question; "Question 1 of 2: … Options: one, …" in English) |
+| `ask_user_question` / `ask_user_choice` | With auto-read `on`, the text written before the question (in the same message, cleaned like a reply on its own, so none of its Markdown runs into the questions; its language decides the reading's when it tells), then each question with its option labels, never descriptions or values: "Pregunta 1 de 2: ¿Cómo suena? Opciones: uno, Bien; dos, Mal." ("Pregunta: …" for a single question; "Question 1 of 2: … Options: one, …" in English). With `questions`, only the questions are read. Text written before other tool calls, command confirmations included, is not read |
 | A command confirmation (a confirm while a `bash` call waits to run) | "Confirmación de comando: git." / "Command confirmation: git.": the program only, never its arguments (they may hold private values); `NAME=value` assignments, a leading `sudo` or `env` and the program's folder are left out |
 | Any other dialog (RDD consent, other confirms and selects) | Its title only; nothing when it has none (Pi does not give extensions a dialog's text or options) |
 
-Once you answer (the dialog closes, or the tool finishes), its reading is dropped if it still waits, or
-stopped if it plays; other waiting readings stay. A prompt that waited starts after the usual 1.5 s of
+Once you answer (the dialog closes, or the tool finishes), its reading, the text before the question included,
+is dropped if it still waits, or stopped if it plays; other waiting readings stay. A prompt that waited starts after the usual 1.5 s of
 silence, without an announcement (it says what it is). The reader's own questions (output, voice, speed,
 download, **Something is being read.**) are never read. With auto-read off, nothing of this plays.
 

@@ -1624,6 +1624,151 @@ describe("reply-reader extension", () => {
 			await reader.settled();
 			expect(texts()).toEqual(["Pregunta: ¿Publicamos?", "Opciones: uno, Sí."]);
 		});
+
+		describe("the text written before the question is read first (T48, S18 Context, L153)", () => {
+			let calls = 0;
+			/** An assistant message as Pi stores it when it calls tools: its blocks, stopReason toolUse. */
+			const calling = (blocks: unknown[]) => ({
+				type: "message",
+				id: `t${++calls}`,
+				timestamp: "t",
+				message: { role: "assistant", stopReason: "toolUse", content: blocks },
+			});
+			const call = (id: string, name: string, args: unknown) => ({ type: "toolCall", id, name, arguments: args });
+			const choice = { question: "¿Publicamos?", options: [{ label: "Sí" }, { label: "No" }] };
+
+			it("the real case: [thinking, text, toolCall ask_user_question] reads the text, cleaned like a reply, then Pregunta; never as a reply too", async () => {
+				installVoice();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				const args = { questions: [{ header: "Orden", question: "¿Empezamos por el lector?", options: [{ label: "Sí" }, { label: "Después" }] }] };
+				await reader.turn([
+					user("sigue"),
+					calling([
+						{ type: "thinking", thinking: "Pensando en privado." },
+						{ type: "text", text: "Contexto: ya tengo el relevamiento de **T45**." },
+						{ type: "text", text: "Falta `auto_read` y decidir el orden." },
+						call("c1", "ask_user_question", args),
+					]),
+				]);
+				ask(reader, "c1", "ask_user_question", args);
+				await reader.settled();
+				await new Promise((resolve) => setTimeout(resolve, 700));
+				expect(texts()).toEqual([
+					"Contexto: ya tengo el relevamiento de T cuarenta y cinco.",
+					"Falta auto read y decidir el orden.",
+					"Pregunta: ¿Empezamos por el lector?",
+					"Opciones: uno, Sí; dos, Después.",
+				]);
+				expect(texts().join(" ")).not.toMatch(/Pensando|\*\*|`/);
+				expect(reader.statuses).toEqual(["Reading question on local · Alt+M pauses", undefined]);
+				expect(reader.notes).toEqual([["Auto-read on: full replies.", "info"]]);
+			});
+
+			it("the text's language decides the reading's: an English text reads Question; no text, or only thinking, reads the questions alone", async () => {
+				installVoice();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				await reader.turn([user("go"), calling([{ type: "text", text: "The build is done and the tests pass." }, call("c1", "ask_user_choice", choice)])]);
+				ask(reader, "c1", "ask_user_choice", choice);
+				await reader.settled();
+				reader.event("tool_execution_end", { toolCallId: "c1", toolName: "ask_user_choice", result: {}, isError: false });
+				await reader.turn([calling([{ type: "thinking", thinking: "Hmm." }, { type: "text", text: "  \n " }, call("c2", "ask_user_choice", choice)])]);
+				ask(reader, "c2", "ask_user_choice", choice);
+				await ended(reader, 2);
+				expect(texts()).toEqual(["The build is done and the tests pass.", "Question: ¿Publicamos?", "Options: one, Sí; two, No.", "Pregunta: ¿Publicamos?", "Opciones: uno, Sí; dos, No."]);
+			});
+
+			it("only the same message's text: text before a bash call (its confirmation too) stays unread, and is not taken by a later question", async () => {
+				installVoice();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				await reader.turn([user("push"), calling([{ type: "text", text: "Voy a publicar la rama ahora." }, call("b1", "bash", { command: "git push" })])]);
+				ask(reader, "b1", "bash", { command: "git push" });
+				prompt(reader, "confirm", "Allow push?");
+				await reader.settled();
+				reader.event("ui_prompt_end", { reason: "ui_prompt" });
+				reader.event("tool_execution_end", { toolCallId: "b1", toolName: "bash", result: {}, isError: false });
+				await reader.turn([calling([call("c1", "ask_user_choice", choice)])]);
+				ask(reader, "c1", "ask_user_choice", choice);
+				await ended(reader, 2);
+				await new Promise((resolve) => setTimeout(resolve, 700));
+				expect(texts()).toEqual(["Confirmación de comando: git.", "Pregunta: ¿Publicamos?", "Opciones: uno, Sí; dos, No."]);
+				// A final reply is still read as before (T42), once.
+				await reader.turn([{ ...calling([{ type: "text", text: "Listo." }]), message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Listo." }] } }]);
+				await ended(reader, 3);
+				expect(texts().slice(3)).toEqual(["Listo."]);
+			});
+
+			it("the text is cleaned apart from the questions: an unclosed code fence in it never swallows them", async () => {
+				installVoice();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				await reader.turn([user("mira"), calling([{ type: "text", text: "Mirá esto:\n```\nls" }, call("c1", "ask_user_choice", choice)])]);
+				ask(reader, "c1", "ask_user_choice", choice);
+				await reader.settled();
+				expect(texts()[0]).toMatch(/^Mirá esto/);
+				expect(texts().slice(-2)).toEqual(["Pregunta: ¿Publicamos?", "Opciones: uno, Sí; dos, No."]);
+				expect(texts().filter((text) => /Publicamos/.test(text))).toHaveLength(1);
+			});
+
+			it("questions mode reads only the questions, never the text before them; on reads the text first", async () => {
+				installVoice();
+				const reader = load();
+				await reader.run("read-auto", "questions");
+				await reader.turn([user("a"), calling([{ type: "text", text: "Contexto que no se lee." }, call("c1", "ask_user_choice", choice)])]);
+				ask(reader, "c1", "ask_user_choice", choice);
+				await reader.settled();
+				reader.event("tool_execution_end", { toolCallId: "c1", toolName: "ask_user_choice", result: {}, isError: false });
+				expect(texts()).toEqual(["Pregunta: ¿Publicamos?", "Opciones: uno, Sí; dos, No."]);
+				await reader.run("read-auto", "on");
+				await reader.turn([user("b"), calling([{ type: "text", text: "Contexto que sí se lee." }, call("c2", "ask_user_choice", choice)])]);
+				ask(reader, "c2", "ask_user_choice", choice);
+				await ended(reader, 2);
+				expect(texts().slice(2)).toEqual(["Contexto que sí se lee.", "Pregunta: ¿Publicamos?", "Opciones: uno, Sí; dos, No."]);
+			});
+
+			it("one reading: answered while waiting, its text never plays; answered while playing, it stops whole; a pause ends it", async () => {
+				holding();
+				const reader = load();
+				await reader.run("read-auto", "on");
+				await reader.run("read");
+				await waitFor(() => existsSync(log("play-0.pid")));
+				await reader.turn([user("a"), calling([{ type: "text", text: "Contexto que espera." }, call("c1", "ask_user_choice", choice)])]);
+				ask(reader, "c1", "ask_user_choice", choice);
+				expect(reader.statuses.at(-1)).toBe("Reading P2.R1 on local · 1 waiting · Alt+M pauses");
+				reader.event("tool_execution_end", { toolCallId: "c1", toolName: "ask_user_choice", result: {}, isError: false });
+				expect(reader.statuses.at(-1)).toBe("Reading P2.R1 on local · Alt+M pauses");
+				rmSync(log("hold"));
+				await ended(reader, 1);
+				await wait();
+				expect(texts().join(" ")).not.toMatch(/Contexto|Publicamos/);
+
+				// Playing: ui_prompt_end stops the whole reading, text and questions.
+				writeFileSync(log("hold-1"), "");
+				await reader.turn([user("b"), calling([{ type: "text", text: "Contexto que suena." }, call("c2", "ask_user_choice", choice)])]);
+				ask(reader, "c2", "ask_user_choice", choice);
+				prompt(reader, "select", "¿Publicamos?");
+				await waitFor(() => existsSync(log("play-1.pid")));
+				expect(texts().slice(-3)).toEqual(["Contexto que suena.", "Pregunta: ¿Publicamos?", "Opciones: uno, Sí; dos, No."]);
+				reader.event("ui_prompt_end", { reason: "ui_prompt" });
+				await waitFor(() => !alive(pid(1)));
+				await ended(reader, 2);
+
+				// A pause ends it, text included (S15, L135).
+				writeFileSync(log("hold-2"), "");
+				await reader.turn([user("c"), calling([{ type: "text", text: "Contexto pausado." }, call("c3", "ask_user_choice", choice)])]);
+				ask(reader, "c3", "ask_user_choice", choice);
+				await waitFor(() => existsSync(log("play-2.pid")));
+				await reader.run("read-pause");
+				await waitFor(() => !alive(pid(2)));
+				await ended(reader, 3);
+				expect(reader.statuses.filter((status) => status?.startsWith("Paused"))).toEqual([]);
+				expect(reader.notes.at(-1)).toEqual(["Reading stopped: a prompt is not paused.", "info"]);
+				await wait();
+				expect(existsSync(log("play-3.pid"))).toBe(false);
+			});
+		});
 	});
 
 	describe("event contract v1 for other extensions (S10)", () => {

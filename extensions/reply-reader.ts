@@ -12,7 +12,7 @@ import type { Reading, SherpaTts } from "../src/playback.ts";
 import { playerTimeoutMs, reapOrphans } from "../src/player.ts";
 import { questionsSection } from "../src/questions.ts";
 import { projectChanged, projectOf } from "../src/project.ts";
-import { askedQuestions, commandMarkdown, commandProgram, dialogTitle, QUESTION_TOOLS, questionsMarkdown } from "../src/prompts.ts";
+import { askedQuestions, commandMarkdown, commandProgram, dialogTitle, QUESTION_TOOLS, questionsMarkdown, writtenCalls } from "../src/prompts.ts";
 import { isPing, parseReadRequest, READER_EVENTS, READER_EVENTS_VERSION } from "../src/reader-events.ts";
 import { type Claim, openReadingLock, type WaitingItem } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
@@ -26,6 +26,7 @@ import {
 	languageOfWords,
 	projectAnnouncement,
 	speechNarration,
+	speechNarrationOfParts,
 } from "../src/speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
 
@@ -238,6 +239,8 @@ export function createReplyReader(
 		const pending = new Map<string, { toolName: string; args: unknown }>();
 		/** The prompt readings the open ui_prompt span answers when it ends (S18). */
 		let spanPrompts: string[] = [];
+		/** The text the latest assistant message wrote, by the IDs of the tool calls it made (S18 Context, T48). */
+		let writtenBefore = new Map<string, string>();
 		/** The keys of the prompt readings queued and not yet answered (S18). */
 		const prompts = new Set<string>();
 		/** Numbers dialogs, so each gets its own prompt key. */
@@ -259,7 +262,8 @@ export function createReplyReader(
 			ctx: ExtensionContext;
 			name: string;
 			label: string;
-			markdown: string;
+			/** One document, or parts cleaned apart and read in order (a prompt's text, then its questions: T48). */
+			markdown: string | readonly string[];
 			language: Language | undefined;
 			mark: string | undefined;
 			manual?: true;
@@ -508,11 +512,11 @@ export function createReplyReader(
 			ctx: ExtensionContext,
 			name: string,
 			label: string,
-			markdown: string,
+			markdown: string | readonly string[],
 			language?: Language,
 			auto?: { mark: string | undefined; still: () => boolean; announce?: "reply" | "file" | "prompt"; prompt?: string },
 		): Promise<StartResult> => {
-			const narration = speechNarration(markdown, language);
+			const narration = typeof markdown === "string" ? speechNarration(markdown, language) : speechNarrationOfParts(markdown, language ?? detectLanguage(markdown.join("\n\n")));
 			if (!narration.text) {
 				ctx.ui.notify(`${label} has nothing to read.`, "info");
 				return "done";
@@ -961,7 +965,11 @@ export function createReplyReader(
 		// Each final reply joins the line as soon as it is stored (S8 Timing, T42), even while the agent keeps working
 		// (an injected user-role message can chain another turn into the same run). Pi stores the entry only after the
 		// message_end handlers return, so the branch is read on the next turn of the event loop, as pi-reply-thread does.
-		pi.on("message_end", (_event, ctx) => {
+		pi.on("message_end", (event, ctx) => {
+			// What an assistant message wrote, kept for the calls it makes (S18 Context, T48): Pi runs a message's tool calls
+			// after its message_end, so their tool_execution_start finds it here, from the event itself, not the branch.
+			const written = writtenCalls(event.message);
+			if (written) writtenBefore = new Map(written.calls.map((id) => [id, written.text]));
 			if (auto === "off") return;
 			const asked = generation;
 			setTimeout(() => {
@@ -981,8 +989,8 @@ export function createReplyReader(
 		};
 
 		/** Queues a blocking prompt's reading (S18), when auto-read is on and it has something to say. */
-		const queuePrompt = (ctx: ExtensionContext, key: string, name: string, markdown: string, language: Language): void => {
-			if (!speechNarration(markdown, language).text) return;
+		const queuePrompt = (ctx: ExtensionContext, key: string, name: string, markdown: string | readonly string[], language: Language): void => {
+			if (!(typeof markdown === "string" ? speechNarration(markdown, language) : speechNarrationOfParts(markdown, language)).text) return;
 			prompts.add(key);
 			queue.push({ ctx, name, label: name, markdown, language, mark: openReadingLock(env)?.waitingMark(), prompt: key, at: joined() });
 			footer();
@@ -1001,8 +1009,14 @@ export function createReplyReader(
 			if (auto === "off" || !QUESTION_TOOLS.has(event.toolName)) return;
 			const questions = askedQuestions(event.toolName, event.args);
 			if (!questions) return;
-			const language = promptLanguage(ctx, questions.map(({ question, labels }) => [question, ...labels].join("\n")).join("\n"));
-			queuePrompt(ctx, `tool:${event.toolCallId}`, "question", questionsMarkdown(questions, language), language);
+			// The text written before the call, in the same message, is read first, in its own language when it tells (T48);
+			// questions mode reads only the questions. Each is cleaned apart, so no Markdown block of the text swallows them.
+			const context = auto === "questions" ? "" : (writtenBefore.get(event.toolCallId) ?? "");
+			const language =
+				(context ? languageOfWords(context) : undefined) ??
+				promptLanguage(ctx, questions.map(({ question, labels }) => [question, ...labels].join("\n")).join("\n"));
+			const markdown = questionsMarkdown(questions, language);
+			queuePrompt(ctx, `tool:${event.toolCallId}`, "question", context ? [context, markdown] : markdown, language);
 		});
 
 		pi.on("tool_execution_end", (event) => {
@@ -1088,6 +1102,7 @@ export function createReplyReader(
 			queue.clear();
 			seen = new Set();
 			pending.clear();
+			writtenBefore = new Map();
 			prompts.clear();
 			spanPrompts = [];
 			chosen = undefined;

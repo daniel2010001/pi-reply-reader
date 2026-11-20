@@ -71,6 +71,20 @@ export function speechNarration(markdown: string, language: Language = detectLan
 }
 
 /**
+ * (S18, T48) Several documents read one after another, each cleaned on its own, so no Markdown block of one (an
+ * unclosed code fence, a list) runs into the next. Empty parts say nothing.
+ */
+export function speechNarrationOfParts(parts: readonly string[], language: Language): Narration {
+	const narrations = parts.map((part) => speechNarration(part, language)).filter((narration) => narration.text);
+	return {
+		text: narrations.map((narration) => narration.text).join("\n\n"),
+		language,
+		fragments: narrations.flatMap((narration) => narration.fragments),
+		diagnostics: narrations.flatMap((narration) => narration.diagnostics),
+	};
+}
+
+/**
  * (S7) English or Spanish, from the text's own function words; code, URLs and paths do not count.
  * Spanish wins ties, so a reply with no clear English majority reads as it always did.
  */
