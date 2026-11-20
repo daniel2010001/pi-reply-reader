@@ -1608,6 +1608,41 @@ describe("reply-reader extension", () => {
 		await waitFor(() => !alive(Number(read("play-1.pid"))));
 	});
 
+	it("(S13) the session's end kills a player that ignores SIGTERM", { timeout: 10000 }, async () => {
+		installVoice("trap '' TERM; exec sleep 600;");
+		const reader = load();
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-0.pid")) && read("play-0.pid").trim() !== "");
+		const player = Number(read("play-0.pid"));
+		reader.shutdown();
+		try {
+			await waitFor(() => !alive(player), 4000);
+		} finally {
+			try {
+				process.kill(player, "SIGKILL");
+			} catch {}
+		}
+		expect(reader.notes).toEqual([]);
+	});
+
+	it("(S13) a hung player is ended after the timeout, with the timed-out error", { timeout: 10000 }, async () => {
+		installVoice("trap '' TERM; exec sleep 600;");
+		env.REPLY_READER_PLAYER_TIMEOUT = "0.3";
+		const reader = load();
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-0.pid")) && read("play-0.pid").trim() !== "");
+		const player = Number(read("play-0.pid"));
+		try {
+			await waitFor(() => reader.notes.length > 0, 5000);
+			expect(alive(player)).toBe(false);
+		} finally {
+			try {
+				process.kill(player, "SIGKILL");
+			} catch {}
+		}
+		expect(reader.notes).toEqual([['Playback on "local" failed: timed out', "error"]]);
+	});
+
 	it("Esc stops a reading and is consumed only while one plays", async () => {
 		installVoice("sleep 30;");
 		const reader = load();

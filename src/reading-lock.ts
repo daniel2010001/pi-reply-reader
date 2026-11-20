@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { isPlayer, sameProcess, startTime, terminatePid } from "./player.ts";
 
-/** Every player we start carries this argument, so a pid can be told apart from an unrelated process. */
-export const PLAYER_MARK = "--client-name=pi-reply-reader";
+export { PLAYER_MARK } from "./player.ts";
 
 /**
  * The reading playing on this machine, shared by every Pi session and process of this user (S1, T21):
@@ -176,11 +176,8 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 		const live = previous !== undefined && playing(previous);
 		if (always || live) write(entry);
 		if (!live) return false;
-		if (previous.player !== undefined) {
-			try {
-				process.kill(previous.player, "SIGTERM");
-			} catch {}
-		}
+		// SIGTERM, then SIGKILL if that player ignores it (S13): its own session may be hung or gone.
+		if (previous.player !== undefined) terminatePid(previous.player, previous.playerStart);
 		return true;
 	};
 
@@ -259,38 +256,7 @@ function playing(entry: Entry): boolean {
 	return entry.player === undefined || isPlayer(entry.player, entry.playerStart);
 }
 
-/** A live process of this user with that pid, started when recorded (when recorded). */
-function sameProcess(pid: number, start: string | undefined): boolean {
-	try {
-		process.kill(pid, 0);
-	} catch {
-		return false;
-	}
-	return start === undefined || startTime(pid) === start;
-}
-
-/** Guards against pid reuse: only a live player we started, of this user, may be signalled. */
-function isPlayer(pid: number, start: string | undefined): boolean {
-	if (!sameProcess(pid, start)) return false;
-	try {
-		if (process.getuid && statSync(`/proc/${pid}`).uid !== process.getuid()) return false;
-		return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").includes(PLAYER_MARK);
-	} catch {
-		return false;
-	}
-}
-
 /** Blocks this thread for `ms`; only ever a few milliseconds, while another process holds the mutex. */
 function pause(ms: number): void {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-/** Field 22 of /proc/<pid>/stat, the process start time; undefined where /proc is missing. */
-function startTime(pid: number): string | undefined {
-	try {
-		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-		return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
-	} catch {
-		return undefined;
-	}
 }

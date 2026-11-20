@@ -206,6 +206,29 @@ describe("one reading per machine (T21)", { timeout: 30000 }, () => {
 		expect((await ran(b)).notes).toEqual([]);
 	});
 
+	it("(S13) a new reading kills a player that ignores SIGTERM, even when its own session cannot stop it", async () => {
+		const paplay = join(root, "bin", "paplay");
+		writeFileSync(paplay, `#!/bin/sh\nPATH=/usr/bin:/bin\ntrap '' TERM\necho $$ > "${root}/play-$PPID.pid"\nwhile :; do sleep 0.1; done\n`);
+		chmodSync(paplay, 0o755);
+		const a = start("a", ["read"]);
+		const playerA = await playerOf(a.child);
+		installVoice();
+		// Session a is frozen, so only the newer reading can end its player.
+		a.child.kill("SIGSTOP");
+		try {
+			const b = start("b", ["read P1.R1"]);
+			const playerB = await playerOf(b.child);
+			await new Promise((done) => setTimeout(done, 1000));
+			expect(alive(playerA)).toBe(true);
+			await waitFor(() => !alive(playerA), 3000);
+			expect(alive(playerB)).toBe(true);
+		} finally {
+			try {
+				process.kill(playerA, "SIGKILL");
+			} catch {}
+		}
+	});
+
 	it("the session whose reading another stopped clears its footer quietly, with no error", async () => {
 		const a = start("a", ["read"]);
 		const playerA = await playerOf(a.child);

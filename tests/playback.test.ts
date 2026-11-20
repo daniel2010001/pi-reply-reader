@@ -1,11 +1,14 @@
+import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Output } from "../src/outputs.ts";
 import { type SherpaRequest, type SherpaTts, startReading } from "../src/playback.ts";
 import { speechText, spokenFragments } from "../src/speech-text.ts";
+import { PLAYER_MARK } from "../src/reading-lock.ts";
 import { SPEAKERS, type Voice } from "../src/voice.ts";
 
 let root: string;
@@ -502,6 +505,145 @@ describe("startReading without a working player", () => {
 			'Playback on "desktop" failed: Connection refused',
 		);
 		expect(seen.length).toBeLessThan(50);
+	});
+});
+
+/** A player stuck connecting that ignores SIGTERM, as paplay can while its Pulse handshake hangs (S13). */
+function hungPaplay(): void {
+	script("paplay", `trap '' TERM; echo $$ > "${log("paplay.pid")}"; exec sleep 600`);
+}
+
+/** The kill grace of S13: SIGTERM, then SIGKILL 2 s later. */
+const GRACE_MS = 2000;
+
+describe("(S13) a player that hangs is ended", { timeout: 15000 }, () => {
+	it("kills a TERM-ignoring player that takes no audio for the timeout, and rejects with the timed-out message", async () => {
+		hungPaplay();
+		env.REPLY_READER_PLAYER_TIMEOUT = "0.3";
+		const loadSherpa = fakeSherpa(() => new Float32Array(tone(500_000)));
+		const started = Date.now();
+		const reading = startReading({ voice, speaker: male, fragments: spokenFragments("Uno. Dos."), output: desktop, env, loadSherpa });
+		await expect(reading.done).rejects.toThrow(/^Playback on "desktop" failed: timed out$/);
+		const elapsed = Date.now() - started;
+		expect(elapsed).toBeGreaterThanOrEqual(300 + GRACE_MS - 100);
+		expect(elapsed).toBeLessThan(300 + GRACE_MS + 2000);
+		expect(alive(Number(read("paplay.pid")))).toBe(false);
+	});
+
+	it("kills a player that took a short reading but never ends, after its audio plus the timeout", async () => {
+		hungPaplay();
+		env.REPLY_READER_PLAYER_TIMEOUT = "0.3";
+		const loadSherpa = fakeSherpa(() => new Float32Array(tone(441)));
+		const reading = startReading({ voice, speaker: male, fragments: spokenFragments("Uno."), output: local, env, loadSherpa });
+		await expect(reading.done).rejects.toThrow(/^Playback on "local" failed: timed out$/);
+		expect(alive(Number(read("paplay.pid")))).toBe(false);
+	});
+
+	it("keeps a slow player that keeps taking audio, even past the timeout, and plays every byte", async () => {
+		script(
+			"paplay",
+			`while :; do n=$(dd bs=16384 count=1 2>/dev/null | tee -a "${log("paplay.audio")}" | wc -c); [ "$n" -eq 0 ] && break; sleep 0.05; done`,
+		);
+		env.REPLY_READER_PLAYER_TIMEOUT = "0.5";
+		const loadSherpa = fakeSherpa(() => new Float32Array(tone(200_000)));
+		const started = Date.now();
+		await startReading({ voice, speaker: SPEAKERS.female, fragments: spokenFragments("Uno. Dos."), output: local, env, loadSherpa }).done;
+		expect(Date.now() - started).toBeGreaterThan(1000);
+		const audio = pcm("paplay.audio");
+		expect(audio.length).toBe(400_000 + Math.round(0.35 * 44100));
+	});
+
+	it("stop() kills a TERM-ignoring player within the grace and settles quietly", async () => {
+		hungPaplay();
+		let reading: ReturnType<typeof startReading>;
+		const loadSherpa = async (): Promise<SherpaTts> => ({
+			sampleRate: 44100,
+			async generateAsync() {
+				await waitFor(() => existsSync(log("paplay.pid")));
+				reading.stop();
+				return { samples: new Float32Array(tone(441)) };
+			},
+		});
+		reading = startReading({ voice, speaker: male, fragments: spokenFragments("Uno."), output: local, env, loadSherpa });
+		const started = Date.now();
+		await expect(reading.done).resolves.toBeUndefined();
+		expect(Date.now() - started).toBeLessThan(GRACE_MS + 2000);
+		expect(alive(Number(read("paplay.pid")))).toBe(false);
+	});
+});
+
+const PLAYBACK = pathToFileURL(resolve(import.meta.dirname, "..", "src", "playback.ts")).href;
+
+/** A Pi-like process that starts one reading with a fake engine; `exit` makes it exit cleanly once its player started. */
+const OWNER = `
+const [playback, envJson, mode] = process.argv.slice(2);
+const { startReading } = await import(playback);
+const voice = { supertonic: {} };
+startReading({
+	voice, speaker: { sid: 6, gain: 1 }, fragments: [{ text: "Uno.", after: "sentence" }],
+	output: { name: "local", label: "local" }, env: JSON.parse(envJson),
+	loadSherpa: async () => ({ sampleRate: 44100, generateAsync: async () => ({ samples: new Float32Array(441).fill(0.125) }) }),
+	onPlayer: () => { if (mode === "exit") setTimeout(() => process.exit(0), 200); },
+}).done.catch(() => {});
+setInterval(() => {}, 1000);
+`;
+
+describe("(S13) no player outlives its reader", { timeout: 15000 }, () => {
+	const others: ChildProcess[] = [];
+	afterEach(() => {
+		for (const child of others.splice(0)) child.kill("SIGKILL");
+	});
+
+	/** A TERM-ignoring player that keeps its marked command line (no exec), started by a separate reader process. */
+	function owner(mode: "exit" | "stay"): ChildProcess {
+		script("paplay", `trap '' TERM; echo $$ > "${log("paplay.pid")}"; while :; do sleep 0.1; done`);
+		writeFileSync(log("owner.mjs"), OWNER);
+		const child = spawn(process.execPath, [log("owner.mjs"), PLAYBACK, JSON.stringify(env), mode], { stdio: "ignore" });
+		others.push(child);
+		return child;
+	}
+
+	const killLater = (pid: number) => {
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {}
+	};
+
+	it("kills its player when the reader process exits", async () => {
+		const child = owner("exit");
+		await waitFor(() => existsSync(log("paplay.pid")) && read("paplay.pid").trim() !== "");
+		const player = Number(read("paplay.pid"));
+		try {
+			await new Promise((done) => child.on("exit", done));
+			await waitFor(() => !alive(player), 1000);
+		} finally {
+			killLater(player);
+		}
+	});
+
+	it("a new reading ends a player whose reader died uncleanly, and never one that is not ours", async () => {
+		const child = owner("stay");
+		await waitFor(() => existsSync(log("paplay.pid")) && read("paplay.pid").trim() !== "");
+		const orphan = Number(read("paplay.pid"));
+		const marked = spawn("/bin/sh", ["-c", "sleep 30; :", "paplay", PLAYER_MARK], { stdio: "ignore" });
+		const owned = spawn("/bin/sh", ["-c", "sleep 30; :", "paplay", PLAYER_MARK], {
+			stdio: "ignore",
+			env: { ...process.env, PI_REPLY_READER_OWNER: `${process.pid}:` },
+		});
+		others.push(marked, owned);
+		try {
+			child.kill("SIGKILL");
+			await new Promise((done) => child.on("exit", done));
+			await new Promise((done) => setTimeout(done, 300));
+			expect(alive(orphan)).toBe(true);
+			fakePaplay();
+			await startReading({ voice, speaker: male, fragments: spokenFragments("Uno."), output: local, env, loadSherpa: fakeSherpa(() => new Float32Array([0])) }).done;
+			await waitFor(() => !alive(orphan), GRACE_MS + 2000);
+			expect(alive(marked.pid!)).toBe(true);
+			expect(alive(owned.pid!)).toBe(true);
+		} finally {
+			killLater(orphan);
+		}
 	});
 });
 
