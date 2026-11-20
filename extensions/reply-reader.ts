@@ -53,7 +53,9 @@ const CUT_OVERLAY = { anchor: "center", width: 48 } as const;
  * Play order (S16, L135): a session's next waiting reading yields to an earlier one of another session while that
  * session's line was published (its heartbeat, every WATCH_MS while it has readings waiting) within FRESH_MS, so a
  * frozen or dead session stops holding the line about FRESH_MS after its last beat; 2 s leaves room for a loaded
- * machine's late timers. YIELD_CAP_MS bounds the wait for one reading even for a session that beats but never starts.
+ * machine's late timers. YIELD_CAP_MS bounds the wait for one reading even for a session that beats but never starts;
+ * it counts only time the machine is free and the session yields, never time another reading plays (L138). A session
+ * waiting on a human (the output question, a voice download confirm) publishes it and is never yielded to.
  */
 const FRESH_MS = 2000;
 const YIELD_CAP_MS = 10_000;
@@ -153,8 +155,11 @@ export function createReplyReader(
 		loadSherpa?: (voice: Voice) => Promise<SherpaTts>;
 		/** Test seam: while it returns true, this session's line starts nothing, as a session slow to claim (S16). */
 		holdLine?: () => boolean;
+		/** Test seam: replaces YIELD_CAP_MS (S16). */
+		yieldCapMs?: number;
 	} = {},
 ) {
+	const yieldCapMs = deps.yieldCapMs ?? YIELD_CAP_MS;
 	const env = deps.env ?? process.env;
 	const hostname = deps.hostname ?? osHostname();
 
@@ -246,11 +251,15 @@ export function createReplyReader(
 		}
 		/** Whether a reading plays (or is starting) in this session or anywhere on the machine. */
 		const playing = (): boolean => current !== undefined || (openReadingLock(env)?.busy() ?? false);
-		/** The first reading of this line while it yields to an earlier one elsewhere, and since when (S16). */
-		let yielding: { at: number; since: number } | undefined;
+		/**
+		 * The first reading of this line while it yields to an earlier one elsewhere (S16): the free time spent yielding
+		 * so far, and the check that last counted (unset while another reading plays, so that time is not counted, L138).
+		 */
+		let yielding: { at: number; spent: number; last?: number } | undefined;
 		/**
 		 * Whether this line's first reading lets an earlier one of another session go first, so readings play in
-		 * /read-queue's order (S16, L135): while that session still beats (FRESH_MS), and YIELD_CAP_MS at most per reading.
+		 * /read-queue's order (S16, L135): while that session still beats (FRESH_MS) and is not waiting on a human, and
+		 * for at most the yield cap of free time per reading (L138).
 		 */
 		const yields = (): boolean => {
 			const head = queue.items[0];
@@ -258,13 +267,37 @@ export function createReplyReader(
 			const now = Date.now();
 			const earlier =
 				head !== undefined &&
-				(lock?.waitingList() ?? []).some((item) => item.token !== lineToken && item.at < head.at && item.beat !== undefined && now - item.beat < FRESH_MS);
+				(lock?.waitingList() ?? []).some(
+					(item) => item.token !== lineToken && item.at < head.at && !item.asking && item.beat !== undefined && now - item.beat < FRESH_MS,
+				);
 			if (!head || !earlier) {
 				yielding = undefined;
 				return false;
 			}
-			if (yielding?.at !== head.at) yielding = { at: head.at, since: now };
-			return now - yielding.since < YIELD_CAP_MS;
+			if (yielding?.at !== head.at) yielding = { at: head.at, spent: 0 };
+			if (yielding.last !== undefined) yielding.spent += now - yielding.last;
+			yielding.last = now;
+			return yielding.spent < yieldCapMs;
+		};
+		/** Whether this line must wait: a reading plays (its time does not count toward the yield cap), or it yields. */
+		const lineBusy = (): boolean => {
+			if (playing()) {
+				if (yielding) yielding.last = undefined;
+				return true;
+			}
+			return (deps.holdLine?.() ?? false) || yields();
+		};
+		/** How many of this session's questions to a human (output, voice download) are open before a reading (S16, L138). */
+		let humanWait = 0;
+		const human = async <T>(prompt: () => Promise<T>): Promise<T> => {
+			humanWait++;
+			publish();
+			try {
+				return await prompt();
+			} finally {
+				humanWait--;
+				publish();
+			}
 		};
 		/** Republishes this session's line every WATCH_MS while it has readings waiting: its heartbeat (S16). */
 		let beating: ReturnType<typeof setInterval> | undefined;
@@ -275,12 +308,16 @@ export function createReplyReader(
 				return;
 			}
 			if (beating) return;
-			beating = setInterval(() => publish(), WATCH_MS);
+			// Each beat also checks whether the line emptied meanwhile (a start dropped while it waited on a human, L138).
+			beating = setInterval(() => {
+				publish();
+				heartbeat();
+			}, WATCH_MS);
 			beating.unref?.();
 		};
 		/** This session's waiting auto-reads; without a usable XDG_RUNTIME_DIR it only waits for this session's readings. */
 		const queue = createAutoQueue<Waiting>({
-			busy: () => playing() || (deps.holdLine?.() ?? false) || yields(),
+			busy: lineBusy,
 			start: (item, still, waited) =>
 				readAloud(item.ctx, item.name, item.label, item.markdown, item.language, {
 					mark: item.mark,
@@ -319,7 +356,7 @@ export function createReplyReader(
 			// The one being started stays listed until it claims the machine, so no other session takes its turn meanwhile.
 			const line = queue.starting && !current ? [queue.starting, ...queue.items] : queue.items;
 			const items: WaitingItem[] = line.map((item) => ({ name: item.name, at: item.at, mark: item.mark }));
-			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), items, sessionTag());
+			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), items, sessionTag(), humanWait > 0);
 		};
 		/** How many readings wait: on the machine, or in this session's line without a usable XDG_RUNTIME_DIR (S16). */
 		const waitingCount = (): number => {
@@ -465,7 +502,7 @@ export function createReplyReader(
 				try {
 					voice = await downloadVoice({
 						env,
-						confirm: async (message) => ctx.hasUI && own(() => ctx.ui.confirm("Reply reader voice", message)),
+						confirm: async (message) => ctx.hasUI && human(() => own(() => ctx.ui.confirm("Reply reader voice", message))),
 					});
 				} catch (error) {
 					ctx.ui.notify((error as Error).message, "error");
@@ -477,7 +514,7 @@ export function createReplyReader(
 				}
 			}
 
-			const output = await outputForReading(ctx);
+			const output = await human(() => outputForReading(ctx));
 			if (!output) {
 				ctx.ui.notify("Reading cancelled: no output chosen.", "info");
 				return "done";

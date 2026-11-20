@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { endProcessesOf, processesOf } from "./processes.ts";
 
 /**
  * T21 (S1, "One reading per machine"): every Pi session here is a real Node process that loads the extension,
@@ -20,9 +21,12 @@ const LOCK = pathToFileURL(resolve(import.meta.dirname, "..", "src", "reading-lo
  * Besides commands: `turn <text>` is an agent run that ends with that reply (T32), `await <file>` waits until
  * `<root>/<file>` exists, and `esc` presses Esc. The "Something is being read." question (T33) is answered as Pi's TUI
  * would, with the keys of `answer now|after|dismiss` (default now, today's behaviour), and recorded in `asked`.
+ * `shutdown` ends the session as Pi does (session_shutdown) and `exit` ends the process at once. While
+ * `<root>/ask-<name>` exists, the output question stays open (`<root>/asked-<name>` says it was asked), as a human who
+ * has not answered yet. `<root>/yield-cap` (ms), when present, replaces the 10 s yield cap (S16).
  */
 const DRIVER = `
-import { existsSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 const [extension, envJson, root, name, ...commands] = process.argv.slice(2);
 const { createReplyReader } = await import(extension);
 const env = JSON.parse(envJson);
@@ -41,7 +45,8 @@ const registered = new Map();
 const events = new Map();
 // While <root>/slow-<name> exists, the session's line starts nothing, as a session slow to claim (S16).
 const holdLine = () => existsSync(root + "/slow-" + name);
-createReplyReader({ env, hostname: "hs-node", loadSherpa, holdLine })({
+const yieldCapMs = existsSync(root + "/yield-cap") ? Number(readFileSync(root + "/yield-cap", "utf8")) : undefined;
+createReplyReader({ env, hostname: "hs-node", loadSherpa, holdLine, yieldCapMs })({
 	registerCommand: (n, o) => registered.set(n, o),
 	on: (e, h) => events.set(e, h),
 });
@@ -53,7 +58,12 @@ const ctx = {
 	hasUI: true, mode: "tui", cwd: root, sessionManager: { getBranch: () => branch },
 	ui: {
 		notify: (message, type) => { state.notes.push([message, type]); save(); },
-		select: async () => undefined,
+		select: async () => {
+			if (!existsSync(root + "/ask-" + name)) return undefined;
+			writeFileSync(root + "/asked-" + name, "");
+			while (existsSync(root + "/ask-" + name)) await sleep(20);
+			return undefined;
+		},
 		confirm: async () => false,
 		setStatus: (_key, text) => { state.statuses.push(text ?? null); save(); },
 		onTerminalInput: (handler) => ((input = handler), () => (input = undefined)),
@@ -80,6 +90,10 @@ for (const command of commands) {
 		while (!existsSync(root + "/" + rest)) await sleep(20);
 	} else if (cmd === "answer") {
 		answer = rest;
+	} else if (cmd === "shutdown") {
+		events.get("session_shutdown")({ type: "session_shutdown" }, ctx);
+	} else if (cmd === "exit") {
+		process.exit(0);
 	} else if (cmd === "esc") {
 		state.notes.push(["esc", input?.("\\x1b") ?? null]);
 		save();
@@ -100,10 +114,13 @@ process.exit(0);
 let root: string;
 let env: NodeJS.ProcessEnv;
 let spawned: ChildProcess[];
+/** The process groups of the sessions this test started (each session leads its own, with its players in it). */
+let groups: number[];
 
 beforeEach(() => {
 	root = mkdtempSync(join(tmpdir(), "reply-reader-lock-"));
 	spawned = [];
+	groups = [];
 	mkdirSync(join(root, "bin"));
 	mkdirSync(join(root, "run"));
 	env = { PATH: join(root, "bin"), HOME: join(root, "home"), XDG_DATA_HOME: join(root, "data"), XDG_CONFIG_HOME: join(root, "config"), XDG_RUNTIME_DIR: join(root, "run") };
@@ -117,6 +134,9 @@ afterEach(async () => {
 	for (const pid of players) kill(pid);
 	// A stopped player still logs "term"; let it finish before its folder goes.
 	await waitFor(() => players.every((pid) => !alive(pid)), 3000).catch(() => {});
+	// Whatever else this test started and is still there (an earlier player of a session, a player's sleep or watcher
+	// orphaned by a SIGKILL) goes too: a test leaves no process behind (L138).
+	await endProcessesOf(root, groups);
 	rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
@@ -126,14 +146,15 @@ const MODEL_FILES = ["duration_predictor.int8.onnx", "text_encoder.int8.onnx", "
 /**
  * An installed voice and a paplay that records its pid as `play-<session pid>.pid` and plays for 30 s, or until
  * `<root>/end-<its pid>` exists (T32). Its sleep holds none of the session's pipes, so the session sees the player
- * end as soon as it is killed. `<root>/log` gets `start <session pid>`, then `end <session pid>` when it played
+ * end as soon as it is killed; once the player is gone however it ended (a SIGKILL skips its trap), its watcher ends
+ * the sleep and itself, so nothing of it is left behind. `<root>/log` gets `start <session pid>`, then `end <session pid>` when it played
  * through or `term <session pid>` when it was stopped.
  */
 function installVoice(): void {
 	const paplay = join(root, "bin", "paplay");
 	writeFileSync(
 		paplay,
-		`#!/bin/sh\nPATH=/usr/bin:/bin\necho "start $PPID" >> "${root}/log"\necho $$ > "${root}/play-$PPID.pid"\nsleep 30 </dev/null >/dev/null 2>&1 &\ns=$!\n(while [ ! -e "${root}/end-$$" ]; do sleep 0.02; done; kill $s) </dev/null >/dev/null 2>&1 &\nw=$!\ntrap 'kill $s $w 2>/dev/null; echo "term $PPID" >> "${root}/log"; exit 143' TERM\nwait $s\nkill $w 2>/dev/null\ncat > /dev/null\necho "end $PPID" >> "${root}/log"\n`,
+		`#!/bin/sh\nPATH=/usr/bin:/bin\necho "start $PPID" >> "${root}/log"\necho $$ > "${root}/play-$PPID.pid"\nsleep 30 </dev/null >/dev/null 2>&1 &\ns=$!\n(while [ ! -e "${root}/end-$$" ] && kill -0 $$ 2>/dev/null; do sleep 0.02; done; kill $s) </dev/null >/dev/null 2>&1 &\nw=$!\ntrap 'kill $s $w 2>/dev/null; echo "term $PPID" >> "${root}/log"; exit 143' TERM\nwait $s\nkill $w 2>/dev/null\ncat > /dev/null\necho "end $PPID" >> "${root}/log"\n`,
 	);
 	chmodSync(paplay, 0o755);
 	const dir = join(root, "data", "pi-reply-reader", "voices", BUNDLE);
@@ -155,8 +176,11 @@ function start(name: string, commands: string[], sessionEnv: NodeJS.ProcessEnv =
 	const child = spawn(process.execPath, [join(root, "driver.mjs"), EXTENSION, JSON.stringify(sessionEnv), root, name, ...commands], {
 		env: { PATH: process.env.PATH, HOME: join(root, "home") },
 		stdio: ["ignore", "ignore", "inherit"],
+		// Its own process group, so afterEach ends it with every player and child it left (L138).
+		detached: true,
 	});
 	spawned.push(child);
+	if (child.pid) groups.push(child.pid);
 	const exited = new Promise<void>((done) => child.on("exit", () => done()));
 	return { name, child, exited, seen: () => JSON.parse(readFileSync(join(root, `${name}.json`), "utf8")) as Seen };
 }
@@ -218,6 +242,16 @@ describe("one reading per machine (T21)", { timeout: 30000 }, () => {
 		const a = start("a", ["read"]);
 		const playerA = await playerOf(a.child);
 		installVoice();
+		// The player can write its pid before session a records it in the entry; frozen before that, no reading could
+		// know which player to end (the cause of L138's timeout, not load).
+		const entry = join(root, "run", "pi-reply-reader", "reading.json");
+		await waitFor(() => {
+			try {
+				return (JSON.parse(readFileSync(entry, "utf8")) as { player?: number }).player === playerA;
+			} catch {
+				return false;
+			}
+		});
 		// Session a is frozen, so only the newer reading can end its player.
 		a.child.kill("SIGSTOP");
 		try {
@@ -225,7 +259,9 @@ describe("one reading per machine (T21)", { timeout: 30000 }, () => {
 			const playerB = await playerOf(b.child);
 			await new Promise((done) => setTimeout(done, 1000));
 			expect(alive(playerA)).toBe(true);
-			await waitFor(() => !alive(playerA), 3000);
+			// SIGKILL comes 2 s after the SIGTERM, from b's timer: room for a loaded machine (L138: 3 s once fell short at
+			// load average 5-7). That it ignored SIGTERM for the first second is still checked above.
+			await waitFor(() => !alive(playerA), 8000);
 			expect(alive(playerB)).toBe(true);
 		} finally {
 			try {
@@ -302,6 +338,16 @@ describe("one reading per machine (T21)", { timeout: 30000 }, () => {
 		expect(alive(plain.pid!)).toBe(true);
 		expect(alive(marked.pid!)).toBe(true);
 		expect(alive(playerC)).toBe(true);
+	});
+
+	it("(L138) a session that exits while its reading plays leaves no process of its player behind", async () => {
+		const a = start("a", ["read", "await exit-a", "exit"]);
+		await playerOf(a.child);
+		writeFileSync(join(root, "exit-a"), "");
+		await a.exited;
+		// The reader SIGKILLs its player as it exits (S13 c), which skips the fake player's trap.
+		await waitFor(() => processesOf(root).length === 0, 2000).catch(() => {});
+		expect(processesOf(root)).toEqual([]);
 	});
 
 	it("without a usable XDG_RUNTIME_DIR each session keeps to itself, without errors", async () => {
@@ -649,6 +695,102 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 			}
 			go("go-a");
 			await a.exited;
+		});
+	});
+
+	describe("the yield cap counts only free time; asking or ended sessions are not waited for (S16, L138)", () => {
+		const lineFiles = () => {
+			const dir = join(root, "run", "pi-reply-reader");
+			return existsSync(dir) ? readdirSync(dir).filter((name) => /^line-.*\.json$/.test(name)) : [];
+		};
+		const starts = () => lines().filter((line) => line.startsWith("start"));
+		/** x reads; then c, d and b join the line in that order, each seen on the machine before the next joins. */
+		const lineUp = async () => {
+			const x = start("x", ["read"]);
+			const playerX = await playerOf(x.child);
+			const joined: Session[] = [];
+			for (const name of ["c", "d", "b"]) {
+				joined.push(auto(name, ["Uno."]));
+				await waitFor(() => existsSync(join(root, "x.json")) && x.seen().statuses.some((s) => s?.includes(`· ${joined.length} waiting ·`) ?? false));
+			}
+			return { x, playerX, c: joined[0], d: joined[1], b: joined[2] };
+		};
+		const order = (...sessions: Session[]) => sessions.map((s) => `start ${s.child.pid}`);
+		const nulls = (s: Session) => s.seen().statuses.filter((x) => x === null).length;
+
+		it("after a reading longer than the cap, the next waits for its turn: d, slow to claim, still goes before b", { timeout: 60000 }, async () => {
+			writeFileSync(join(root, "yield-cap"), "2500");
+			const { x, playerX, c, d, b } = await lineUp();
+			finish(playerX);
+			const playerC = await playerOf(c.child);
+			// c plays longer than the cap while d and b wait: that time is not theirs to count.
+			await new Promise((resolve) => setTimeout(resolve, 3500));
+			go("slow-d");
+			finish(playerC);
+			await new Promise((resolve) => setTimeout(resolve, 800));
+			rmSync(join(root, "slow-d"));
+			await playThrough(() => [c, d, b].every((s) => nulls(s) === 1));
+			for (const s of [c, d, b]) go(`go-${s.name}`);
+			await Promise.all([x, c, d, b].map((s) => s.exited));
+			expect(starts()).toEqual(order(x, c, d, b));
+		});
+
+		it("with natural timing, x then c (longer than the cap), d and b play in join order, every time", { timeout: 90000 }, async () => {
+			writeFileSync(join(root, "yield-cap"), "1500");
+			for (let round = 0; round < 3; round++) {
+				rmSync(join(root, "log"), { force: true });
+				for (const name of ["c", "d", "b"]) rmSync(join(root, `go-${name}`), { force: true });
+				const { x, playerX, c, d, b } = await lineUp();
+				finish(playerX);
+				const playerC = await playerOf(c.child);
+				await new Promise((resolve) => setTimeout(resolve, 2500));
+				finish(playerC);
+				await playThrough(() => [c, d, b].every((s) => nulls(s) === 1));
+				for (const s of [c, d, b]) go(`go-${s.name}`);
+				await Promise.all([x, c, d, b].map((s) => s.exited));
+				expect({ round, starts: starts() }).toEqual({ round, starts: order(x, c, d, b) });
+			}
+		});
+
+		/** Two outputs, so the first reading of a session asks where it should sound. */
+		const twoOutputs = () => {
+			mkdirSync(join(root, "config2", "pi-reply-reader"), { recursive: true });
+			writeFileSync(join(root, "config2", "pi-reply-reader", "outputs.json"), JSON.stringify({ desk: "tcp:desk:4713" }));
+			return { ...env, XDG_CONFIG_HOME: join(root, "config2") };
+		};
+
+		it("a session ended while its reading waits on the output question stops beating: no line file is left", async () => {
+			go("ask-a");
+			const a = start("a", ["read-auto on", "turn Uno.", "await shut-a", "shutdown", "await go-a"], twoOutputs());
+			await waitFor(() => existsSync(join(root, "asked-a")) && lineFiles().length === 1);
+			go("shut-a");
+			await new Promise((resolve) => setTimeout(resolve, 1500));
+			expect(lineFiles()).toEqual([]);
+			rmSync(join(root, "ask-a"));
+			go("go-a");
+			await a.exited;
+			expect(lineFiles()).toEqual([]);
+			expect(hasPlayer(a)).toBe(false);
+		});
+
+		it("a session waiting on a human (the output question) is not waited for: another session's readings start at once", async () => {
+			go("ask-a");
+			const a = start("a", ["read-auto on", "turn Uno.", "await go-a"], twoOutputs());
+			await waitFor(() => existsSync(join(root, "asked-a")) && lineFiles().length === 1);
+			const b = auto("b", ["Uno.", "Dos."]);
+			// Without the ~10 s yield to a's reading, which waits for its human.
+			await waitFor(() => hasPlayer(b), 4000);
+			const first = await playerOf(b.child);
+			finish(first);
+			const pidFile = join(root, `play-${b.child.pid}.pid`);
+			await waitFor(() => readFileSync(pidFile, "utf8").trim() !== "" && Number(readFileSync(pidFile, "utf8")) !== first, 4000);
+			finish(Number(readFileSync(pidFile, "utf8")));
+			await waitFor(() => nulls(b) === 2);
+			rmSync(join(root, "ask-a"));
+			go("go-a");
+			go("go-b");
+			await Promise.all([a.exited, b.exited]);
+			expect(starts()).toEqual([`start ${b.child.pid}`, `start ${b.child.pid}`]);
 		});
 	});
 

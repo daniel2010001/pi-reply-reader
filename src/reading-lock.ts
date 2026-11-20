@@ -53,6 +53,8 @@ export interface MachineWaiting extends WaitingItem {
 	token: string;
 	/** When its session last published its line (its heartbeat, S16); undefined from a version that does not beat. */
 	beat?: number;
+	/** Its session waits on a human (the output question, a voice download confirm): nobody yields to it (S16, L138). */
+	asking?: true;
 }
 
 /** One reading's hold on the machine. Nothing here throws. */
@@ -99,9 +101,9 @@ export interface ReadingLock {
 	/**
 	 * Publishes the line of the session `token` (S16), stamped with the time as its heartbeat; an empty line removes it.
 	 * `tag` (a few characters of Pi's session id) tells it apart from another session with the same label; the token's
-	 * last four characters otherwise.
+	 * last four characters otherwise. `asking`: the session waits on a human before its next reading can start.
 	 */
-	publishLine(token: string, session: string, items: readonly WaitingItem[], tag?: string): void;
+	publishLine(token: string, session: string, items: readonly WaitingItem[], tag?: string, asking?: boolean): void;
 	/**
 	 * Every reading waiting on the machine, in the order each joined its line; dropped ones and dead sessions' are left
 	 * out. Two sessions with the same label are told apart as `<label> #<tag>` (S16, L135).
@@ -352,14 +354,23 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 			};
 			return exclusive(toggle, toggle);
 		},
-		publishLine(token, session, items, tag) {
+		publishLine(token, session, items, tag, asking) {
 			if (items.length === 0) {
 				try {
 					unlinkSync(lineFile(token));
 				} catch {}
 				return;
 			}
-			put(lineFile(token), token, { token, session, tag: tag || token.slice(-4), beat: Date.now(), pid: process.pid, pidStart: startTime(process.pid), items });
+			put(lineFile(token), token, {
+				token,
+				session,
+				tag: tag || token.slice(-4),
+				beat: Date.now(),
+				...(asking ? { asking: true } : {}),
+				pid: process.pid,
+				pidStart: startTime(process.pid),
+				items,
+			});
 		},
 		waitingList() {
 			let names: string[];
@@ -380,6 +391,7 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 						session?: unknown;
 						tag?: unknown;
 						beat?: unknown;
+						asking?: unknown;
 						pid?: unknown;
 						pidStart?: unknown;
 						items?: unknown;
@@ -398,7 +410,15 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 						// Dropped by an explicit action since it was queued (S8): it will never play.
 						if (itemMark !== mark) continue;
 						const beat = typeof line.beat === "number" ? line.beat : undefined;
-						all.push({ name: item.name, at: item.at, mark: itemMark, session: line.session, token: line.token, beat });
+						all.push({
+							name: item.name,
+							at: item.at,
+							mark: itemMark,
+							session: line.session,
+							token: line.token,
+							beat,
+							...(line.asking === true ? { asking: true as const } : {}),
+						});
 						tags.set(line.token, typeof line.tag === "string" && line.tag ? line.tag : line.token.slice(-4));
 						labels.set(line.session, (labels.get(line.session) ?? new Set<string>()).add(line.token));
 					}

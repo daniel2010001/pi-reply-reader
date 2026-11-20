@@ -139,8 +139,11 @@ reading entry in `$XDG_RUNTIME_DIR/pi-reply-reader/` (`line-<id>.json`, removed 
 session ends, `/reload` included; a dead session's is ignored and removed). Readings play in the listed order:
 while a session has readings waiting it republishes its line every 250 ms (a heartbeat), and a session whose
 next reading has an earlier one of another session before it lets that one go first for as long as that
-session's heartbeat is under 2 seconds old, 10 seconds at most per reading. A reading being started keeps its
-place until it plays. A frozen, hung or dead session stops beating, so it holds the others about 2 seconds at
+session's heartbeat is under 2 seconds old, for at most 10 seconds per reading. Those 10 seconds count only
+time the machine is free and the session waits for that one: time another reading plays is not counted. A
+reading being started keeps its place until it plays, except while its session waits for you (the output
+question, the voice download confirm): the line file says so, and the other sessions do not wait for it. A
+session that ends, or drops its line, stops beating at once, even if a reading was being started. A frozen, hung or dead session stops beating, so it holds the others about 2 seconds at
 most; then the next reading plays. Without a usable `XDG_RUNTIME_DIR` no session can see
 another's line, so `/read-queue` lists this session's only and says so (`Waiting in this session (other
 sessions are not visible without XDG_RUNTIME_DIR):`), and the footer counts this session's.

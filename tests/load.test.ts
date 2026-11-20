@@ -8,6 +8,7 @@ import replyReader, { createReplyReader } from "../extensions/reply-reader.ts";
 import type { SherpaRequest, SherpaTts } from "../src/playback.ts";
 import { READER_EVENTS } from "../src/reader-events.ts";
 import { speechText } from "../src/speech-text.ts";
+import { endProcessesOf } from "./processes.ts";
 
 let root: string;
 let env: NodeJS.ProcessEnv;
@@ -27,7 +28,11 @@ beforeEach(() => {
 	mkdirSync(join(root, "bin"));
 	env = { PATH: join(root, "bin"), HOME: join(root, "home"), XDG_DATA_HOME: join(root, "data"), XDG_CONFIG_HOME: join(root, "config") };
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+afterEach(async () => {
+	// Every player (and its children) this test started goes before its folder (L138: tests leaked fake players).
+	await endProcessesOf(root);
+	rmSync(root, { recursive: true, force: true });
+});
 
 const log = (name: string) => join(root, name);
 const read = (name: string) => readFileSync(log(name), "utf8");

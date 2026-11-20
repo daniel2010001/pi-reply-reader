@@ -19,7 +19,10 @@
   `· N waiting ·` now counts every session's; without a usable `XDG_RUNTIME_DIR` both stay per session.
   Readings play in the listed order: a session with readings waiting refreshes its line every 250 ms, and a
   session whose next reading has an earlier one of another session before it yields to it while that
-  session's line is under 2 s old (10 s at most per reading), so a frozen session holds the others about 2 s. Two sessions with the
+  session's line is under 2 s old (10 s at most per reading, counting only time the machine is free, never
+  time another reading plays), so a frozen session holds the others about 2 s. A session waiting for you (the
+  output question, the voice download confirm) says so in its line and is not waited for, and a session that
+  ends or drops its line stops beating at once, even mid-start. Two sessions with the
   same label are listed with a tag from their session ID (`api #3f9c`).
 - Auto-read also reads the prompts that wait for you, through the same line: an `ask_user_question` /
   `ask_user_choice` call reads each question with its option labels only ("Pregunta 1 de 2: ¿Cómo suena?

@@ -11,6 +11,7 @@ import { speechText, spokenFragments } from "../src/speech-text.ts";
 import { playerTimeout, reapOrphans } from "../src/player.ts";
 import { PLAYER_MARK } from "../src/reading-lock.ts";
 import { SPEAKERS, type Voice } from "../src/voice.ts";
+import { endProcessesOf } from "./processes.ts";
 
 let root: string;
 let env: NodeJS.ProcessEnv;
@@ -23,7 +24,11 @@ beforeEach(() => {
 	mkdirSync(join(root, "bin"));
 	env = { PATH: join(root, "bin"), HOME: root };
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+afterEach(async () => {
+	// Every player (and its children) this test started goes before its folder (L138: tests leaked fake players).
+	await endProcessesOf(root);
+	rmSync(root, { recursive: true, force: true });
+});
 
 const log = (name: string) => join(root, name);
 const read = (name: string) => readFileSync(log(name), "utf8");

@@ -35,7 +35,10 @@ export interface AutoQueue<T> {
 	readonly size: number;
 	/** The replies waiting, in order (S16). */
 	readonly items: readonly T[];
-	/** The reply being started, until its start settles (S16: it keeps its place in the machine's list meanwhile). */
+	/**
+	 * The reply being started, until its start settles (S16: it keeps its place in the machine's list meanwhile); once
+	 * clear() dropped it, undefined even while its start is still in flight (an output question left open, L138).
+	 */
 	readonly starting: T | undefined;
 }
 
@@ -44,8 +47,8 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 	let items: { item: T; waited: boolean }[] = [];
 	/** Bumped by clear(); a start begun under an older generation is no longer current. */
 	let generation = 0;
-	/** The reply whose start is in flight; only one at a time. */
-	let starting: { item: T } | undefined;
+	/** The reply whose start is in flight, with the generation it started under; only one at a time. */
+	let starting: { item: T; generation: number } | undefined;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 
 	const later = (): void => {
@@ -67,7 +70,7 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 		const { item } = entry;
 		const mine = generation;
 		const current = () => mine === generation;
-		starting = { item };
+		starting = { item, generation: mine };
 		options.onChange?.();
 		const attempt = (async () => options.start(item, current, entry.waited))().catch((): StartResult => "done");
 		void attempt.then((result) => {
@@ -94,8 +97,9 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 		},
 		clear(keep) {
 			items = keep ? items.filter((entry) => keep(entry.item)) : [];
-			options.onChange?.();
+			// Before onChange, so the line published then no longer lists a dropped reply still starting.
 			if (!keep || !starting || !keep(starting.item)) generation++;
+			options.onChange?.();
 			clearTimeout(timer);
 			timer = undefined;
 			// Kept replies still wait for the machine.
@@ -113,7 +117,7 @@ export function createAutoQueue<T>(options: AutoQueueOptions<T>): AutoQueue<T> {
 			return items.map((entry) => entry.item);
 		},
 		get starting() {
-			return starting?.item;
+			return starting && starting.generation === generation ? starting.item : undefined;
 		},
 	};
 }
