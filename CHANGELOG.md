@@ -105,8 +105,11 @@
   líneas` "doscientas mil líneas"); times read like a clock (`21:02` "veintiuno cero dos", `07:00` "siete en
   punto"); dates with a year read in full (`2026-10-27` and `27/10/2026` "veintisiete de octubre de dos mil
   veintiséis", "October twenty seven, two thousand twenty six"); globs (`*.hs.lan` "cualquier hs punto lan",
-  `bin/*` "todo lo de bin", `lab-*` "lab algo"); HTML tags (`<iframe>` "la etiqueta iframe", "the iframe
-  tag"). Diagnostics no longer report globs and tags.
+  `bin/*` "todo lo de bin", `lab-*` "lab algo"; `**negrita**` and `*x*`, only letters inside `*` or `**`, are
+  not globs and read only the letters: "negrita"); tags, HTML or not: a pair reads its name and content (`<command>ls -la</command>` "command:
+  ls -la"), a lone `<archivo>` or `<iframe>` only its name ("archivo", "iframe"), a lone `</a>` or `<br/>`
+  "la etiqueta a" ("the a tag"); `<< text >>` reads like quotes, only the text. Diagnostics no longer report
+  globs and tags.
 - Internal: the cleanup now builds a narration plan (blocks with a role: heading, paragraph, item, row, code
   block) and renders it in the reading's language; playback speaks the rendered fragments with each one's own
   pause instead of splitting the text again. `speechNarration(markdown, language?)` returns the text, the

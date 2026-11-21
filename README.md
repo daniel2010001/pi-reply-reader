@@ -469,8 +469,14 @@ agent", "the branch origin main", "a commit", ", line 42", "1 point 1", "approxi
     ("October twenty seven, two thousand twenty six"); `17/10` and `1/2` stay as they are;
   - a glob: `*.hs.lan` becomes "cualquier hs punto lan" ("any"), `bin/*` "todo lo de bin" ("everything in"),
     `lab-*` "lab algo" ("something");
-  - an HTML tag: `<iframe>`, `</a>` or `<br/>` becomes "la etiqueta iframe" ("the iframe tag"; after
-    "etiqueta" or "tag", only the name);
+  - tags, HTML or not (a name of letters, digits and `-`): a pair reads the name, a colon and the content, the
+    closing tag silent (`<command>ls -la</command>` becomes "command: ls -la", `<thinking>dudo</thinking>`
+    "thinking: dudo"); a lone `<name>` reads only the name (`reply-reader <archivo>` becomes "reply-reader
+    archivo", "un `<iframe>`" "un iframe"); a lone closing `</a>` or a self-closing `<br/>` becomes "la etiqueta
+    a" ("the a tag"; after "etiqueta" or "tag", only the name);
+  - `<< text >>` reads like quotes: the marks are silent and the text gets a short pause around it (`<< esto no
+    es un tag >>` becomes "esto no es un tag"); a shift such as `a << b`, with no closing `>>` or no words
+    inside, stays as written;
   - numbers, last, in the text's language: `51` becomes "cincuenta y uno" ("fifty one"), `11.457` "once mil
     cuatrocientos cincuenta y siete", `1,2` "uno coma dos", `1.4` "uno punto cuatro", `-16` "menos dieciséis".
     In Spanish the number agrees with the next word: `1 segundo` "un segundo", `21 líneas` "veintiuna líneas",
@@ -494,10 +500,10 @@ agent", "the branch origin main", "a commit", ", line 42", "1 point 1", "approxi
   with `+` keeps the masculine ("trescientos o más líneas"), a date without a year or written month first
   keeps its slashes ("diecisiete/diez"), eight-digit stamps such as `20261026` are read as one number, and an
   English thousands comma in Spanish text (`1,044`) reads as a decimal.
-- Times, globs and tags are guessed from their shape: a ratio such as `1:30` reads as a time, a placeholder
-  such as `<archivo>` reads as a tag ("la etiqueta archivo"), a tag after an article doubles it ("un
-  `<iframe>`" reads "un la etiqueta iframe"), and Markdown written as code (`**negrita**`) reads as a glob
-  ("cualquier negrita algo").
+- Times, globs and tags are guessed from their shape: a ratio such as `1:30` reads as a time; a token of only
+  letters wrapped in `*` or `**` is taken for Markdown written as code and reads only its letters
+  (`**negrita**` becomes "negrita"), not a glob; inline HTML pairs read like any other pair (`<em>todas</em>` becomes
+  "em: todas"); and a tag glued to a word (`a<b>c`, `List<String>`) stays as written.
 - The voice speaks with Spanish pronunciation, also for English text (only the words the cleanup adds
   switch to English there).
 

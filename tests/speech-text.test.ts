@@ -851,11 +851,47 @@ describe("S2 (k1)-(k5): readings, round 3 (L112)", () => {
 		expect(narration.diagnostics).toEqual([{ line: 1, token: "a+b" }]);
 	});
 
-	it("(k5) reads an HTML tag as 'la etiqueta name' / 'the name tag', only the name right after etiqueta/tag", () => {
-		expect(speechText("Usá `<iframe>`, `</a>` y `<br/>`, y la etiqueta `<div>`.")).toBe(
-			"Usá la etiqueta iframe, la etiqueta a y la etiqueta br, y la etiqueta div.",
+	it("(k4) letters wrapped in * or ** in code (Markdown emphasis) read only the letters, not as a glob (L114, L128)", () => {
+		expect(speechText("Escribí `**negrita**`, `*nota*` y `**matrícula**`, no `*.md`.")).toBe("Escribí negrita, nota y matrícula, no cualquier md.");
+		expect(speechNarration("Escribí `**negrita**` o `*nota*`.", "es").diagnostics).toEqual([]);
+		// Only letters inside count as emphasis; real globs wrapped in * stay globs (L124).
+		expect(speechText("Probá `*_test*` y `*.bak-20261026-*`.")).toBe(
+			"Probá cualquier test algo y cualquier bak veinte millones doscientos sesenta y un mil veintiséis algo.",
 		);
-		expect(speechText("Dentro del `<iframe>` va <my-el>.")).toBe("Dentro de la etiqueta iframe va la etiqueta my el.");
+	});
+
+	it("(k5) a pair <name>…</name> reads the name, a colon and the content; the closing tag is silent (L118)", () => {
+		expect(speechText("Corré `<command>ls -la</command>` y pensá `<thinking>dudo</thinking>`.")).toBe("Corré command: ls -la y pensá thinking: dudo.");
+		// In prose the opening tag may be glued to the content, and any name works, HTML or not.
+		expect(speechText("Corré <command>ls -la</command> ahora y <my-widget>hola</my-widget>.")).toBe(
+			"Corré command: ls -la ahora y my widget: hola.",
+		);
+		// Across lines of the same text.
+		expect(speechText("<thinking>\nDudo del `<iframe>`.\n</thinking>\nListo.")).toBe("thinking:\nDudo del iframe.\n\nListo.");
+		expect(speechText("Run <command>ls -la</command> and the `<b>x</b>` in the page.", "en")).toBe("Run command: ls -la and the b: x in the page.");
+		expect(speechNarration("Corré <command>ls -la</command>.", "es").diagnostics).toEqual([]);
+	});
+
+	it("(k5) a lone <name> reads only its name (L118)", () => {
+		expect(speechText("Corré `reply-reader <archivo>` y usá un `<iframe>` o <path>.")).toBe("Corré reply-reader archivo y usá un iframe o path.");
+		expect(speechText("Pass `<path>` and the `<id>` to the command.", "en")).toBe("Pass path and the id to the command.");
+		// Inside a path or a technical token the placeholder reads by name too.
+		expect(speechText("Baja por `/catalog/download/<id>` o `hs:<ruta>`.")).toBe("Baja por catalog download id o hs:ruta.");
+		// Markup glued to other text, and generics, are not tags.
+		expect(speechText("Ver `a<b>c` y `List<String>`.")).toBe("Ver a<b>c y List<String>.");
+	});
+
+	it("(k5) << text >> reads like quotes: the marks silent, a short pause around the text (L118)", () => {
+		expect(speechText("<< esto no es un tag >>")).toBe("esto no es un tag");
+		expect(speechText("Dijo << hola mundo >> y se fue; también `<< otra cosa >>`.")).toBe("Dijo, hola mundo, y se fue; también, otra cosa.");
+		expect(speechText("It said << not a tag >> in the reply.", "en")).toBe("It said, not a tag, in the reply.");
+		// A shift with no closing >> (or with no words inside) keeps today's reading and swallows nothing.
+		expect(speechText("Usá `a << b` y `x << 2 >> 1` en el código.")).toBe("Usá a << b y x << dos >> uno en el código.");
+	});
+
+	it("(k5) a lone closing </name> or a self-closing <name/> reads 'la etiqueta name' / 'the name tag', only the name after etiqueta/tag", () => {
+		expect(speechText("Usá `<iframe>`, `</a>` y `<br/>`, y la etiqueta `<div>`.")).toBe("Usá iframe, la etiqueta a y la etiqueta br, y la etiqueta div.");
+		expect(speechText("Dentro del `<iframe>` va <my-el>.")).toBe("Dentro del iframe va my el.");
 		expect(speechText("Use the `<iframe>` tag, then `</a>` and the tag `<h1>` in the page.", "en")).toBe(
 			"Use the iframe tag, then the a tag and the tag h one in the page.",
 		);
