@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- The one-time `setpriv --pdeathsig` check no longer blocks Pi for up to 2 s and no longer assumes `/bin/sh`: it
+  runs in the background (`setpriv --pdeathsig KILL setpriv --version`) from a Pi session's start, and players
+  started before it passed run without `setpriv`.
+- A listener reading ended by another session's `/read-stop` or a newer reading ends quietly (no error, footer
+  cleared), now covered by a test.
+- Music hooks: the `after` hook that runs is the one saved when the music stepped aside, so changing the settings
+  during a reading cannot leave a `before` without its `after`.
+- `reply-reader --serve` keeps the listener's music aside for 4 s after a reading only when it stepped it aside
+  (nothing playing exits at once), and SIGTERM or Ctrl+C during those 4 s brings the music back before it exits.
+- `package.json` `bin` is `dist/bin/reply-reader.js` (no `./`), so `npm publish` no longer warns that it was
+  invalid and corrected it.
+
 ## 0.2.0 — 2026-11-20
 
 - The SSH audio tunnel example now ends in a private Unix socket (`unix:/run/user/<uid>/reply-reader-pulse.sock`,

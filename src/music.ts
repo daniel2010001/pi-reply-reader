@@ -129,8 +129,13 @@ interface State {
 	pending?: true;
 	/** gentle-stream's music as it was, and the volume the duck set (`set`). */
 	music?: { mode: "duck" | "pause"; volume: number; playing: boolean; set?: number };
-	/** A hook is configured: `after` runs at the restore. */
+	/** A hook was configured at the step-aside: `after` runs at the restore. */
 	hook?: true;
+	/**
+	 * The `after` hook as it was at the step-aside ("" for none), run at the restore: a setting changed meanwhile never
+	 * unbalances before and after (S22). A state without it (written by 0.2.0) runs the `after` of the settings then.
+	 */
+	after?: string;
 	/** `--serve` keeps it aside until then (ms), for the agent host's next reading (S22). */
 	hold?: number;
 }
@@ -218,10 +223,11 @@ const wholeVolume = (value: unknown): value is number => typeof value === "numbe
  */
 function validState(value: unknown): State | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-	const { token, pending, music, hook, hold } = value as Record<string, unknown>;
+	const { token, pending, music, hook, after, hold } = value as Record<string, unknown>;
 	if (typeof token !== "string" || !token) return undefined;
 	if (pending !== undefined && pending !== true) return undefined;
 	if (hook !== undefined && hook !== true) return undefined;
+	if (after !== undefined && typeof after !== "string") return undefined;
 	if (hold !== undefined && (typeof hold !== "number" || !Number.isFinite(hold))) return undefined;
 	if (music !== undefined) {
 		if (!music || typeof music !== "object" || Array.isArray(music)) return undefined;
@@ -258,8 +264,12 @@ interface Status {
 }
 
 export interface Music {
-	/** The machine's line went idle → reading (or a resume): steps the music aside unless it already is. */
-	stepAside(): void;
+	/**
+	 * The machine's line went idle → reading (or a resume): steps the music aside unless it already is. True when the
+	 * music is aside for this reading (stepped aside now, or kept so); false when there was nothing to step aside (mode
+	 * off without hooks, no gentle-stream).
+	 */
+	stepAside(): boolean;
 	/**
 	 * Restores the music when the machine is idle with nothing waiting (`force`: at once, as for a pause). Once restored,
 	 * a later reading steps it aside again.
@@ -347,11 +357,16 @@ export function createMusic(deps: {
 					const { hold: _hold, ...rest } = existing;
 					store.write(rest);
 				}
-				return;
+				return true;
 			}
-			if (!gentle && !settings.before && !settings.after) return;
-			const state: State = { token: randomUUID(), pending: true, ...(settings.before || settings.after ? { hook: true as const } : {}) };
-			if (!store.create(state)) return;
+			if (!gentle && !settings.before && !settings.after) return false;
+			const state: State = {
+				token: randomUUID(),
+				pending: true,
+				...(settings.before || settings.after ? { hook: true as const, after: settings.after ?? "" } : {}),
+			};
+			// Another reader created it meanwhile: the music is aside all the same.
+			if (!store.create(state)) return true;
 			hook("before", settings.before);
 			later(async () => {
 				let music: State["music"];
@@ -371,6 +386,7 @@ export function createMusic(deps: {
 				if (music.mode === "pause") await ctl(gentle, ["pause"]);
 				else if (music.set !== undefined && music.set < music.volume) await ctl(gentle, ["volume", String(music.set)]);
 			});
+			return true;
 		},
 		settle(options = {}) {
 			const state = store.read();
@@ -384,8 +400,8 @@ export function createMusic(deps: {
 				if (state.hold !== undefined && Date.now() < state.hold) return;
 			}
 			store.remove(state.token);
-			const settings = deps.settings();
-			if (state.hook) hook("after", settings.after);
+			// The after paired with the before that ran, as recorded at the step-aside.
+			if (state.hook) hook("after", state.after !== undefined ? state.after || undefined : deps.settings().after);
 			const saved = state.music;
 			if (!saved) return;
 			later(async () => {
@@ -412,7 +428,10 @@ export function createMusic(deps: {
 	};
 }
 
-/** Keeps the music aside for `ms` more (the listener between the agent host's readings, S22); then settle restores it. */
+/**
+ * Keeps the music aside for `ms` more (the listener between the agent host's readings, S22); then settle restores it.
+ * `ms` 0 ends a hold at once.
+ */
 export function holdMusic(env: NodeJS.ProcessEnv, ms: number): boolean {
 	const store = openStore(env);
 	const state = store.read();

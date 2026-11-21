@@ -10,7 +10,7 @@ import { createMusic, describeMusic, loadMusic, MUSIC_MODES, type MusicSettings,
 import { keyName, loadPauseKey } from "../src/pause-key.ts";
 import { startOutputReading } from "../src/listener.ts";
 import type { Reading, SherpaTts } from "../src/playback.ts";
-import { playerTimeoutMs, reapOrphans } from "../src/player.ts";
+import { checkDeathSignal, playerTimeoutMs, reapOrphans } from "../src/player.ts";
 import { questionsSection } from "../src/questions.ts";
 import { projectChanged, projectOf } from "../src/project.ts";
 import { askedQuestions, commandMarkdown, commandProgram, dialogTitle, QUESTION_TOOLS, questionsMarkdown, writtenCalls } from "../src/prompts.ts";
@@ -29,7 +29,7 @@ import {
 	speechNarration,
 	speechNarrationOfParts,
 } from "../src/speech-text.ts";
-import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
+import { downloadVoice, findVoice, onPath, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
 
 const STATUS = "reply-reader";
 const ASK_OUTPUT = "Where should readings sound?";
@@ -1224,6 +1224,8 @@ export function createReplyReader(
 			latest = ctx;
 			// Players left by a Pi that died (S13 h): a hung paplay spins at about a core until it is ended.
 			reapOrphans();
+			// The one-time setpriv check runs in the background from here, so the first reading can already use it (S13 h).
+			void checkDeathSignal(onPath("setpriv", env));
 			musicWarned = false;
 			musicProblemWarned = false;
 			sessionMusic = undefined;

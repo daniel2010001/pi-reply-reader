@@ -729,7 +729,7 @@ registerHooks({
 
 	it("is registered as the reply-reader command through its compiled build (tests/package.test.ts)", () => {
 		const pkg = JSON.parse(readFileSync(resolve(import.meta.dirname, "..", "package.json"), "utf8"));
-		expect(pkg.bin).toEqual({ "reply-reader": "./dist/bin/reply-reader.js" });
+		expect(pkg.bin).toEqual({ "reply-reader": "dist/bin/reply-reader.js" });
 		expect(pkg.files).toContain("dist");
 	});
 

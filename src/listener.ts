@@ -389,10 +389,29 @@ export async function serve(deps: {
 	});
 	/** Whether the reading played to its end (`done`): the agent host's next one may follow, so the music stays aside a while. */
 	let finished = false;
+	/** Whether the music was aside for this reading (this --serve stepped it aside, or kept it so). */
+	let aside = false;
 	const code = await serveReading();
-	// After a reading that ended, the music stays aside LISTENER_HOLD_MS for the agent host's next one in its line; a
-	// newer --serve that steps it aside meanwhile keeps it so. Stopped, it comes back at once.
-	if (finished && holdMusic(env, LISTENER_HOLD_MS)) await new Promise((resolve) => setTimeout(resolve, LISTENER_HOLD_MS));
+	// What gentle-stream said is known first: music that turned out not to be playing is no music aside.
+	await music.idle();
+	// After a reading that ended with the music aside, it stays aside LISTENER_HOLD_MS for the agent host's next one in
+	// its line (its input closing, as ssh ends after `done`, does not end the hold); a newer --serve that steps it aside
+	// meanwhile keeps it so. Stopped, or nothing aside, it comes back (or the process ends) at once. Interrupted
+	// (SIGTERM, SIGINT) during the hold, the hold ends and the music comes back before this process exits.
+	if (finished && aside && !deps.signal?.aborted && holdMusic(env, LISTENER_HOLD_MS)) {
+		await new Promise<void>((resolve) => {
+			const timer = setTimeout(resolve, LISTENER_HOLD_MS);
+			deps.signal?.addEventListener(
+				"abort",
+				() => {
+					clearTimeout(timer);
+					resolve();
+				},
+				{ once: true },
+			);
+		});
+		if (deps.signal?.aborted) holdMusic(env, 0);
+	}
 	music.settle();
 	await music.idle();
 	return code;
@@ -461,7 +480,7 @@ export async function serve(deps: {
 				await new Promise((resolve) => setTimeout(resolve, CHECK_MS));
 			}
 			if (quit) return 0;
-			music.stepAside();
+			aside = music.stepAside();
 
 			let lost = false;
 			const current = startReading({

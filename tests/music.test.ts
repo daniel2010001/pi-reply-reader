@@ -499,6 +499,29 @@ registerHooks({ resolve(specifier, context, next) {
 		expect(pi.notes).toEqual([]);
 	});
 
+	it("the after hook that runs is the one paired with the before that ran, whatever the settings say meanwhile", { timeout: 15000 }, async () => {
+		const hooks = join(root, "hooks.log");
+		writeSettings({ music: { mode: "off", before: `echo before >> "${hooks}"`, after: `echo after >> "${hooks}"` } });
+		const pi = session();
+		await pi.run("read");
+		await waitFor(() => existsSync(hooks));
+		// Changed mid-reading: another after, then no hooks at all.
+		writeSettings({ music: { mode: "off", before: `echo before2 >> "${hooks}"`, after: `echo after2 >> "${hooks}"` } });
+		go();
+		await waitFor(pi.idle);
+		await waitFor(() => readFileSync(hooks, "utf8") !== "before\n");
+		await sleep(300);
+		expect(readFileSync(hooks, "utf8")).toBe("before\nafter\n");
+		rmSync(join(root, "go"));
+		await pi.run("read");
+		await waitFor(() => readFileSync(hooks, "utf8") === "before\nafter\nbefore2\n");
+		writeSettings({ music: { mode: "off" } });
+		go();
+		await waitFor(pi.idle);
+		await waitFor(() => readFileSync(hooks, "utf8") === "before\nafter\nbefore2\nafter2\n");
+		expect(pi.notes).toEqual([]);
+	});
+
 	it("a hook that hangs is ended after 3 s with one warning per session, and never delays speech", { timeout: 20000 }, async () => {
 		const marker = join(root, "hung");
 		writeSettings({ music: { mode: "off", before: `/usr/bin/sleep 30 # ${marker}` } });
@@ -678,6 +701,84 @@ wait $!`,
 		await sleep(200);
 		expect(calls()).toEqual([STATUS, "ctl volume 20", STATUS, "ctl volume 70", STATUS, "ctl volume 20", STATUS, "ctl volume 70"]);
 		expect(calls(devGs())).toEqual([]);
+	});
+
+	/** The listener's `reply-reader --serve`, as ssh starts it there, with pipes; `lines` are its answers but beats. */
+	function serveProcess() {
+		const child = spawn(join(dev, "bin", "reply-reader"), ["--serve", "--client-name=pi-reply-reader"], {
+			env: { PATH: join(dev, "bin"), HOME: join(dev, "home"), XDG_DATA_HOME: join(dev, "data"), XDG_CONFIG_HOME: join(dev, "config"), XDG_RUNTIME_DIR: join(dev, "run") },
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+		spawned.push(child);
+		let out = "";
+		let err = "";
+		child.stdout!.on("data", (chunk: Buffer) => (out += chunk.toString()));
+		child.stderr!.on("data", (chunk: Buffer) => (err += chunk.toString()));
+		child.stdin!.on("error", () => {});
+		const exited = new Promise<number | null>((done) => child.on("exit", (code) => done(code)));
+		const reading = [
+			{ type: "hello", v: 1, voice: "male" },
+			{ type: "fragments", lead: 0, speed: 1.1, items: [{ text: "Uno.", after: "sentence" }] },
+			{ type: "end" },
+		];
+		child.stdin!.write(reading.map((line) => `${JSON.stringify(line)}\n`).join(""));
+		return {
+			child,
+			exited,
+			said: (type: string) => out.split("\n").some((line) => line.includes(`"type":"${type}"`)),
+			get err() {
+				return err;
+			},
+		};
+	}
+
+	it("--serve holds nothing when it did not step the music aside (nothing playing, a slow status): it exits at once", { timeout: 20000 }, async () => {
+		// Nothing plays on the listener, and its gentle-stream takes 1 s to say so.
+		rmSync(join(devGs(), "volume"));
+		const real = readFileSync(join(dev, "bin", "gentle-stream"), "utf8");
+		writeFileSync(join(dev, "bin", "gentle-stream"), real.replace("PATH=/usr/bin:/bin\n", "PATH=/usr/bin:/bin\nsleep 1\n"));
+		go(dev);
+		const listener = serveProcess();
+		await waitFor(() => listener.said("done"));
+		const done = Date.now();
+		listener.child.stdin!.end();
+		expect(await listener.exited).toBe(0);
+		expect(Date.now() - done).toBeLessThan(2500);
+		expect(listener.err).toBe("");
+		expect(existsSync(join(dev, "run", "pi-reply-reader", "music.json"))).toBe(false);
+	});
+
+	for (const signal of ["SIGTERM", "SIGINT"] as const) {
+		it(`${signal} during --serve's hold ends it at once and restores the music before exiting`, { timeout: 20000 }, async () => {
+			go(dev);
+			const listener = serveProcess();
+			await waitFor(() => listener.said("done"));
+			await waitFor(() => volume(devGs()) === 20);
+			listener.child.stdin!.end();
+			await sleep(300);
+			// Still held for the agent host's next reading.
+			expect(volume(devGs())).toBe(20);
+			const sent = Date.now();
+			listener.child.kill(signal);
+			await listener.exited;
+			expect(Date.now() - sent).toBeLessThan(2000);
+			expect(volume(devGs())).toBe(80);
+			expect(calls(devGs())).toEqual([STATUS, "ctl volume 20", STATUS, "ctl volume 80"]);
+			expect(existsSync(join(dev, "run", "pi-reply-reader", "music.json"))).toBe(false);
+			expect(listener.err).toBe("");
+		});
+	}
+
+	it("--serve's hold is not ended by its input closing: the agent host's next reading finds the music aside", { timeout: 20000 }, async () => {
+		go(dev);
+		const listener = serveProcess();
+		await waitFor(() => listener.said("done"));
+		listener.child.stdin!.end();
+		const closed = Date.now();
+		expect(await listener.exited).toBe(0);
+		expect(Date.now() - closed).toBeGreaterThan(3000);
+		await waitFor(() => volume(devGs()) === 80);
+		expect(calls(devGs())).toEqual([STATUS, "ctl volume 20", STATUS, "ctl volume 80"]);
 	});
 
 	it("two readings one after another on the listener do not flap its music", { timeout: 25000 }, async () => {

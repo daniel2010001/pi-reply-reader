@@ -104,7 +104,8 @@ the reading, as above.
   uses 15. A player that keeps taking audio, however slowly, is never cut. Every stop, a new reading, a failed
   reading and a timeout send `paplay` SIGTERM, then SIGKILL 2 s later if it is still there; `reply-reader`
   waits for that before it exits. A player is also killed when Pi or `reply-reader` exits (even when killed
-  outright, where `setpriv` is installed), and one left behind by a Pi that died is ended when a Pi session
+  outright, where `setpriv` is installed: it is checked once, in the background, from a Pi session's start, and
+  a player started before that check ended runs without it), and one left behind by a Pi that died is ended when a Pi session
   starts or the next reading starts. Only players started by this package (marked with
   `--client-name=pi-reply-reader` and the `PI_REPLY_READER_OWNER` variable naming a process that is gone, in
   the same PID namespace) are touched.
@@ -397,7 +398,8 @@ said.
 
 **Hooks**, for any other player: settings.json `"music": { "before": "<command>", "after": "<command>" }` run
 at the same moments (before: when the music steps aside; after: when it comes back), whatever the mode
-(`"mode": "off"` with hooks uses only the hooks). For example:
+(`"mode": "off"` with hooks uses only the hooks). The `after` that runs is the one saved when the music stepped
+aside, so changing the settings during a reading never leaves a `before` without its `after`. For example:
 
 ```json
 { "music": { "mode": "off", "before": "playerctl pause", "after": "playerctl play" } }
@@ -415,8 +417,9 @@ child keeps running past the 3 s.
 **Where it runs.** Where the music plays: on the agent host for `local` and `PULSE_SERVER` outputs (and for a
 listener output that reads through its fallback); on the listener for a listener output, where
 `reply-reader --serve` steps the listener's music aside with the listener's own settings, and the agent host does
-not touch its own. After a listener reading ends, `--serve` keeps the music aside for 4 s more, so the agent host's
-next reading in its line finds it still aside; a stopped or paused reading brings it back at once.
+not touch its own. After a listener reading ends, `--serve` keeps the music aside for 4 s more (only when it had
+stepped it aside), so the agent host's next reading in its line finds it still aside; a stopped or paused reading
+brings it back at once, and so does SIGTERM or Ctrl+C during those 4 s, before `--serve` exits.
 
 ## How replies are cleaned for listening
 
