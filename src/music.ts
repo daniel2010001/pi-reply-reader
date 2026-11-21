@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { configFile } from "./outputs.ts";
 import { saveSettings } from "./settings.ts";
@@ -141,6 +141,8 @@ interface Store {
 	create(state: State): boolean;
 	write(state: State): void;
 	remove(token: string): void;
+	/** Removes a state that is there but broken (empty, not JSON, values out of range); a valid one stays. */
+	clear(): void;
 }
 
 /** The music state in `$XDG_RUNTIME_DIR/pi-reply-reader/music.json`, else in this process's memory. */
@@ -160,32 +162,37 @@ function openStore(env: NodeJS.ProcessEnv): Store {
 	const file = join(dir, "music.json");
 	const read = (): State | undefined => {
 		try {
-			const state = JSON.parse(readFileSync(file, "utf8")) as State;
-			return typeof state?.token === "string" ? state : undefined;
+			return validState(JSON.parse(readFileSync(file, "utf8")));
 		} catch {
 			return undefined;
+		}
+	};
+	/** Writes `state` to a temporary file and puts it in place with `put`; false when that failed. */
+	const place = (state: State, put: (temp: string) => void): boolean => {
+		const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+		try {
+			writeFileSync(temp, JSON.stringify(state), { mode: 0o600 });
+			put(temp);
+			return true;
+		} catch {
+			return false;
+		} finally {
+			try {
+				unlinkSync(temp);
+			} catch {}
 		}
 	};
 	return {
 		read,
 		create(state) {
-			try {
-				writeFileSync(file, JSON.stringify(state), { mode: 0o600, flag: "wx" });
-				return true;
-			} catch {
-				return false;
-			}
+			// Linked in place whole: no other process ever reads it half written, and only one creates it.
+			if (place(state, (temp) => linkSync(temp, file))) return true;
+			// A file that is broken, empty or holds values out of range is no state: it is replaced, atomically.
+			if (!existsSync(file) || read()) return false;
+			return place(state, (temp) => renameSync(temp, file)) && read()?.token === state.token;
 		},
 		write(state) {
-			const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-			try {
-				writeFileSync(temp, JSON.stringify(state), { mode: 0o600 });
-				renameSync(temp, file);
-			} catch {
-				try {
-					unlinkSync(temp);
-				} catch {}
-			}
+			place(state, (temp) => renameSync(temp, file));
 		},
 		remove(token) {
 			if (read()?.token !== token) return;
@@ -193,7 +200,37 @@ function openStore(env: NodeJS.ProcessEnv): Store {
 				unlinkSync(file);
 			} catch {}
 		},
+		clear() {
+			// A broken file is removed: the music handling recovers by itself.
+			if (!existsSync(file) || read()) return;
+			try {
+				unlinkSync(file);
+			} catch {}
+		},
 	};
+}
+
+const wholeVolume = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100;
+
+/**
+ * The state as music.json holds it, checked before any of it reaches gentle-stream: a whole volume from 0 to 100,
+ * booleans, a known mode. Anything else is no state (undefined).
+ */
+function validState(value: unknown): State | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const { token, pending, music, hook, hold } = value as Record<string, unknown>;
+	if (typeof token !== "string" || !token) return undefined;
+	if (pending !== undefined && pending !== true) return undefined;
+	if (hook !== undefined && hook !== true) return undefined;
+	if (hold !== undefined && (typeof hold !== "number" || !Number.isFinite(hold))) return undefined;
+	if (music !== undefined) {
+		if (!music || typeof music !== "object" || Array.isArray(music)) return undefined;
+		const { mode, volume, playing, set } = music as Record<string, unknown>;
+		if (mode !== "duck" && mode !== "pause") return undefined;
+		if (!wholeVolume(volume) || typeof playing !== "boolean") return undefined;
+		if (set !== undefined && !wholeVolume(set)) return undefined;
+	}
+	return value as State;
 }
 
 let remembered: State | undefined;
@@ -210,6 +247,7 @@ const memory: Store = {
 	remove(token) {
 		if (remembered?.token === token) remembered = undefined;
 	},
+	clear() {},
 };
 
 /** gentle-stream's `ctl status --json`, as far as it is read. */
@@ -250,6 +288,7 @@ export function createMusic(deps: {
 		create: (state) => (opened ??= openStore(env)).create(state),
 		write: (state) => (opened ??= openStore(env)).write(state),
 		remove: (token) => (opened ??= openStore(env)).remove(token),
+		clear: () => (opened ??= openStore(env)).clear(),
 	};
 	/** Commands of this process run in order: a restore never overtakes the step-aside it undoes. */
 	let chain: Promise<void> = Promise.resolve();
@@ -335,7 +374,11 @@ export function createMusic(deps: {
 		},
 		settle(options = {}) {
 			const state = store.read();
-			if (!state) return;
+			if (!state) {
+				// A broken music.json is no state; once idle it is removed, so the next reading starts afresh.
+				if (options.force || deps.idle()) store.clear();
+				return;
+			}
 			if (!options.force) {
 				if (!deps.idle()) return;
 				if (state.hold !== undefined && Date.now() < state.hold) return;

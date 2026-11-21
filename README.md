@@ -361,9 +361,10 @@ else says `Speed must be a number from 0.5 to 2.0.` and changes nothing.
 ### Music while reading
 
 While the reader speaks, music steps aside, and comes back when it is done. With nothing set, music played by
-gentle-stream goes down to 20 % of its volume. `/read-music` chooses what happens:
+gentle-stream goes down to volume 20, on gentle-stream's own 0-100 volume scale (not 20 % of the volume it had).
+`/read-music` chooses what happens:
 
-- `/read-music duck 35` (or `/read-music 35`): lowers the volume to 35 % (0 to 100), and puts back the volume it
+- `/read-music duck 35` (or `/read-music 35`): sets the volume to 35 (0 to 100), and puts back the volume it
   had. A volume already at or below the level is never raised. `/read-music duck` keeps the saved level.
 - `/read-music pause`: pauses the music, and plays it again after, only if it was playing before.
 - `/read-music off`: leaves the music as it is.
@@ -380,7 +381,10 @@ warning per session, and the default is used.
 back when the reading ends with nothing waiting. Between readings that wait in the line it stays aside, so it does
 not go up and down. Pausing a reading (Alt+M, `/read-pause`) brings the music back; resuming steps it aside again.
 The state before the step aside is kept in `$XDG_RUNTIME_DIR/pi-reply-reader/music.json`, so if a reader dies
-while the music is aside, the next Pi session start (or the next reading's end) puts it back.
+while the music is aside, the next Pi session start (or the next reading's end) puts it back. A replacing reading
+(a new `/read` or `/read-next` while one plays) keeps it aside. A `music.json` that is broken, empty or holds values
+gentle-stream would not take (a volume that is not a whole number from 0 to 100) counts as no state: it is never
+used, it is replaced at the next step aside and removed when the music comes back.
 
 **What a restore never does.** It never starts music that was not playing: music already paused or stopped
 when the reading started is not touched at all. If you changed the volume during the reading (it is no longer the
@@ -404,7 +408,9 @@ nothing from a reply is ever put in it, so treat it like a line of your shell pr
 
 **Never in the way of speech.** Every command (gentle-stream's or a hook) runs in the background, in its own
 process group, and is ended after 3 s; speech never waits for it. A command that fails or hangs is said once per
-session, for example `Music hook "before" timed out after 3 s; it was ended.`
+session, for example `Music hook "before" timed out after 3 s; it was ended.` The limit ends the hook's process
+group only: a hook that starts a child in the background (`cmd &`, `setsid`, a daemon) returns at once, and that
+child keeps running past the 3 s.
 
 **Where it runs.** Where the music plays: on the agent host for `local` and `PULSE_SERVER` outputs (and for a
 listener output that reads through its fallback); on the listener for a listener output, where

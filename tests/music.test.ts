@@ -142,7 +142,7 @@ const assistant = (text: string) => ({
 type Handler = (...args: never[]) => unknown;
 
 /** A Pi session with the extension: commands, the pause key, agent turns, restarts. */
-function session() {
+function session(answers: { select?: string } = {}) {
 	const entries: unknown[] = [{ type: "message", id: "u0", timestamp: "t", message: { role: "user", content: "hola" } }, assistant("Primera.")];
 	const commands = new Map<string, { handler: Handler; getArgumentCompletions?: Handler; description?: string }>();
 	const events = new Map<string, Handler>();
@@ -162,7 +162,7 @@ function session() {
 		ui: {
 			notify: (message: string, type?: string) => notes.push([message, type]),
 			setStatus: (_key: string, text: string | undefined) => footers.push(text),
-			select: async () => undefined,
+			select: async () => answers.select,
 			confirm: async () => false,
 		},
 	};
@@ -313,6 +313,82 @@ describe("music steps aside while the reader speaks (S22)", () => {
 		await waitFor(pi.idle);
 		expect(calls()).toEqual([STATUS, "ctl volume 20", STATUS, "ctl volume 70", STATUS, "ctl volume 20", STATUS, "ctl volume 70"]);
 	});
+
+	it("keeps a volume the user lowered below the level", { timeout: 15000 }, async () => {
+		gentleStream(join(root, "bin"), gsDir(), { volume: 70, playing: true });
+		const pi = session();
+		await pi.run("read");
+		await waitFor(() => volume() === 20);
+		setMusic(gsDir(), { volume: 5, playing: true });
+		go();
+		await waitFor(pi.idle);
+		await waitFor(() => calls().length === 3);
+		await sleep(300);
+		expect(calls()).toEqual([STATUS, "ctl volume 20", STATUS]);
+		expect(volume()).toBe(5);
+	});
+
+	it("a pause restores and a resume ducks again, in pause mode too", { timeout: 15000 }, async () => {
+		writeSettings({ music: { mode: "pause" } });
+		gentleStream(join(root, "bin"), gsDir(), { volume: 70, playing: true });
+		const pi = session();
+		await pi.run("read");
+		await waitFor(() => !musicPlaying());
+		await pi.run("read-pause");
+		await waitFor(musicPlaying);
+		await pi.run("read-pause");
+		await waitFor(() => !musicPlaying());
+		go();
+		await waitFor(musicPlaying);
+		await waitFor(pi.idle);
+		expect(calls()).toEqual([STATUS, "ctl pause", STATUS, "ctl play", STATUS, "ctl pause", STATUS, "ctl play"]);
+		expect(volume()).toBe(70);
+	});
+
+	it("a new /read in the session already reading keeps the music aside: one duck, one restore at the end", { timeout: 15000 }, async () => {
+		gentleStream(join(root, "bin"), gsDir(), { volume: 70, playing: true });
+		const pi = session({ select: "Stop it and read now" });
+		await pi.run("read");
+		await waitFor(() => volume() === 20);
+		await pi.run("read");
+		await waitFor(() => plays() === 2);
+		await sleep(500);
+		expect(calls()).toEqual([STATUS, "ctl volume 20"]);
+		go();
+		await waitFor(pi.idle);
+		await waitFor(() => volume() === 70);
+		await sleep(200);
+		expect(calls()).toEqual([STATUS, "ctl volume 20", STATUS, "ctl volume 70"]);
+	});
+
+	for (const [what, content] of [
+		["empty", ""],
+		["garbage", "{not json"],
+		["with a volume out of range", JSON.stringify({ token: "t", music: { mode: "duck", volume: 1e9, playing: true, set: 20 } })],
+		["with a volume that is not whole", JSON.stringify({ token: "t", music: { mode: "duck", volume: 33.5, playing: true, set: 20 } })],
+		["with playing not a boolean", JSON.stringify({ token: "t", music: { mode: "pause", volume: 70, playing: "yes" } })],
+		["with a set volume out of range", JSON.stringify({ token: "t", music: { mode: "duck", volume: 70, playing: true, set: -3 } })],
+	] as const) {
+		it(`a music.json ${what} counts as no state: it is replaced at the next duck and removed at the restore`, { timeout: 15000 }, async () => {
+			const file = join(root, "run", "pi-reply-reader", "music.json");
+			mkdirSync(join(root, "run", "pi-reply-reader"), { recursive: true });
+			writeFileSync(file, content);
+			gentleStream(join(root, "bin"), gsDir(), { volume: 70, playing: true });
+			const pi = session();
+			await sleep(300);
+			// The session start found nothing to restore: gentle-stream is not called with what the file says.
+			expect(calls()).toEqual([]);
+			await pi.run("read");
+			await waitFor(() => volume() === 20);
+			go();
+			await waitFor(() => volume() === 70);
+			await waitFor(pi.idle);
+			await sleep(200);
+			expect(calls()).toEqual([STATUS, "ctl volume 20", STATUS, "ctl volume 70"]);
+			expect(existsSync(file)).toBe(false);
+			expect(pi.notes).toEqual([]);
+		});
+	}
 
 	it("a volume the user changed during the reading is left as the user set it", { timeout: 15000 }, async () => {
 		gentleStream(join(root, "bin"), gsDir(), { volume: 70, playing: true });
@@ -580,6 +656,28 @@ wait $!`,
 		expect(calls(devGs())).toEqual([STATUS, "ctl volume 20", STATUS, "ctl volume 80"]);
 		expect(calls()).toEqual([]);
 		expect(volume()).toBe(70);
+	});
+
+	it("a listener reading that fell back to local playback ducks here again on resume after a pause", { timeout: 20000 }, async () => {
+		writeFileSync(join(root, "config", "pi-reply-reader", "outputs.json"), JSON.stringify({ desk: { ssh: "you@host", fallback: "unix:/nowhere" } }));
+		writeSettings({ output: "desk" });
+		script(join(root, "bin", "ssh"), 'echo "ssh: connect to host host port 22: Connection refused" >&2; exit 255');
+		const pi = session();
+		await pi.run("read");
+		await waitFor(() => volume() === 20);
+		await waitFor(() => plays() === 1);
+		await pi.run("read-pause");
+		await waitFor(() => volume() === 70);
+		// The resume steps the music aside at once, before ssh is even tried again.
+		script(join(root, "bin", "ssh"), `while [ ! -f "${root}/go" ]; do sleep 0.02; done; exit 255`);
+		await pi.run("read-pause");
+		await waitFor(() => volume() === 20);
+		go();
+		await waitFor(pi.idle);
+		await waitFor(() => volume() === 70);
+		await sleep(200);
+		expect(calls()).toEqual([STATUS, "ctl volume 20", STATUS, "ctl volume 70", STATUS, "ctl volume 20", STATUS, "ctl volume 70"]);
+		expect(calls(devGs())).toEqual([]);
 	});
 
 	it("two readings one after another on the listener do not flap its music", { timeout: 25000 }, async () => {

@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Music steps aside while the reader speaks: by default, music played by gentle-stream goes down to 20 % and
-  its volume comes back after. `/read-music off|pause|duck [level]` chooses (saved in `settings.json` as
+- Music steps aside while the reader speaks: by default, music played by gentle-stream goes down to volume 20
+  (of gentle-stream's 0-100) and its volume comes back after. `/read-music off|pause|duck [level]` chooses (saved in `settings.json` as
   `"music": { "mode": "duck", "level": 20 }`; no argument shows it). Pause mode plays the music again only if it
   was playing before. Once per machine: the holder of the reading turn steps it aside when the machine starts
   reading and restores it when nothing reads or waits, so queued readings do not flap; a pause restores it and a
@@ -11,7 +11,9 @@
   session start restores music a dead reader left aside; a volume you changed meanwhile stays. On a listener
   output, `reply-reader --serve` does it on the listener. Generic `before`/`after` hooks (`sh -c`, as you) run at
   the same moments. Every command runs in the background with a 3 s timeout and never delays speech; without
-  gentle-stream or with nothing playing, nothing happens and nothing is said.
+  gentle-stream or with nothing playing, nothing happens and nothing is said. A new `/read` in the session already reading keeps the music
+  aside; a listener reading that fell back to local playback steps it aside again on resume; a broken, empty or
+  out-of-range `music.json` counts as no state and is replaced, never passed to gentle-stream.
 
 - Auto-read shows it is on: while `/read-auto` is on, the footer says `Auto-read on · desktop` or
   `Auto-read questions · desktop` (just `Auto-read on` before an output is chosen), also with nothing playing,

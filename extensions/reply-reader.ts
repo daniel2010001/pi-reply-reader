@@ -493,8 +493,11 @@ export function createReplyReader(
 			}
 		};
 
-		/** Ends this session's reading, playing or paused, and clears its footer; another session's reading is left alone. */
-		const stop = (): void => {
+		/**
+		 * Ends this session's reading, playing or paused, and clears its footer; another session's reading is left alone.
+		 * `replacing`: a new reading of this session takes its place at once, so the music stays aside (S22: not idle).
+		 */
+		const stop = (replacing = false): void => {
 			if (!current) return;
 			const { reading, ctx, claim, watch } = current;
 			current = undefined;
@@ -502,7 +505,7 @@ export function createReplyReader(
 			reading?.stop();
 			claim?.release();
 			// Nothing reads or waits on the machine any more: the music comes back (S22); between queued readings it stays aside.
-			music.settle();
+			if (!replacing) music.settle();
 			footer(ctx);
 			// A reply waiting for this reading may start now.
 			queue.kick();
@@ -532,6 +535,7 @@ export function createReplyReader(
 			const state = current;
 			if (!state || state.reading) return;
 			state.claim?.setPaused(false);
+			// A listener reading that went to its fallback sounds here: it steps the music here aside again too (S20, S22).
 			state.play(state.from);
 			if (state.here) stepAside(state.ctx);
 			footer();
@@ -635,7 +639,8 @@ export function createReplyReader(
 				claim = taken;
 			} else {
 				queue.clear();
-				stop();
+				// Replaced, not idle: the music stays aside for the new reading (S22).
+				stop(true);
 				claim = lock?.claim({ dropWaiting: true, pausable: true });
 			}
 			const speed = speedForReading(ctx);
@@ -675,7 +680,8 @@ export function createReplyReader(
 					},
 					// A listener output that cannot read goes on through its fallback (S20), said once per session.
 					onFallback: (message) => {
-						// It sounds here after all: the music here steps aside (S22).
+						// It sounds here after all: the music here steps aside (S22), and again at each resume (S15).
+						state.here = true;
 						if (current === state) stepAside(ctx);
 						if (fallbackWarned) return;
 						fallbackWarned = true;
@@ -714,7 +720,9 @@ export function createReplyReader(
 			state.watch?.unref();
 			current = state;
 			// The machine's line went idle → reading: the music where it sounds steps aside, never delaying speech (S22).
+			// A reading on a listener restores music left aside here (by the one it replaced, S22); a fallback steps it aside again.
 			if (state.here) stepAside(ctx);
+			else music.settle({ force: true });
 			// Started: it no longer waits in the machine's list (S16).
 			publish();
 			footer();
