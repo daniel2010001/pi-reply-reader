@@ -5,7 +5,8 @@ import { basename, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Component, type KeyId, SelectList } from "@earendil-works/pi-tui";
 import { createAutoQueue, type StartResult } from "../src/auto-queue.ts";
-import { loadOutputs, type Output } from "../src/outputs.ts";
+import { configFile, loadOutputs, type Output } from "../src/outputs.ts";
+import { createMusic, describeMusic, loadMusic, MUSIC_MODES, type MusicSettings, parseMusicArgs, saveMusic } from "../src/music.ts";
 import { keyName, loadPauseKey } from "../src/pause-key.ts";
 import { startOutputReading } from "../src/listener.ts";
 import type { Reading, SherpaTts } from "../src/playback.ts";
@@ -17,7 +18,7 @@ import { isPing, parseReadRequest, READER_EVENTS, READER_EVENTS_VERSION } from "
 import { type Claim, openReadingLock, type WaitingItem } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { sectionFrom } from "../src/sections.ts";
-import { formatSpeed, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSpeed } from "../src/settings.ts";
+import { formatSpeed, loadSaved, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSettings, saveSpeed } from "../src/settings.ts";
 import {
 	announcement,
 	detectLanguage,
@@ -82,6 +83,12 @@ const CANNOT_PAUSE = "The reading playing cannot be paused (it is not in a Pi se
 const NOTHING_WAITS = "Nothing waits to be read.";
 const SKIPPED = "Skipped to the next reading.";
 const NOTHING_NEXT = "Reading stopped; nothing else waits.";
+/** What /read-music offers (S22). */
+const MUSIC_CHOICES: Record<string, string> = {
+	off: "leave the music as it is",
+	pause: "pause gentle-stream while reading, play it again after",
+	duck: "lower gentle-stream's volume while reading (duck 20: to 20 %)",
+};
 
 /** The part of Pi's theme the question uses. */
 interface QuestionTheme {
@@ -145,7 +152,8 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * One reading per machine (S1, T21): through `$XDG_RUNTIME_DIR/pi-reply-reader/`, a new reading in any session
  * stops the one playing in another, `/read-stop` stops it too, and the session stopped that way just clears its footer.
  * `/read <target>#<section>` reads only the section under a matching heading, or on to the end with `rest` (S9). `/read-auto` (S8) reads each new reply, or only its
- * "Needs your decision" section, as soon as it is stored, each once and in order (T42); it is off at every session start. Auto-read never
+ * "Needs your decision" section, as soon as it is stored, each once and in order (T42); its last choice, and the output's, are saved in settings.json
+ * for new sessions (S24; none saved: off, the output asked), and the footer shows it while on (S23). Auto-read never
  * interrupts (S8 Queue, T32): a reply due while a reading plays here or in another session waits, in order, and is read
  * once the machine is free; an explicit /read (or read request) or /read-stop drops every reply waiting on the
  * machine (the pause key pauses instead, S15), and /read-auto off or the session's end drops this session's. A reading that waited in this line starts after
@@ -161,6 +169,9 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * once answered (ui_prompt_end, or the tool's end). The reader's own questions are never read.
  * Other extensions (pi-reply-thread's Alt+R view) reach it over `pi.events` (S10, src/reader-events.ts): a ping is
  * answered with ready, ready is also sent at each session start, and a read request reads its text like `/read`.
+ * Music steps aside while the machine reads (S22, src/music.ts): `/read-music off|pause|duck [level]`, saved in
+ * settings.json; once per machine, restored when nothing reads or waits, on a pause, and at a session start after a
+ * reader died. A listener output's music is the listener's `--serve`'s to step aside.
  */
 export function createReplyReader(
 	deps: {
@@ -192,8 +203,8 @@ export function createReplyReader(
 			/** What the footer names, and where it sounds. */
 			name: string;
 			output: string;
-			/** The footer last shown for it. */
-			shown?: string;
+			/** It sounds through this machine (local or PULSE_SERVER), so the music steps aside here (S22); a listener's steps aside there. */
+			here: boolean;
 			/** A blocking prompt's reading (S18): its answer stops it, and a pause ends it instead (S15). */
 			prompt?: string;
 			/** The fragment `reading` started from; paused, the one it resumes from (S15). */
@@ -202,7 +213,7 @@ export function createReplyReader(
 			play: (from: number) => void;
 		}
 		let current: Current | undefined;
-		/** The output chosen in this session, by name; asked on the first reading. */
+		/** The output chosen in this session, by name: the saved one (S24), else asked on the first reading. */
 		let chosen: string | undefined;
 		/** The voice for the next reading in this session (S3: male unless changed). */
 		let speaker: SpeakerName = "male";
@@ -214,13 +225,20 @@ export function createReplyReader(
 		let speedWarned = false;
 		/** Whether this session already warned that a listener output read through its fallback (S20: once per session). */
 		let fallbackWarned = false;
+		/** A music mode (and level) set with /read-music in this session; otherwise each reading uses the saved one (S22). */
+		let sessionMusic: Pick<MusicSettings, "mode"> & Partial<Pick<MusicSettings, "level">> | undefined;
+		/** Whether this session already said that music settings were ignored, or that a music command failed (S22). */
+		let musicProblemWarned = false;
+		let musicWarned = false;
 		/** The pause key (S15, L147): settings.json `pauseKey`, else Alt+M; read once, as Pi registers shortcuts at load. */
 		const pauseKey = loadPauseKey(env);
 		const pauseName = keyName(pauseKey.key);
 		/** Whether the problem with `pauseKey` was told (once, at the first session start with a UI). */
 		let pauseKeyWarned = false;
-		/** This session's auto-read mode (S8: off at session start). */
+		/** This session's auto-read mode (S8: off at session start unless settings.json saved one, S24). */
 		let auto: AutoMode = "off";
+		/** The footer last shown (S14, S23): shown again only when it changed. */
+		let shownFooter: string | undefined;
 		/**
 		 * The entry IDs of the replies auto-read already queued or must never read (S8 Timing, T42): those on the branch
 		 * when auto-read was turned on or the branch changed under it. Every other final reply is queued once.
@@ -361,6 +379,37 @@ export function createReplyReader(
 			},
 		});
 
+		/** The music settings for the next step aside (S22): this session's /read-music, over the saved ones. */
+		const musicSettings = (): MusicSettings => {
+			const { music } = loadMusic(env);
+			return sessionMusic ? { ...music, ...sessionMusic } : music;
+		};
+		/**
+		 * Music steps aside while the machine reads (S22): when this session takes the machine's reading turn, and back
+		 * once nothing reads or waits on the machine (any session's end of the line, a pause, a session start after a
+		 * reader died). Commands run in the background; a failure is said once per session.
+		 */
+		const music = createMusic({
+			env,
+			settings: musicSettings,
+			idle: () => current === undefined && queue.starting === undefined && !(openReadingLock(env)?.busy() ?? false) && waitingCount() === 0,
+			warn: (message) => {
+				const ctx = current?.ctx ?? latest;
+				if (musicWarned || !ctx) return;
+				musicWarned = true;
+				ctx.ui.notify(message, "warning");
+			},
+		});
+		/** Steps the music aside for a reading that sounds here, telling once per session about ignored settings. */
+		const stepAside = (ctx: ExtensionContext): void => {
+			const { problem } = loadMusic(env);
+			if (problem && !sessionMusic && !musicProblemWarned) {
+				musicProblemWarned = true;
+				ctx.ui.notify(problem, "warning");
+			}
+			music.stepAside();
+		};
+
 		/** This session as /read-queue names it: its name (Pi's /name), else its working folder. */
 		const sessionLabel = (): string => {
 			const ctx = latest;
@@ -382,6 +431,8 @@ export function createReplyReader(
 			const line = queue.starting && !current ? [queue.starting, ...queue.items] : queue.items;
 			const items: WaitingItem[] = line.map((item) => ({ name: item.name, at: item.at, mark: item.mark }));
 			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), items, sessionTag(), humanWait > 0);
+			// The line emptied with nothing read (dropped, /read-auto off): music left aside comes back (S22).
+			if (items.length === 0) music.settle();
 		};
 		/** How many readings wait: on the machine, or in this session's line without a usable XDG_RUNTIME_DIR (S16). */
 		const waitingCount = (): number => {
@@ -412,29 +463,50 @@ export function createReplyReader(
 		/**
 		 * Shows this session's reading in the footer, with how many readings wait on the machine (S14, S16):
 		 * `Reading P12.R2 on local · 2 waiting · Alt+M pauses`, or paused (S15) `Paused P12.R2 · Alt+M resumes · /read-stop ends`.
-		 * Shown again only when it changed.
+		 * While auto-read is on (S23) it always shows it, with the chosen output while nothing is read here
+		 * (`Auto-read on · desktop`, `Auto-read questions`) and before the reading's status while one is
+		 * (`Auto-read on · Reading P12.R2 on desktop · Alt+M pauses`). Shown again only when it changed.
 		 */
-		const footer = (): void => {
-			if (!current) return;
-			const waiting = waitingCount();
-			const count = waiting > 0 ? `${waiting} waiting · ` : "";
-			const text = current.reading
-				? `Reading ${current.name} on ${current.output} · ${count}${pauseName} pauses`
-				: `Paused ${current.name} · ${count}${pauseName} resumes · /read-stop ends`;
-			if (text === current.shown) return;
-			current.shown = text;
-			current.ctx.ui.setStatus(STATUS, text);
+		const footer = (ctx: ExtensionContext | undefined = current?.ctx ?? latest): void => {
+			let reading: string | undefined;
+			if (current) {
+				const waiting = waitingCount();
+				const count = waiting > 0 ? `${waiting} waiting · ` : "";
+				reading = current.reading
+					? `Reading ${current.name} on ${current.output} · ${count}${pauseName} pauses`
+					: `Paused ${current.name} · ${count}${pauseName} resumes · /read-stop ends`;
+			}
+			const mode = auto === "off" ? undefined : `Auto-read ${auto === "full" ? "on" : "questions"}`;
+			const text = mode ? [mode, reading ?? chosen].filter(Boolean).join(" · ") : reading;
+			if (text === shownFooter || !ctx) return;
+			shownFooter = text;
+			ctx.ui.setStatus(STATUS, text);
 		};
 
-		/** Ends this session's reading, playing or paused, and clears its footer; another session's reading is left alone. */
-		const stop = (): void => {
+		/** Saves `values` in settings.json for new sessions (S24); the reason it could not, else undefined. */
+		const save = (values: Record<string, unknown>): string | undefined => {
+			try {
+				saveSettings(env, values);
+				return undefined;
+			} catch (error) {
+				return (error as Error).message;
+			}
+		};
+
+		/**
+		 * Ends this session's reading, playing or paused, and clears its footer; another session's reading is left alone.
+		 * `replacing`: a new reading of this session takes its place at once, so the music stays aside (S22: not idle).
+		 */
+		const stop = (replacing = false): void => {
 			if (!current) return;
 			const { reading, ctx, claim, watch } = current;
 			current = undefined;
 			clearInterval(watch);
 			reading?.stop();
 			claim?.release();
-			ctx.ui.setStatus(STATUS, undefined);
+			// Nothing reads or waits on the machine any more: the music comes back (S22); between queued readings it stays aside.
+			if (!replacing) music.settle();
+			footer(ctx);
 			// A reply waiting for this reading may start now.
 			queue.kick();
 		};
@@ -453,6 +525,8 @@ export function createReplyReader(
 			state.reading = undefined;
 			state.claim?.setPaused(true);
 			reading.stop();
+			// Paused, the music comes back; resuming steps it aside again (S22).
+			music.settle({ force: true });
 			footer();
 		};
 
@@ -461,7 +535,9 @@ export function createReplyReader(
 			const state = current;
 			if (!state || state.reading) return;
 			state.claim?.setPaused(false);
+			// A listener reading that went to its fallback sounds here: it steps the music here aside again too (S20, S22).
 			state.play(state.from);
+			if (state.here) stepAside(state.ctx);
 			footer();
 		};
 
@@ -476,7 +552,12 @@ export function createReplyReader(
 			if (!ctx.hasUI) return undefined;
 			const label = await own(() => ctx.ui.select(ASK_OUTPUT, list.map((output) => output.label)));
 			const output = list.find((candidate) => candidate.label === label);
-			if (output) chosen = output.name;
+			if (!output) return undefined;
+			chosen = output.name;
+			footer(ctx);
+			// The pick is remembered for new sessions (S24).
+			const unsaved = save({ output: output.name });
+			if (unsaved) ctx.ui.notify(`Readings will sound on ${output.label} in this session, but ${unsaved}.`, "warning");
 			return output;
 		};
 
@@ -558,7 +639,8 @@ export function createReplyReader(
 				claim = taken;
 			} else {
 				queue.clear();
-				stop();
+				// Replaced, not idle: the music stays aside for the new reading (S22).
+				stop(true);
 				claim = lock?.claim({ dropWaiting: true, pausable: true });
 			}
 			const speed = speedForReading(ctx);
@@ -574,7 +656,7 @@ export function createReplyReader(
 				...(auto?.announce && auto.announce !== "prompt" ? announcement(auto.announce, name, narration.language) : []),
 				...narration.fragments,
 			];
-			const state: Current = { ctx, claim, name, output: output.name, prompt: auto?.prompt, from: 0, play: () => {} };
+			const state: Current = { ctx, claim, name, output: output.name, here: !output.ssh, prompt: auto?.prompt, from: 0, play: () => {} };
 			/** Stopped by another session: no message, just the footer. */
 			const stoppedElsewhere = (): void => {
 				if (current === state) stop();
@@ -598,6 +680,9 @@ export function createReplyReader(
 					},
 					// A listener output that cannot read goes on through its fallback (S20), said once per session.
 					onFallback: (message) => {
+						// It sounds here after all: the music here steps aside (S22), and again at each resume (S15).
+						state.here = true;
+						if (current === state) stepAside(ctx);
 						if (fallbackWarned) return;
 						fallbackWarned = true;
 						ctx.ui.notify(message, "warning");
@@ -634,6 +719,10 @@ export function createReplyReader(
 				: undefined;
 			state.watch?.unref();
 			current = state;
+			// The machine's line went idle → reading: the music where it sounds steps aside, never delaying speech (S22).
+			// A reading on a listener restores music left aside here (by the one it replaced, S22); a fallback steps it aside again.
+			if (state.here) stepAside(ctx);
+			else music.settle({ force: true });
 			// Started: it no longer waits in the machine's list (S16).
 			publish();
 			footer();
@@ -838,7 +927,7 @@ export function createReplyReader(
 		});
 
 		command("read-output", {
-			description: "Choose where readings sound: local or an output from outputs.json",
+			description: "Choose where readings sound: local or an output from outputs.json; saved for later sessions",
 			getArgumentCompletions: (prefix) =>
 				loadOutputs(env, hostname)
 					.outputs.filter((output) => output.name.startsWith(prefix.trim()))
@@ -858,6 +947,12 @@ export function createReplyReader(
 						return;
 					}
 					chosen = output.name;
+					footer(ctx);
+					const unsaved = save({ output: output.name });
+					if (unsaved) {
+						ctx.ui.notify(`Readings will sound on ${output.label} in this session, but ${unsaved}.`, "warning");
+						return;
+					}
 				} else {
 					output = await askOutput(ctx, list);
 					if (!output) return;
@@ -919,9 +1014,39 @@ export function createReplyReader(
 			},
 		});
 
+		command("read-music", {
+			description:
+				"What music does while the reader speaks: off, pause, or duck [level] (lower gentle-stream to level %, default duck 20); no argument shows it; saved for later sessions",
+			getArgumentCompletions: (prefix) =>
+				MUSIC_MODES.filter((mode) => mode.startsWith(prefix.trim())).map((mode) => ({ value: mode, label: mode, description: MUSIC_CHOICES[mode] })),
+			handler: async (args, ctx) => {
+				const parsed = parseMusicArgs(args);
+				if (parsed === "show") {
+					const current = musicSettings();
+					const hooks = [current.before && `before "${current.before}"`, current.after && `after "${current.after}"`].filter(Boolean);
+					ctx.ui.notify(`${describeMusic(current)}${hooks.length > 0 ? ` Hooks: ${hooks.join("; ")}.` : ""}`, "info");
+					return;
+				}
+				if ("problem" in parsed) {
+					ctx.ui.notify(parsed.problem, "warning");
+					return;
+				}
+				const level = parsed.level ?? musicSettings().level;
+				sessionMusic = parsed.level === undefined ? { ...sessionMusic, mode: parsed.mode } : { mode: parsed.mode, level };
+				const said = describeMusic({ mode: parsed.mode, level }, true);
+				try {
+					saveMusic(env, parsed);
+				} catch (error) {
+					ctx.ui.notify(`${said.slice(0, -1)} in this session, but ${(error as Error).message}.`, "warning");
+					return;
+				}
+				ctx.ui.notify(said, "info");
+			},
+		});
+
 		command("read-auto", {
 			description:
-				'Read each new reply aloud as soon as it is written, and each prompt that waits for you, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles',
+				'Read each new reply aloud as soon as it is written, and each prompt that waits for you: on (in full), questions (only "Needs your decision"), off; no argument toggles; saved for later sessions',
 			getArgumentCompletions: (prefix) =>
 				AUTO_CHOICES.filter((choice) => choice.value.startsWith(prefix.trim())).map((choice) => ({ ...choice, label: choice.value })),
 			handler: async (args, ctx) => {
@@ -936,11 +1061,12 @@ export function createReplyReader(
 				auto = modes[wanted];
 				// Off drops this session's waiting replies (S8); other sessions' are theirs. A request the user chose to read
 				// after the current one is not an auto-read and stays (T33).
-				if (auto === "off") {
-					queue.clear((item) => item.manual === true);
-					footer();
-				}
-				ctx.ui.notify(AUTO_MESSAGES[auto], "info");
+				if (auto === "off") queue.clear((item) => item.manual === true);
+				footer(ctx);
+				// The choice is remembered for new sessions (S24).
+				const unsaved = save({ autoRead: auto === "full" ? "on" : auto });
+				if (unsaved) ctx.ui.notify(`${AUTO_MESSAGES[auto].slice(0, -1)} in this session, but ${unsaved}.`, "warning");
+				else ctx.ui.notify(AUTO_MESSAGES[auto], "info");
 			},
 		});
 
@@ -1098,14 +1224,27 @@ export function createReplyReader(
 			latest = ctx;
 			// Players left by a Pi that died (S13 h): a hung paplay spins at about a core until it is ended.
 			reapOrphans();
-			auto = "off";
+			musicWarned = false;
+			musicProblemWarned = false;
+			sessionMusic = undefined;
+			// Music a reader that died left aside comes back, when nothing reads or waits on the machine (S22).
+			music.settle();
+			// The last choices of /read-auto and /read-output, as saved (S24); none saved: off, the output asked.
+			const saved = loadSaved(env);
+			auto = saved.autoRead === "on" ? "full" : saved.autoRead === "questions" ? "questions" : "off";
 			queue.clear();
-			seen = new Set();
+			// Saved on: what is already on the branch is never read (S8: no reply of earlier turns).
+			seen = auto === "off" ? new Set() : replyIds(ctx);
 			pending.clear();
 			writtenBefore = new Map();
 			prompts.clear();
 			spanPrompts = [];
 			chosen = undefined;
+			if (saved.output) {
+				// A saved output gone from outputs.json is not used: the first reading asks, as with none saved (S24).
+				if (loadOutputs(env, hostname).outputs.some((output) => output.name === saved.output)) chosen = saved.output;
+				else ctx.ui.notify(`Saved output "${saved.output}" is not in ${configFile(env, "outputs.json") ?? "outputs.json"}; choose one.`, "warning");
+			}
 			speaker = "male";
 			warned = false;
 			sessionSpeed = undefined;
@@ -1115,15 +1254,20 @@ export function createReplyReader(
 				pauseKeyWarned = true;
 				ctx.ui.notify(pauseKey.problem, "warning");
 			}
+			// The saved auto-read shows from the session's start (S23).
+			footer(ctx);
 			listen();
 		});
 
 		pi.on("session_shutdown", () => {
 			generation++;
-			// The session's end drops its waiting replies (S8), before its reading ends and would start one.
+			// The session's end drops its waiting replies (S8), before its reading ends and would start one; its footer goes.
+			auto = "off";
 			queue.clear();
 			stop();
+			footer();
 			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), []);
+			music.settle();
 			unsubscribeEvents?.();
 			unsubscribeEvents = undefined;
 			latest = undefined;

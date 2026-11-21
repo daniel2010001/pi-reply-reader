@@ -59,16 +59,21 @@ sentence is synthesized, about 1-2 s.
 | `/read-pause` | Pause the reading playing, in this or another Pi session, or resume it from the sentence it was in (Alt+M too) | See [Pause and resume](#pause-and-resume). |
 | `/read-queue` | List the readings waiting on this machine, in order, with their sessions | See [The line](#the-line). |
 | `/read-next` | End the reading, playing or paused, in this or another Pi session, and go on with the next one waiting | See [The line](#the-line). |
-| `/read-auto [on\|questions\|off]` | Read each new reply aloud as soon as it is written, and each prompt that waits for you, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles | See [Auto-read](#auto-read). |
-| `/read-output [name]` | Choose where readings sound: local or an output from outputs.json | With a name, switches to that output; without one, asks. See [Outputs](#outputs). |
+| `/read-auto [on\|questions\|off]` | Read each new reply aloud as soon as it is written, and each prompt that waits for you: on (in full), questions (only "Needs your decision"), off; no argument toggles; saved for later sessions | See [Auto-read](#auto-read). |
+| `/read-output [name]` | Choose where readings sound: local or an output from outputs.json; saved for later sessions | With a name, switches to that output; without one, asks. See [Outputs](#outputs). |
 | `/read-voice [male\|female]` | Choose the voice for the next readings: male (default) or female | With a name, switches the voice; without one, asks. |
 | `/read-speed [n]` | Choose the voice speed for the next readings, 0.5 to 2.0 (default 1.1); saved for later sessions | With a number, sets that speed; without one, offers 0.8 to 1.5. See [Speed](#speed). |
+| `/read-music [off\|pause\|duck] [level]` | What music does while the reader speaks: off, pause, or duck [level] (lower gentle-stream to level %, default duck 20); no argument shows it; saved for later sessions | See [Music while reading](#music-while-reading). |
 
 While a reading plays, the footer shows `Reading P12.R1 on local · Alt+M pauses` (or the file name, as in
 `Reading notes.md on local · Alt+M pauses`); while it is paused, `Paused P12.R1 · Alt+M resumes · /read-stop ends`.
 The footer names the pause key in use (see [Pause and resume](#pause-and-resume)).
 While readings wait on the machine (auto-reads, **Read after it** and prompts, in any session, see
 [Auto-read](#auto-read)), it adds how many: `Reading P12.R2 on local · 2 waiting · Alt+M pauses`.
+While auto-read is on, the footer always says so, also with nothing playing: `Auto-read on · desktop` or
+`Auto-read questions · desktop` (the output chosen, or just `Auto-read on` before one is), and before a
+reading's status: `Auto-read on · Reading P12.R1 on desktop · Alt+M pauses`. With auto-read off it shows only
+the reading, as above.
 
 - **Alt+M** pauses the reading, and resumes it when paused, like `/read-pause` (see
   [Pause and resume](#pause-and-resume)).
@@ -208,8 +213,12 @@ and nothing plays. Only `#` headings count.
 reply followed by a background-job or subagent notice that starts another turn is read too); every reply is
 read once, in order. `/read-auto questions` reads only each reply's closing **Needs your decision** section
 (nothing when a reply has none); `/read-auto off` stops.
-`/read-auto` alone toggles (off → on in full, on → off). It is per session and starts off in every new
-session. Replies from before you turned it on are never read. Auto-readings use the same output, voice,
+`/read-auto` alone toggles (off → on in full, on → off). Each choice, the toggle included, is saved in
+`settings.json` (see [Speed](#speed)) as `"autoRead": "on"`, `"questions"` or `"off"`, keeping the other keys, and
+every new Pi session on this machine starts with it; with nothing saved, auto-read starts off. While it is on the
+footer says so (`Auto-read on · desktop`, see [Use](#use)). Replies from before you turned it on, or already in a
+session when it starts, are never read. If `settings.json` cannot be saved, the choice applies to this session
+and a warning says it was not saved. Auto-readings use the same output, voice,
 speed, footer and keys (Alt+M pauses, `/read-stop` ends) as `/read`, and still follow one reading per machine.
 
 Auto-read never interrupts. A reply that is due while a reading plays, in this session or in any other Pi or
@@ -341,11 +350,73 @@ else says `Speed must be a number from 0.5 to 2.0.` and changes nothing.
 
 - The choice is saved in `$XDG_CONFIG_HOME/pi-reply-reader/settings.json` (`~/.config/…` when
   `XDG_CONFIG_HOME` is unset) as `{ "speed": 1.15 }`, keeping any other keys, and every later session and
-  reading uses it. A reading already playing keeps its speed.
+  reading uses it. A reading already playing keeps its speed. The same file keeps `pauseKey`, the last
+  `/read-auto` and output choices (`autoRead`, `output`; see [Auto-read](#auto-read) and [Outputs](#outputs)),
+  and `music` (see [Music while reading](#music-while-reading)).
 - Only the voice speed changes; the pauses between sentences, lines and sections stay the same.
 - No file means 1.1. An invalid file, or a speed outside 0.5 to 2.0, is ignored with one warning per
   session, and readings use 1.1. `/read-speed` does not overwrite a file that is not valid JSON.
 - If the file cannot be saved, the speed still applies to this session and a warning says it was not saved.
+
+### Music while reading
+
+While the reader speaks, music steps aside, and comes back when it is done. With nothing set, music played by
+gentle-stream goes down to volume 20, on gentle-stream's own 0-100 volume scale (not 20 % of the volume it had).
+`/read-music` chooses what happens:
+
+- `/read-music duck 35` (or `/read-music 35`): sets the volume to 35 (0 to 100), and puts back the volume it
+  had. A volume already at or below the level is never raised. `/read-music duck` keeps the saved level.
+- `/read-music pause`: pauses the music, and plays it again after, only if it was playing before.
+- `/read-music off`: leaves the music as it is.
+- `/read-music` alone shows the setting (`Music goes down to 20 % while reading.`). Anything else says
+  `Use /read-music off, pause, or duck with a level from 0 to 100.` or `Level must be a whole number from 0 to 100.`
+  and changes nothing.
+
+The choice is saved in `settings.json` as `"music": { "mode": "duck", "level": 35 }`, keeping the other keys
+(the hooks too), and every later session and reading uses it. An invalid `music` value is ignored with one
+warning per session, and the default is used.
+
+**When.** Once per machine, by whoever holds the reading turn (a Pi session, the `reply-reader` command, or
+`--serve` on a listener): the music steps aside when the machine goes from nothing read to a reading, and comes
+back when the reading ends with nothing waiting. Between readings that wait in the line it stays aside, so it does
+not go up and down. Pausing a reading (Alt+M, `/read-pause`) brings the music back; resuming steps it aside again.
+The state before the step aside is kept in `$XDG_RUNTIME_DIR/pi-reply-reader/music.json`, so if a reader dies
+while the music is aside, the next Pi session start (or the next reading's end) puts it back. A replacing reading
+(a new `/read` or `/read-next` while one plays) keeps it aside. A `music.json` that is broken, empty or holds values
+gentle-stream would not take (a volume that is not a whole number from 0 to 100) counts as no state: it is never
+used, it is replaced at the next step aside and removed when the music comes back.
+
+**What a restore never does.** It never starts music that was not playing: music already paused or stopped
+when the reading started is not touched at all. If you changed the volume during the reading (it is no longer the
+level the reader set), your volume stays. In pause mode, the music plays again only if it is still paused at the
+volume it had; if you changed it, or played it yourself, it is left as it is.
+
+**gentle-stream** is driven through `gentle-stream ctl status --json`, `ctl volume N`, `ctl pause` and `ctl play`.
+Without `gentle-stream` on `PATH`, or with nothing playing (its `ctl` exits 1), nothing happens and nothing is
+said.
+
+**Hooks**, for any other player: settings.json `"music": { "before": "<command>", "after": "<command>" }` run
+at the same moments (before: when the music steps aside; after: when it comes back), whatever the mode
+(`"mode": "off"` with hooks uses only the hooks). For example:
+
+```json
+{ "music": { "mode": "off", "before": "playerctl pause", "after": "playerctl play" } }
+```
+
+Each hook runs through `/bin/sh -c`, as you, with your environment: it comes from your own settings file and
+nothing from a reply is ever put in it, so treat it like a line of your shell profile.
+
+**Never in the way of speech.** Every command (gentle-stream's or a hook) runs in the background, in its own
+process group, and is ended after 3 s; speech never waits for it. A command that fails or hangs is said once per
+session, for example `Music hook "before" timed out after 3 s; it was ended.` The limit ends the hook's process
+group only: a hook that starts a child in the background (`cmd &`, `setsid`, a daemon) returns at once, and that
+child keeps running past the 3 s.
+
+**Where it runs.** Where the music plays: on the agent host for `local` and `PULSE_SERVER` outputs (and for a
+listener output that reads through its fallback); on the listener for a listener output, where
+`reply-reader --serve` steps the listener's music aside with the listener's own settings, and the agent host does
+not touch its own. After a listener reading ends, `--serve` keeps the music aside for 4 s more, so the agent host's
+next reading in its line finds it still aside; a stopped or paused reading brings it back at once.
 
 ## How replies are cleaned for listening
 
@@ -445,6 +516,10 @@ in `$XDG_CONFIG_HOME/pi-reply-reader/outputs.json` (`~/.config/pi-reply-reader/o
   for a listener that synthesizes the reading itself (see [Synthesize on the listener](#synthesize-on-the-listener)).
 - The first `/read` of a session asks `Where should readings sound?` when there is more than one output;
   `/read-output` switches later, and completes the names.
+- The output picked (at that question or with `/read-output`) is saved in `settings.json` as
+  `"output": "desktop"`, keeping the other keys, and every new Pi session on this machine uses it without
+  asking. A saved output no longer in `outputs.json` is not used: the session warns
+  `Saved output "desktop" is not in …/outputs.json; choose one.` and the first reading asks as usual.
 - An entry that breaks a rule is skipped with a warning such as
   `Ignored output "my out" in …/outputs.json: names use letters, digits and "-".` A file that is not valid
   JSON is ignored as a whole (`Ignored …/outputs.json: not valid JSON (…)`). The warning shows on the first
@@ -555,8 +630,8 @@ needs its own voice for the fallback. Text from the listener or `ssh` shown in t
 characters removed, and a line from the listener over 64 KiB ends the reading there
 (`the listener sent a line longer than 65536 bytes`).
 
-`reply-reader --serve` never downloads and writes no file besides the reading lock under
-`$XDG_RUNTIME_DIR/pi-reply-reader/`. It only plays what it is sent; whoever can run `ssh` as you to the
+`reply-reader --serve` never downloads and writes no file besides the reading lock (and, when the music steps
+aside, `music.json`) under `$XDG_RUNTIME_DIR/pi-reply-reader/`. It only plays what it is sent; whoever can run `ssh` as you to the
 listener can make it speak.
 
 ## Requirements

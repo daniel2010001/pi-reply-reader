@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Output } from "./outputs.ts";
 import { type Reading, type SherpaTts, startReading } from "./playback.ts";
 import { OWNER_VAR, ownerTag, PLAYER_MARK, playerTimeout, playerTimeoutMs, reapOrphans, terminate, track, withDeathSignal } from "./player.ts";
+import { createMusic, holdMusic, LISTENER_HOLD_MS, loadMusic } from "./music.ts";
 import { type Claim, openReadingLock } from "./reading-lock.ts";
 import { MAX_SPEED, MIN_SPEED } from "./settings.ts";
 import type { Boundary, Fragment } from "./speech-text.ts";
@@ -373,123 +374,149 @@ export async function serve(deps: {
 			return typed.type === "stop" ? undefined : typed;
 		}
 	};
-	const beat = setInterval(() => send({ type: "beat" }), BEAT_MS);
-	let claim: Claim | undefined;
-	let check: NodeJS.Timeout | undefined;
-	try {
-		const hello = await next();
-		if (!hello) return 0;
-		if (hello.type !== "hello") throw new ProtocolError(`expected hello, got ${String(hello.type)}`);
-		if (!Object.hasOwn(SPEAKERS, String(hello.voice))) throw new ProtocolError(`no voice named "${String(hello.voice)}"`);
-		const speaker = SPEAKERS[hello.voice as SpeakerName];
-		const voice = findVoice(env);
-		if (!voice) {
-			send({ type: "missing", what: "voice" });
-			return 1;
-		}
-		if (!onPath("paplay", env)) {
-			send({ type: "missing", what: "player" });
-			return 1;
-		}
-		send({ type: "ready", v: PROTOCOL_VERSION, version: packageVersion() });
+	// The listener's music steps aside while it reads what the agent host sent (S22), with the listener's own settings.
+	const lock = openReadingLock(env);
+	let musicWarned = false;
+	const music = createMusic({
+		env,
+		settings: () => loadMusic(env).music,
+		idle: () => (lock ? !lock.busy() && lock.waitingList().length === 0 : true),
+		warn: (message) => {
+			if (musicWarned) return;
+			musicWarned = true;
+			deps.warn(message);
+		},
+	});
+	/** Whether the reading played to its end (`done`): the agent host's next one may follow, so the music stays aside a while. */
+	let finished = false;
+	const code = await serveReading();
+	// After a reading that ended, the music stays aside LISTENER_HOLD_MS for the agent host's next one in its line; a
+	// newer --serve that steps it aside meanwhile keeps it so. Stopped, it comes back at once.
+	if (finished && holdMusic(env, LISTENER_HOLD_MS)) await new Promise((resolve) => setTimeout(resolve, LISTENER_HOLD_MS));
+	music.settle();
+	await music.idle();
+	return code;
 
-		// One or more `fragments` messages, each within the caps, then `end`; lead and speed come from the first.
-		const first = await next();
-		if (!first) return 0;
-		const fragments: Fragment[] = [];
-		for (let batch: Record<string, unknown> | undefined = first; batch?.type !== "end"; batch = await next()) {
-			if (!batch) return 0;
-			if (batch.type !== "fragments" || !Array.isArray(batch.items)) {
-				throw new ProtocolError(batch === first ? "expected fragments" : `expected fragments or end, got ${String(batch.type)}`);
+	async function serveReading(): Promise<number> {
+		const beat = setInterval(() => send({ type: "beat" }), BEAT_MS);
+		let claim: Claim | undefined;
+		let check: NodeJS.Timeout | undefined;
+		try {
+			const hello = await next();
+			if (!hello) return 0;
+			if (hello.type !== "hello") throw new ProtocolError(`expected hello, got ${String(hello.type)}`);
+			if (!Object.hasOwn(SPEAKERS, String(hello.voice))) throw new ProtocolError(`no voice named "${String(hello.voice)}"`);
+			const speaker = SPEAKERS[hello.voice as SpeakerName];
+			const voice = findVoice(env);
+			if (!voice) {
+				send({ type: "missing", what: "voice" });
+				return 1;
 			}
-			if (batch.items.length > MAX_FRAGMENTS) throw new ProtocolError(`more than ${MAX_FRAGMENTS} fragments`);
-			for (const item of batch.items as unknown[]) {
-				const { text, after } = (item ?? {}) as Record<string, unknown>;
-				if (typeof text !== "string" || !BOUNDARIES.includes(after as Boundary)) throw new ProtocolError("a fragment needs text and after");
-				fragments.push({ text, role: "paragraph", after: after as Boundary });
+			if (!onPath("paplay", env)) {
+				send({ type: "missing", what: "player" });
+				return 1;
 			}
-		}
-		const speed = typeof first.speed === "number" && first.speed >= MIN_SPEED && first.speed <= MAX_SPEED ? first.speed : undefined;
-		const lead = typeof first.lead === "number" && first.lead >= 0 ? Math.min(first.lead, MAX_LEAD_SECONDS) : 0;
+			send({ type: "ready", v: PROTOCOL_VERSION, version: packageVersion() });
 
-		// From here, the end of input or `stop` (or this process being interrupted) ends the reading at once.
-		void (async () => {
-			try {
-				while (await next());
-			} catch {}
-			ended();
-		})();
-
-		// This machine's own turn (S1): wait while a reading of its own plays; never stop it. The waiting mark is taken
-		// once, so an explicit drop of what waits here (/read-stop, /read, S8) drops this reading too (A6, L157).
-		const lock = openReadingLock(env);
-		const mark = lock?.waitingMark();
-		while (lock && !quit) {
-			const taken = lock.claimIfFree(mark);
-			if (typeof taken === "object") {
-				claim = taken;
-				break;
+			// One or more `fragments` messages, each within the caps, then `end`; lead and speed come from the first.
+			const first = await next();
+			if (!first) return 0;
+			const fragments: Fragment[] = [];
+			for (let batch: Record<string, unknown> | undefined = first; batch?.type !== "end"; batch = await next()) {
+				if (!batch) return 0;
+				if (batch.type !== "fragments" || !Array.isArray(batch.items)) {
+					throw new ProtocolError(batch === first ? "expected fragments" : `expected fragments or end, got ${String(batch.type)}`);
+				}
+				if (batch.items.length > MAX_FRAGMENTS) throw new ProtocolError(`more than ${MAX_FRAGMENTS} fragments`);
+				for (const item of batch.items as unknown[]) {
+					const { text, after } = (item ?? {}) as Record<string, unknown>;
+					if (typeof text !== "string" || !BOUNDARIES.includes(after as Boundary)) throw new ProtocolError("a fragment needs text and after");
+					fragments.push({ text, role: "paragraph", after: after as Boundary });
+				}
 			}
-			if (taken === "dropped") {
-				send({ type: "stopped" });
-				return 0;
-			}
-			await new Promise((resolve) => setTimeout(resolve, CHECK_MS));
-		}
-		if (quit) return 0;
+			const speed = typeof first.speed === "number" && first.speed >= MIN_SPEED && first.speed <= MAX_SPEED ? first.speed : undefined;
+			const lead = typeof first.lead === "number" && first.lead >= 0 ? Math.min(first.lead, MAX_LEAD_SECONDS) : 0;
 
-		let lost = false;
-		const current = startReading({
-			voice,
-			speaker,
-			fragments,
-			output: { name: "listener", label: "listener" },
-			env,
-			loadSherpa: deps.loadSherpa,
-			speed,
-			leadSilence: lead,
-			timeoutMs: playerTimeoutMs(env, deps.warn),
-			onPlayer: (pid) => {
-				if (claim && !claim.setPlayer(pid)) {
+			// From here, the end of input or `stop` (or this process being interrupted) ends the reading at once.
+			void (async () => {
+				try {
+					while (await next());
+				} catch {}
+				ended();
+			})();
+
+			// This machine's own turn (S1): wait while a reading of its own plays; never stop it. The waiting mark is taken
+			// once, so an explicit drop of what waits here (/read-stop, /read, S8) drops this reading too (A6, L157).
+			const mark = lock?.waitingMark();
+			while (lock && !quit) {
+				const taken = lock.claimIfFree(mark);
+				if (typeof taken === "object") {
+					claim = taken;
+					break;
+				}
+				if (taken === "dropped") {
+					send({ type: "stopped" });
+					return 0;
+				}
+				await new Promise((resolve) => setTimeout(resolve, CHECK_MS));
+			}
+			if (quit) return 0;
+			music.stepAside();
+
+			let lost = false;
+			const current = startReading({
+				voice,
+				speaker,
+				fragments,
+				output: { name: "listener", label: "listener" },
+				env,
+				loadSherpa: deps.loadSherpa,
+				speed,
+				leadSilence: lead,
+				timeoutMs: playerTimeoutMs(env, deps.warn),
+				onPlayer: (pid) => {
+					if (claim && !claim.setPlayer(pid)) {
+						lost = true;
+						current.stop();
+					}
+				},
+			});
+			reading = current;
+			let told = -1;
+			const progress = (): void => {
+				const index = current.position();
+				if (index !== told) send({ type: "progress", index });
+				told = index;
+			};
+			progress();
+			check = setInterval(() => {
+				if (claim?.lost()) {
 					lost = true;
 					current.stop();
 				}
-			},
-		});
-		reading = current;
-		let told = -1;
-		const progress = (): void => {
-			const index = current.position();
-			if (index !== told) send({ type: "progress", index });
-			told = index;
-		};
-		progress();
-		check = setInterval(() => {
-			if (claim?.lost()) {
-				lost = true;
-				current.stop();
+				progress();
+			}, CHECK_MS);
+			try {
+				await current.done;
+			} catch (error) {
+				if (!lost && !claim?.lost() && !quit) throw error;
+			}
+			if (quit) return 0;
+			if (lost || claim?.lost()) {
+				send({ type: "stopped" });
+				return 0;
 			}
 			progress();
-		}, CHECK_MS);
-		try {
-			await current.done;
-		} catch (error) {
-			if (!lost && !claim?.lost() && !quit) throw error;
-		}
-		if (quit) return 0;
-		if (lost || claim?.lost()) {
-			send({ type: "stopped" });
+			send({ type: "done" });
+			finished = true;
 			return 0;
+		} catch (error) {
+			send({ type: "error", message: (error as Error).message });
+			return 1;
+		} finally {
+			clearInterval(beat);
+			clearInterval(check);
+			claim?.release();
 		}
-		progress();
-		send({ type: "done" });
-		return 0;
-	} catch (error) {
-		send({ type: "error", message: (error as Error).message });
-		return 1;
-	} finally {
-		clearInterval(beat);
-		clearInterval(check);
-		claim?.release();
 	}
 }

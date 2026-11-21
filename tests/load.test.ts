@@ -109,6 +109,14 @@ const branch = [user("hola"), assistant("**Primera** respuesta."), user("otra"),
 
 type Handler = (...args: never[]) => unknown;
 
+/** A footer without the auto-read indicator (S23): `Auto-read on · Reading P3.R1 …` → `Reading P3.R1 …`, `Auto-read on · local` → undefined. */
+function readingPart(text: string | undefined): string | undefined {
+	const indicator = /^Auto-read (?:on|questions)(?: · (.*))?$/.exec(text ?? "");
+	if (!indicator) return text;
+	const rest = indicator[1];
+	return rest && /^(?:Reading|Paused) /.test(rest) ? rest : undefined;
+}
+
 /**
  * An in-memory stand-in for Pi's shared event bus (`pi.events`), shaped like Pi's own: `emit` calls every handler
  * synchronously (Node's EventEmitter), each wrapped so its errors are caught, and `on` returns an unsubscribe.
@@ -192,7 +200,12 @@ function load(
 	const notes: [string, string | undefined][] = [];
 	const selects: [string, string[]][] = [];
 	const confirms: string[] = [];
+	/**
+	 * The reading's part of each footer change (S14, S15): the auto-read indicator (S23) taken off, undefined when only
+	 * it is left, repeats of the same reading part skipped. `footers` keeps every footer as shown.
+	 */
 	const statuses: (string | undefined)[] = [];
+	const footers: (string | undefined)[] = [];
 	let input: ((data: string) => unknown) | undefined;
 	/** Every question shown through ctx.ui.custom, as plain rendered lines, and the options it was shown with. */
 	const asked: string[][] = [];
@@ -214,7 +227,11 @@ function load(
 			notify: (message: string, type?: string) => notes.push([message, type]),
 			select: async (title: string, options: string[]) => (selects.push([title, options]), answers.select),
 			confirm: async (_title: string, message: string) => (confirms.push(message), answers.confirm ?? false),
-			setStatus: (_key: string, text: string | undefined) => statuses.push(text),
+			setStatus: (_key: string, text: string | undefined) => {
+				footers.push(text);
+				const part = readingPart(text);
+				if (part !== (statuses.length > 0 ? statuses.at(-1) : undefined)) statuses.push(part);
+			},
 			onTerminalInput: (handler: (data: string) => unknown) => ((input = handler), () => (input = undefined)),
 			custom: (
 				factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: unknown) => void) => {
@@ -256,6 +273,7 @@ function load(
 		asking: () => open !== undefined,
 		confirms,
 		statuses,
+		footers,
 		run: (name: string, args = "") => (commands.get(name)!.handler as (a: string, c: unknown) => Promise<void>)(args, ctx),
 		/** The shortcuts the reader registered, by key. */
 		shortcuts,
@@ -290,7 +308,7 @@ describe("reply-reader extension", () => {
 	it("registers /read and /read-output by default", () => {
 		const names: string[] = [];
 		replyReader({ registerCommand: (name: string) => names.push(name), registerShortcut: () => {}, on: () => {} } as never);
-		expect(names).toEqual(["read", "read-stop", "read-pause", "read-queue", "read-next", "read-output", "read-voice", "read-speed", "read-auto"]);
+		expect(names).toEqual(["read", "read-stop", "read-pause", "read-queue", "read-next", "read-output", "read-voice", "read-speed", "read-music", "read-auto"]);
 	});
 
 	describe("/read-auto (S8)", () => {
@@ -360,12 +378,13 @@ describe("reply-reader extension", () => {
 			expect(synthesized).toHaveLength(4);
 		});
 
-		it("is off by default and again at each session start", async () => {
+		it("is off by default, and at a session start after /read-auto off (S24: the last choice is kept)", async () => {
 			installVoice();
 			const reader = load();
 			await reader.turn([user("a"), assistant("Uno.")]);
 			await pause();
 			await reader.run("read-auto", "on");
+			await reader.run("read-auto", "off");
 			reader.restart();
 			await reader.turn([user("b"), assistant("Dos.")]);
 			await pause();
@@ -3475,6 +3494,149 @@ describe("reply-reader extension", () => {
 			const before = synthesized.length;
 			expect(await cli(p1)).toBe(0);
 			expect(texts().slice(before)).toEqual(["p uno.", "Hola."]);
+		});
+	});
+
+	describe("auto-read shows it is on (T50, S23)", { timeout: 20000 }, () => {
+		it("on, questions and the toggle show the mode, then the chosen output; off takes it away", async () => {
+			configureOutputs({ desktop: "tcp:x" });
+			const reader = load();
+			await reader.run("read-auto", "on");
+			await reader.run("read-output", "desktop");
+			await reader.run("read-auto", "questions");
+			await reader.run("read-auto", "off");
+			await reader.run("read-auto");
+			expect(reader.footers).toEqual(["Auto-read on", "Auto-read on · desktop", "Auto-read questions · desktop", undefined, "Auto-read on · desktop"]);
+		});
+
+		it("while this session reads, the reading's status follows it with the configured pause key; then the indicator again", async () => {
+			installVoice("sleep 30;");
+			writeSettings(JSON.stringify({ pauseKey: "alt+j" }));
+			configureOutputs({ desktop: "tcp:x" });
+			const reader = load();
+			await reader.run("read-output", "desktop");
+			await reader.run("read-auto", "on");
+			await reader.turn([user("a"), assistant("Uno.")]);
+			await waitFor(() => existsSync(log("play-0.pid")));
+			await reader.pauseKey("alt+j");
+			await waitFor(() => reader.footers.at(-1)?.includes("Paused") ?? false);
+			await reader.run("read-stop");
+			expect(reader.footers).toEqual([
+				"Auto-read on · desktop",
+				"Auto-read on · Reading P3.R1 on desktop · Alt+J pauses",
+				"Auto-read on · Paused P3.R1 · Alt+J resumes · /read-stop ends",
+				"Auto-read on · desktop",
+			]);
+		});
+
+		it("(preserved) with auto-read off the footer is as before: the reading's status, then nothing", async () => {
+			installVoice();
+			const reader = load();
+			await reader.run("read");
+			await reader.settled();
+			expect(reader.footers).toEqual(["Reading P2.R1 on local · Alt+M pauses", undefined]);
+		});
+	});
+
+	describe("auto-read and output are remembered (T51, S24)", { timeout: 20000 }, () => {
+		const texts = () => synthesized.map((request) => request.text);
+		const saved = () => JSON.parse(readFileSync(settingsPath(), "utf8"));
+		const outputsPath = () => join(root, "config", "pi-reply-reader", "outputs.json");
+
+		it("each /read-auto choice, the toggle included, is saved keeping other keys; new sessions start with it, shown at once", async () => {
+			installVoice();
+			writeSettings(JSON.stringify({ speed: 1.3, pauseKey: "alt+j" }));
+			const first = load();
+			await first.run("read-auto", "questions");
+			expect(saved()).toEqual({ speed: 1.3, pauseKey: "alt+j", autoRead: "questions" });
+			const second = load();
+			expect(second.footers).toEqual(["Auto-read questions"]);
+			await second.turn([user("a"), assistant("Hecho.\n\n## Needs your decision\n\n1. ¿Seguimos?")]);
+			await waitFor(() => second.footers.at(-1) === "Auto-read questions" && synthesized.length > 0);
+			expect(texts()).toEqual(["Decisiones pendientes.", "uno: ¿Seguimos?"]);
+			await second.run("read-auto");
+			expect(saved()).toEqual({ speed: 1.3, pauseKey: "alt+j", autoRead: "off" });
+			const third = load();
+			expect(third.footers).toEqual([]);
+			await third.run("read-auto");
+			expect(saved().autoRead).toBe("on");
+			expect(load().footers).toEqual(["Auto-read on"]);
+		});
+
+		it("a saved on never reads the replies already on the branch at session start", async () => {
+			installVoice();
+			writeSettings(JSON.stringify({ autoRead: "on" }));
+			const reader = load();
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			expect(synthesized).toEqual([]);
+			await reader.turn([user("c"), assistant("Tres.")]);
+			await waitFor(() => synthesized.length > 0 && reader.footers.at(-1) === "Auto-read on");
+			expect(texts()).toEqual(["Tres."]);
+			expect(reader.notes).toEqual([]);
+		});
+
+		it("/read-output and the first reading's pick are saved; new sessions use it without asking", async () => {
+			installVoice();
+			writeSettings(JSON.stringify({ speed: 1.3 }));
+			configureOutputs({ desktop: "tcp:x", other: "tcp:y" });
+			const first = load({ select: "desktop (tcp:x)" });
+			await first.run("read");
+			await first.settled();
+			expect(first.selects).toHaveLength(1);
+			expect(saved()).toEqual({ speed: 1.3, output: "desktop" });
+			const second = load();
+			await second.run("read-auto", "on");
+			expect(second.footers).toEqual(["Auto-read on · desktop"]);
+			await second.run("read");
+			await second.settled();
+			expect(second.selects).toEqual([]);
+			expect(read("play-1.server").trim()).toBe("tcp:x");
+			await second.run("read-output", "other");
+			expect(saved()).toEqual({ speed: 1.3, output: "other", autoRead: "on" });
+			const third = load();
+			expect(third.footers).toEqual(["Auto-read on · other"]);
+			await third.run("read", "P1.R1");
+			await waitFor(() => existsSync(log("play-2.server")));
+			expect(read("play-2.server").trim()).toBe("tcp:y");
+			expect(third.selects).toEqual([]);
+		});
+
+		it("(preserved) with nothing saved a session starts as before: auto-read off, the output asked on the first reading", async () => {
+			installVoice();
+			writeSettings(JSON.stringify({ speed: 1.3 }));
+			configureOutputs({ desktop: "tcp:x" });
+			const reader = load({ select: "desktop (tcp:x)" });
+			await reader.turn([user("a"), assistant("Uno.")]);
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			expect(synthesized).toEqual([]);
+			expect(reader.footers).toEqual([]);
+			await reader.run("read");
+			await reader.settled();
+			expect(reader.selects).toEqual([["Where should readings sound?", ["local (hs-node)", "desktop (tcp:x)"]]]);
+		});
+
+		it("a saved output missing from outputs.json warns once at session start and the first reading asks", async () => {
+			installVoice();
+			writeSettings(JSON.stringify({ output: "desktop" }));
+			configureOutputs({ other: "tcp:y" });
+			const reader = load({ select: "other (tcp:y)" });
+			expect(reader.notes).toEqual([[`Saved output "desktop" is not in ${outputsPath()}; choose one.`, "warning"]]);
+			await reader.run("read");
+			await reader.settled();
+			await reader.run("read");
+			await reader.settled();
+			expect(reader.selects).toHaveLength(1);
+			expect(reader.notes).toHaveLength(1);
+			expect(read("play-0.server").trim()).toBe("tcp:y");
+		});
+
+		it("when settings.json cannot be saved, the choice applies to this session and says it was not saved", async () => {
+			writeSettings("not json");
+			const reader = load();
+			await reader.run("read-auto", "on");
+			expect(reader.notes).toEqual([[`Auto-read on: full replies in this session, but it was not saved to ${settingsPath()}: it is not valid JSON.`, "warning"]]);
+			expect(reader.footers).toEqual(["Auto-read on"]);
+			expect(readFileSync(settingsPath(), "utf8")).toBe("not json");
 		});
 	});
 });
