@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { type Component, type KeyId, SelectList } from "@earendil-works/pi-tui";
 import { createAutoQueue, type StartResult } from "../src/auto-queue.ts";
 import { configFile, loadOutputs, type Output } from "../src/outputs.ts";
+import { createMusic, describeMusic, loadMusic, MUSIC_MODES, type MusicSettings, parseMusicArgs, saveMusic } from "../src/music.ts";
 import { keyName, loadPauseKey } from "../src/pause-key.ts";
 import { startOutputReading } from "../src/listener.ts";
 import type { Reading, SherpaTts } from "../src/playback.ts";
@@ -82,6 +83,12 @@ const CANNOT_PAUSE = "The reading playing cannot be paused (it is not in a Pi se
 const NOTHING_WAITS = "Nothing waits to be read.";
 const SKIPPED = "Skipped to the next reading.";
 const NOTHING_NEXT = "Reading stopped; nothing else waits.";
+/** What /read-music offers (S22). */
+const MUSIC_CHOICES: Record<string, string> = {
+	off: "leave the music as it is",
+	pause: "pause gentle-stream while reading, play it again after",
+	duck: "lower gentle-stream's volume while reading (duck 20: to 20 %)",
+};
 
 /** The part of Pi's theme the question uses. */
 interface QuestionTheme {
@@ -162,6 +169,9 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * once answered (ui_prompt_end, or the tool's end). The reader's own questions are never read.
  * Other extensions (pi-reply-thread's Alt+R view) reach it over `pi.events` (S10, src/reader-events.ts): a ping is
  * answered with ready, ready is also sent at each session start, and a read request reads its text like `/read`.
+ * Music steps aside while the machine reads (S22, src/music.ts): `/read-music off|pause|duck [level]`, saved in
+ * settings.json; once per machine, restored when nothing reads or waits, on a pause, and at a session start after a
+ * reader died. A listener output's music is the listener's `--serve`'s to step aside.
  */
 export function createReplyReader(
 	deps: {
@@ -193,6 +203,8 @@ export function createReplyReader(
 			/** What the footer names, and where it sounds. */
 			name: string;
 			output: string;
+			/** It sounds through this machine (local or PULSE_SERVER), so the music steps aside here (S22); a listener's steps aside there. */
+			here: boolean;
 			/** A blocking prompt's reading (S18): its answer stops it, and a pause ends it instead (S15). */
 			prompt?: string;
 			/** The fragment `reading` started from; paused, the one it resumes from (S15). */
@@ -213,6 +225,11 @@ export function createReplyReader(
 		let speedWarned = false;
 		/** Whether this session already warned that a listener output read through its fallback (S20: once per session). */
 		let fallbackWarned = false;
+		/** A music mode (and level) set with /read-music in this session; otherwise each reading uses the saved one (S22). */
+		let sessionMusic: Pick<MusicSettings, "mode"> & Partial<Pick<MusicSettings, "level">> | undefined;
+		/** Whether this session already said that music settings were ignored, or that a music command failed (S22). */
+		let musicProblemWarned = false;
+		let musicWarned = false;
 		/** The pause key (S15, L147): settings.json `pauseKey`, else Alt+M; read once, as Pi registers shortcuts at load. */
 		const pauseKey = loadPauseKey(env);
 		const pauseName = keyName(pauseKey.key);
@@ -362,6 +379,37 @@ export function createReplyReader(
 			},
 		});
 
+		/** The music settings for the next step aside (S22): this session's /read-music, over the saved ones. */
+		const musicSettings = (): MusicSettings => {
+			const { music } = loadMusic(env);
+			return sessionMusic ? { ...music, ...sessionMusic } : music;
+		};
+		/**
+		 * Music steps aside while the machine reads (S22): when this session takes the machine's reading turn, and back
+		 * once nothing reads or waits on the machine (any session's end of the line, a pause, a session start after a
+		 * reader died). Commands run in the background; a failure is said once per session.
+		 */
+		const music = createMusic({
+			env,
+			settings: musicSettings,
+			idle: () => current === undefined && queue.starting === undefined && !(openReadingLock(env)?.busy() ?? false) && waitingCount() === 0,
+			warn: (message) => {
+				const ctx = current?.ctx ?? latest;
+				if (musicWarned || !ctx) return;
+				musicWarned = true;
+				ctx.ui.notify(message, "warning");
+			},
+		});
+		/** Steps the music aside for a reading that sounds here, telling once per session about ignored settings. */
+		const stepAside = (ctx: ExtensionContext): void => {
+			const { problem } = loadMusic(env);
+			if (problem && !sessionMusic && !musicProblemWarned) {
+				musicProblemWarned = true;
+				ctx.ui.notify(problem, "warning");
+			}
+			music.stepAside();
+		};
+
 		/** This session as /read-queue names it: its name (Pi's /name), else its working folder. */
 		const sessionLabel = (): string => {
 			const ctx = latest;
@@ -383,6 +431,8 @@ export function createReplyReader(
 			const line = queue.starting && !current ? [queue.starting, ...queue.items] : queue.items;
 			const items: WaitingItem[] = line.map((item) => ({ name: item.name, at: item.at, mark: item.mark }));
 			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), items, sessionTag(), humanWait > 0);
+			// The line emptied with nothing read (dropped, /read-auto off): music left aside comes back (S22).
+			if (items.length === 0) music.settle();
 		};
 		/** How many readings wait: on the machine, or in this session's line without a usable XDG_RUNTIME_DIR (S16). */
 		const waitingCount = (): number => {
@@ -451,6 +501,8 @@ export function createReplyReader(
 			clearInterval(watch);
 			reading?.stop();
 			claim?.release();
+			// Nothing reads or waits on the machine any more: the music comes back (S22); between queued readings it stays aside.
+			music.settle();
 			footer(ctx);
 			// A reply waiting for this reading may start now.
 			queue.kick();
@@ -470,6 +522,8 @@ export function createReplyReader(
 			state.reading = undefined;
 			state.claim?.setPaused(true);
 			reading.stop();
+			// Paused, the music comes back; resuming steps it aside again (S22).
+			music.settle({ force: true });
 			footer();
 		};
 
@@ -479,6 +533,7 @@ export function createReplyReader(
 			if (!state || state.reading) return;
 			state.claim?.setPaused(false);
 			state.play(state.from);
+			if (state.here) stepAside(state.ctx);
 			footer();
 		};
 
@@ -596,7 +651,7 @@ export function createReplyReader(
 				...(auto?.announce && auto.announce !== "prompt" ? announcement(auto.announce, name, narration.language) : []),
 				...narration.fragments,
 			];
-			const state: Current = { ctx, claim, name, output: output.name, prompt: auto?.prompt, from: 0, play: () => {} };
+			const state: Current = { ctx, claim, name, output: output.name, here: !output.ssh, prompt: auto?.prompt, from: 0, play: () => {} };
 			/** Stopped by another session: no message, just the footer. */
 			const stoppedElsewhere = (): void => {
 				if (current === state) stop();
@@ -620,6 +675,8 @@ export function createReplyReader(
 					},
 					// A listener output that cannot read goes on through its fallback (S20), said once per session.
 					onFallback: (message) => {
+						// It sounds here after all: the music here steps aside (S22).
+						if (current === state) stepAside(ctx);
 						if (fallbackWarned) return;
 						fallbackWarned = true;
 						ctx.ui.notify(message, "warning");
@@ -656,6 +713,8 @@ export function createReplyReader(
 				: undefined;
 			state.watch?.unref();
 			current = state;
+			// The machine's line went idle → reading: the music where it sounds steps aside, never delaying speech (S22).
+			if (state.here) stepAside(ctx);
 			// Started: it no longer waits in the machine's list (S16).
 			publish();
 			footer();
@@ -947,6 +1006,36 @@ export function createReplyReader(
 			},
 		});
 
+		command("read-music", {
+			description:
+				"What music does while the reader speaks: off, pause, or duck [level] (lower gentle-stream to level %, default duck 20); no argument shows it; saved for later sessions",
+			getArgumentCompletions: (prefix) =>
+				MUSIC_MODES.filter((mode) => mode.startsWith(prefix.trim())).map((mode) => ({ value: mode, label: mode, description: MUSIC_CHOICES[mode] })),
+			handler: async (args, ctx) => {
+				const parsed = parseMusicArgs(args);
+				if (parsed === "show") {
+					const current = musicSettings();
+					const hooks = [current.before && `before "${current.before}"`, current.after && `after "${current.after}"`].filter(Boolean);
+					ctx.ui.notify(`${describeMusic(current)}${hooks.length > 0 ? ` Hooks: ${hooks.join("; ")}.` : ""}`, "info");
+					return;
+				}
+				if ("problem" in parsed) {
+					ctx.ui.notify(parsed.problem, "warning");
+					return;
+				}
+				const level = parsed.level ?? musicSettings().level;
+				sessionMusic = parsed.level === undefined ? { ...sessionMusic, mode: parsed.mode } : { mode: parsed.mode, level };
+				const said = describeMusic({ mode: parsed.mode, level }, true);
+				try {
+					saveMusic(env, parsed);
+				} catch (error) {
+					ctx.ui.notify(`${said.slice(0, -1)} in this session, but ${(error as Error).message}.`, "warning");
+					return;
+				}
+				ctx.ui.notify(said, "info");
+			},
+		});
+
 		command("read-auto", {
 			description:
 				'Read each new reply aloud as soon as it is written, and each prompt that waits for you: on (in full), questions (only "Needs your decision"), off; no argument toggles; saved for later sessions',
@@ -1127,6 +1216,11 @@ export function createReplyReader(
 			latest = ctx;
 			// Players left by a Pi that died (S13 h): a hung paplay spins at about a core until it is ended.
 			reapOrphans();
+			musicWarned = false;
+			musicProblemWarned = false;
+			sessionMusic = undefined;
+			// Music a reader that died left aside comes back, when nothing reads or waits on the machine (S22).
+			music.settle();
 			// The last choices of /read-auto and /read-output, as saved (S24); none saved: off, the output asked.
 			const saved = loadSaved(env);
 			auto = saved.autoRead === "on" ? "full" : saved.autoRead === "questions" ? "questions" : "off";
@@ -1165,6 +1259,7 @@ export function createReplyReader(
 			stop();
 			footer();
 			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), []);
+			music.settle();
 			unsubscribeEvents?.();
 			unsubscribeEvents = undefined;
 			latest = undefined;

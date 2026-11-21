@@ -63,6 +63,7 @@ sentence is synthesized, about 1-2 s.
 | `/read-output [name]` | Choose where readings sound: local or an output from outputs.json; saved for later sessions | With a name, switches to that output; without one, asks. See [Outputs](#outputs). |
 | `/read-voice [male\|female]` | Choose the voice for the next readings: male (default) or female | With a name, switches the voice; without one, asks. |
 | `/read-speed [n]` | Choose the voice speed for the next readings, 0.5 to 2.0 (default 1.1); saved for later sessions | With a number, sets that speed; without one, offers 0.8 to 1.5. See [Speed](#speed). |
+| `/read-music [off\|pause\|duck] [level]` | What music does while the reader speaks: off, pause, or duck [level] (lower gentle-stream to level %, default duck 20); no argument shows it; saved for later sessions | See [Music while reading](#music-while-reading). |
 
 While a reading plays, the footer shows `Reading P12.R1 on local · Alt+M pauses` (or the file name, as in
 `Reading notes.md on local · Alt+M pauses`); while it is paused, `Paused P12.R1 · Alt+M resumes · /read-stop ends`.
@@ -349,12 +350,67 @@ else says `Speed must be a number from 0.5 to 2.0.` and changes nothing.
 
 - The choice is saved in `$XDG_CONFIG_HOME/pi-reply-reader/settings.json` (`~/.config/…` when
   `XDG_CONFIG_HOME` is unset) as `{ "speed": 1.15 }`, keeping any other keys, and every later session and
-  reading uses it. A reading already playing keeps its speed. The same file keeps `pauseKey`, and the last
-  `/read-auto` and output choices (`autoRead`, `output`; see [Auto-read](#auto-read) and [Outputs](#outputs)).
+  reading uses it. A reading already playing keeps its speed. The same file keeps `pauseKey`, the last
+  `/read-auto` and output choices (`autoRead`, `output`; see [Auto-read](#auto-read) and [Outputs](#outputs)),
+  and `music` (see [Music while reading](#music-while-reading)).
 - Only the voice speed changes; the pauses between sentences, lines and sections stay the same.
 - No file means 1.1. An invalid file, or a speed outside 0.5 to 2.0, is ignored with one warning per
   session, and readings use 1.1. `/read-speed` does not overwrite a file that is not valid JSON.
 - If the file cannot be saved, the speed still applies to this session and a warning says it was not saved.
+
+### Music while reading
+
+While the reader speaks, music steps aside, and comes back when it is done. With nothing set, music played by
+gentle-stream goes down to 20 % of its volume. `/read-music` chooses what happens:
+
+- `/read-music duck 35` (or `/read-music 35`): lowers the volume to 35 % (0 to 100), and puts back the volume it
+  had. A volume already at or below the level is never raised. `/read-music duck` keeps the saved level.
+- `/read-music pause`: pauses the music, and plays it again after, only if it was playing before.
+- `/read-music off`: leaves the music as it is.
+- `/read-music` alone shows the setting (`Music goes down to 20 % while reading.`). Anything else says
+  `Use /read-music off, pause, or duck with a level from 0 to 100.` or `Level must be a whole number from 0 to 100.`
+  and changes nothing.
+
+The choice is saved in `settings.json` as `"music": { "mode": "duck", "level": 35 }`, keeping the other keys
+(the hooks too), and every later session and reading uses it. An invalid `music` value is ignored with one
+warning per session, and the default is used.
+
+**When.** Once per machine, by whoever holds the reading turn (a Pi session, the `reply-reader` command, or
+`--serve` on a listener): the music steps aside when the machine goes from nothing read to a reading, and comes
+back when the reading ends with nothing waiting. Between readings that wait in the line it stays aside, so it does
+not go up and down. Pausing a reading (Alt+M, `/read-pause`) brings the music back; resuming steps it aside again.
+The state before the step aside is kept in `$XDG_RUNTIME_DIR/pi-reply-reader/music.json`, so if a reader dies
+while the music is aside, the next Pi session start (or the next reading's end) puts it back.
+
+**What a restore never does.** It never starts music that was not playing: music already paused or stopped
+when the reading started is not touched at all. If you changed the volume during the reading (it is no longer the
+level the reader set), your volume stays. In pause mode, the music plays again only if it is still paused at the
+volume it had; if you changed it, or played it yourself, it is left as it is.
+
+**gentle-stream** is driven through `gentle-stream ctl status --json`, `ctl volume N`, `ctl pause` and `ctl play`.
+Without `gentle-stream` on `PATH`, or with nothing playing (its `ctl` exits 1), nothing happens and nothing is
+said.
+
+**Hooks**, for any other player: settings.json `"music": { "before": "<command>", "after": "<command>" }` run
+at the same moments (before: when the music steps aside; after: when it comes back), whatever the mode
+(`"mode": "off"` with hooks uses only the hooks). For example:
+
+```json
+{ "music": { "mode": "off", "before": "playerctl pause", "after": "playerctl play" } }
+```
+
+Each hook runs through `/bin/sh -c`, as you, with your environment: it comes from your own settings file and
+nothing from a reply is ever put in it, so treat it like a line of your shell profile.
+
+**Never in the way of speech.** Every command (gentle-stream's or a hook) runs in the background, in its own
+process group, and is ended after 3 s; speech never waits for it. A command that fails or hangs is said once per
+session, for example `Music hook "before" timed out after 3 s; it was ended.`
+
+**Where it runs.** Where the music plays: on the agent host for `local` and `PULSE_SERVER` outputs (and for a
+listener output that reads through its fallback); on the listener for a listener output, where
+`reply-reader --serve` steps the listener's music aside with the listener's own settings, and the agent host does
+not touch its own. After a listener reading ends, `--serve` keeps the music aside for 4 s more, so the agent host's
+next reading in its line finds it still aside; a stopped or paused reading brings it back at once.
 
 ## How replies are cleaned for listening
 
@@ -568,8 +624,8 @@ needs its own voice for the fallback. Text from the listener or `ssh` shown in t
 characters removed, and a line from the listener over 64 KiB ends the reading there
 (`the listener sent a line longer than 65536 bytes`).
 
-`reply-reader --serve` never downloads and writes no file besides the reading lock under
-`$XDG_RUNTIME_DIR/pi-reply-reader/`. It only plays what it is sent; whoever can run `ssh` as you to the
+`reply-reader --serve` never downloads and writes no file besides the reading lock (and, when the music steps
+aside, `music.json`) under `$XDG_RUNTIME_DIR/pi-reply-reader/`. It only plays what it is sent; whoever can run `ssh` as you to the
 listener can make it speak.
 
 ## Requirements

@@ -3,6 +3,7 @@ import { hostname as osHostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { loadOutputs } from "./outputs.ts";
 import { serve, startOutputReading } from "./listener.ts";
+import { createMusic, loadMusic } from "./music.ts";
 import type { SherpaTts } from "./playback.ts";
 import { PLAYER_MARK, playerTimeoutMs, signalledPlayersEnded } from "./player.ts";
 import { projectChanged, projectOf } from "./project.ts";
@@ -228,7 +229,29 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 
 	// Without a usable XDG_RUNTIME_DIR there is no claim, and only Ctrl+C stops this reading. Like a manual /read it drops
 	// the auto-reads waiting in Pi sessions (S8, T33); it never asks.
-	const claim = openReadingLock(env)?.claim({ dropWaiting: true });
+	const lock = openReadingLock(env);
+	const claim = lock?.claim({ dropWaiting: true });
+	// Music steps aside while it reads, here for a local or PULSE_SERVER output (a listener's steps aside there), and comes
+	// back once nothing reads or waits on the machine; the command waits for that before it exits (S22).
+	let musicWarned = false;
+	const music = createMusic({
+		env,
+		settings: () => loadMusic(env).music,
+		idle: () => (lock ? !lock.busy() && lock.waitingList().length === 0 : true),
+		warn: (message) => {
+			if (musicWarned) return;
+			musicWarned = true;
+			say(message);
+		},
+	});
+	const stepAside = (): void => {
+		const { problem } = loadMusic(env);
+		if (problem && !musicWarned) {
+			musicWarned = true;
+			say(problem);
+		}
+		music.stepAside();
+	};
 	// A project other than the last reading's on the machine is said first (S19); without XDG_RUNTIME_DIR this process
 	// remembers none, so it always is.
 	const project = projectOf(deps.cwd ?? process.cwd());
@@ -246,10 +269,15 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 		onPlayer: (pid) => {
 			if (claim && !claim.setPlayer(pid)) reading.stop();
 		},
-		// A listener that cannot read sends the reading through its fallback (S20); one reading, so said once.
-		onFallback: say,
+		// A listener that cannot read sends the reading through its fallback (S20); one reading, so said once. It sounds
+		// here then, so the music here steps aside (S22).
+		onFallback: (message) => {
+			say(message);
+			stepAside();
+		},
 		lost: () => claim?.lost() ?? false,
 	});
+	if (!output.ssh) stepAside();
 	const interrupt = (): void => {
 		interrupted = true;
 		reading.stop();
@@ -269,6 +297,8 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 		clearInterval(watch || undefined);
 		signal?.removeEventListener("abort", interrupt);
 		claim?.release();
+		music.settle();
+		await music.idle();
 		// A player this command signalled (a reaped orphan, the reading it took over) gets its SIGKILL before the
 		// command exits (S13 e).
 		await signalledPlayersEnded();

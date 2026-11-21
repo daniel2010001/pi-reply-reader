@@ -308,7 +308,7 @@ describe("reply-reader extension", () => {
 	it("registers /read and /read-output by default", () => {
 		const names: string[] = [];
 		replyReader({ registerCommand: (name: string) => names.push(name), registerShortcut: () => {}, on: () => {} } as never);
-		expect(names).toEqual(["read", "read-stop", "read-pause", "read-queue", "read-next", "read-output", "read-voice", "read-speed", "read-auto"]);
+		expect(names).toEqual(["read", "read-stop", "read-pause", "read-queue", "read-next", "read-output", "read-voice", "read-speed", "read-music", "read-auto"]);
 	});
 
 	describe("/read-auto (S8)", () => {
