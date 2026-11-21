@@ -59,11 +59,42 @@ export function loadSpeed(env: NodeJS.ProcessEnv): { speed: number; problem?: st
 	return inRange(speed) ? { speed } : ignored("speed must be a number from 0.5 to 2.0");
 }
 
+/** What `/read-auto` saves (S24): `on` reads in full, `questions` only the questions section. */
+export type SavedAuto = "on" | "questions" | "off";
+const AUTO_VALUES: readonly string[] = ["on", "questions", "off"];
+
 /**
- * Saves `speed` in settings.json, keeping every other key. Throws an Error naming the file and why when it
+ * The auto-read mode and output the last session chose (S24), from settings.json `autoRead` and `output`. A missing
+ * file, key, or a value of the wrong kind means none saved (an unreadable or invalid file is reported by `loadSpeed`
+ * at the first reading). Nothing throws.
+ */
+export function loadSaved(env: NodeJS.ProcessEnv): { autoRead?: SavedAuto; output?: string } {
+	const path = configFile(env, SETTINGS);
+	if (!path) return {};
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		return {};
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+	const { autoRead, output } = parsed as { autoRead?: unknown; output?: unknown };
+	return {
+		...(typeof autoRead === "string" && AUTO_VALUES.includes(autoRead) ? { autoRead: autoRead as SavedAuto } : {}),
+		...(typeof output === "string" && output ? { output } : {}),
+	};
+}
+
+/** Saves `speed` in settings.json, keeping every other key (see `saveSettings`). */
+export function saveSpeed(env: NodeJS.ProcessEnv, speed: number): void {
+	saveSettings(env, { speed });
+}
+
+/**
+ * Saves `values` in settings.json, keeping every other key. Throws an Error naming the file and why when it
  * cannot; an existing file that is not a JSON object is left as it is rather than overwritten.
  */
-export function saveSpeed(env: NodeJS.ProcessEnv, speed: number): void {
+export function saveSettings(env: NodeJS.ProcessEnv, values: Record<string, unknown>): void {
 	const path = configFile(env, SETTINGS);
 	if (!path) throw new Error(`it was not saved: no config folder (set XDG_CONFIG_HOME or HOME to an absolute path)`);
 	const fail = (reason: string) => new Error(`it was not saved to ${path}: ${reason}`);
@@ -87,7 +118,7 @@ export function saveSpeed(env: NodeJS.ProcessEnv, speed: number): void {
 	}
 	try {
 		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, `${JSON.stringify({ ...settings, speed }, null, 2)}\n`);
+		writeFileSync(path, `${JSON.stringify({ ...settings, ...values }, null, 2)}\n`);
 	} catch (error) {
 		throw fail((error as Error).message);
 	}

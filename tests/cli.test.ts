@@ -13,6 +13,7 @@ import type { SherpaRequest, SherpaTts } from "../src/playback.ts";
 import { openReadingLock } from "../src/reading-lock.ts";
 import { PLAYER_MARK } from "../src/reading-lock.ts";
 import { VOICE_ARCHIVE, type VoiceArchive } from "../src/voice.ts";
+import { endProcessesOf } from "./processes.ts";
 
 /**
  * T24 (S6, the standalone command): `reply-reader <file.md>` through main()'s public interface, with a fake paplay on
@@ -32,6 +33,8 @@ const MODEL_FILES = [
 ];
 
 const USAGE = `Usage: reply-reader [options] <file.md | ->
+       reply-reader --download-voice
+       reply-reader --serve
 
 Reads a Markdown file aloud with local text-to-speech; "-" reads standard input.
 
@@ -39,6 +42,8 @@ Options:
   --output <name>      where it sounds: local (default) or a name from outputs.json
   --speed <n>          voice speed from 0.5 to 2.0 for this run (default: the saved speed, else 1.1)
   --voice male|female  the voice (default: male)
+  --download-voice     download the voice (asks first, so it needs a terminal) and exit
+  --serve              act as a listener: play what an agent host sends over SSH (a listener output in outputs.json)
   -h, --help           show this help
 
 Ctrl+C stops the reading.
@@ -63,6 +68,9 @@ beforeEach(() => {
 		XDG_CONFIG_HOME: join(root, "config"),
 		XDG_RUNTIME_DIR: join(root, "run"),
 	};
+	// The machine already remembers the project of `<root>/work`, as after an earlier reading there, so tests of other
+	// rules hear no project (S19); the S19 tests read elsewhere or without XDG_RUNTIME_DIR.
+	openReadingLock(env)!.swapProject("work");
 });
 
 afterEach(async () => {
@@ -70,6 +78,8 @@ afterEach(async () => {
 	server?.closeAllConnections();
 	await new Promise<void>((done) => (server ? server.close(() => done()) : done()));
 	server = undefined;
+	// Every player (and its children) this test started goes before its folder (L138: tests leaked fake players).
+	await endProcessesOf(root);
 	rmSync(root, { recursive: true, force: true });
 });
 
@@ -140,6 +150,8 @@ interface RunOptions {
 	confirm?: (message: string) => Promise<boolean>;
 	signal?: AbortSignal;
 	archive?: VoiceArchive;
+	/** Where the command runs (S19 names its project); `<root>/work` by default. */
+	cwd?: string;
 }
 
 /** Runs main() the way bin/reply-reader.ts does, capturing what it prints and its exit code. */
@@ -150,7 +162,7 @@ function run(argv: string[], options: RunOptions = {}) {
 	const confirm = options.confirm ?? (async () => false);
 	const code = main(argv, {
 		env,
-		cwd: join(root, "work"),
+		cwd: options.cwd ?? join(root, "work"),
 		hostname: "hs-node",
 		stdin: Readable.from(options.stdin === undefined ? [] : [Buffer.from(options.stdin)]),
 		stdout: { write: (text: string) => ((out += text), true) },
@@ -321,6 +333,10 @@ describe("reply-reader command (S6)", () => {
 			[["notes.md", "--output"], "--output needs a value"],
 			[["--speed"], "--speed needs a value"],
 			[["notes.md", "--voice"], "--voice needs a value"],
+			// S20: the listener's and the voice's own modes take nothing else; elsewhere they are not file options.
+			[["--serve", "notes.md"], '--serve takes no other arguments ("notes.md")'],
+			[["--download-voice", "notes.md"], '--download-voice takes no other arguments ("notes.md")'],
+			[["notes.md", "--serve"], 'unknown option "--serve"'],
 		];
 		for (const [argv, problem] of cases) {
 			expect(await finished(argv)).toEqual({ code: 2, out: "", err: `reply-reader: ${problem}.\n\n${USAGE}`, asked: [] });
@@ -490,6 +506,19 @@ describe("reply-reader command (S6)", () => {
 		expect(await exited).toBe("SIGTERM");
 	});
 
+	it("(S13 e) a lock takeover kills a TERM-ignoring player elsewhere before the command finishes", { timeout: 15000 }, async () => {
+		installVoice();
+		note("notes.md", "Hola.");
+		const otherPlayer = spawn("/bin/sh", ["-c", "trap '' TERM; while :; do sleep 0.1; done", "paplay", PLAYER_MARK], { stdio: "ignore" });
+		spawned.push(otherPlayer);
+		const ended = new Promise((done) => otherPlayer.on("exit", (_code, signal) => done(signal)));
+		await sleep(200);
+		const other = openReadingLock(env)!.claim();
+		expect(other.setPlayer(otherPlayer.pid!)).toBe(true);
+		expect((await finished(["notes.md"])).code).toBe(0);
+		expect(await Promise.race([ended, sleep(300).then(() => "still running")])).toBe("SIGKILL");
+	});
+
 	it("drops the auto-reads waiting in Pi sessions when it starts reading, as a manual /read does, and never asks (S8)", async () => {
 		installVoice();
 		note("notes.md", "Hola.");
@@ -511,7 +540,49 @@ describe("reply-reader command (S6)", () => {
 		await sleep(900);
 		expect(seen()).toEqual({ statuses: [], notes: [["Auto-read on: full replies.", "info"]], asked: [], waiting: true });
 	}, 20000);
+
+	it("(S19) says the project (its working folder's Git root) when it differs from the last reading's on the machine", async () => {
+		installVoice();
+		for (const repo of ["p1", "p2"]) mkdirSync(join(root, repo, ".git"), { recursive: true });
+		mkdirSync(join(root, "p1", "docs"));
+		writeFileSync(join(root, "notas.md"), "Hola.");
+		const file = join(root, "notas.md");
+		const readIn = async (cwd: string) => {
+			const before = synthesized.length;
+			expect(await finished([file], { cwd })).toEqual({ code: 0, out: "", err: "", asked: [] });
+			return texts().slice(before);
+		};
+		expect(await readIn(join(root, "p1", "docs"))).toEqual(["p uno.", "Hola."]);
+		expect(await readIn(join(root, "p1"))).toEqual(["Hola."]);
+		expect(await readIn(join(root, "p2"))).toEqual(["p dos.", "Hola."]);
+		expect(await readIn(join(root, "p1"))).toEqual(["p uno.", "Hola."]);
+	});
+
+	it("(S19) without a usable XDG_RUNTIME_DIR each run is its own process: it always says the project", async () => {
+		installVoice();
+		delete env.XDG_RUNTIME_DIR;
+		note("notes.md", "Hola.");
+		expect((await finished(["notes.md"])).code).toBe(0);
+		expect((await finished(["notes.md"])).code).toBe(0);
+		expect(texts()).toEqual(["work.", "Hola.", "work.", "Hola."]);
+	});
 });
+
+const TIMEOUT_HINT = "REPLY_READER_PLAYER_TIMEOUT must be a number of seconds from 5 to 86400; using 15.";
+
+/**
+ * A marked player left by a reader that is gone (S13): it ignores SIGTERM, and its PI_REPLY_READER_OWNER names a
+ * process that already exited.
+ */
+function deadOwnersPlayer(): ChildProcess {
+	const gone = execFileSync("/bin/sh", ["-c", "echo $$"], { encoding: "utf8" }).trim();
+	const child = spawn("/bin/sh", ["-c", "trap '' TERM; while :; do sleep 0.1; done", "paplay", PLAYER_MARK], {
+		stdio: "ignore",
+		env: { PATH: "/usr/bin:/bin", PI_REPLY_READER_OWNER: `${gone}:` },
+	});
+	spawned.push(child);
+	return child;
+}
 
 const EXTENSION = pathToFileURL(resolve(import.meta.dirname, "..", "extensions", "reply-reader.ts")).href;
 
@@ -529,7 +600,7 @@ const save = () => { writeFileSync(root + "/pi.json.tmp", JSON.stringify(state))
 const commands = new Map();
 const events = new Map();
 const loadSherpa = async () => ({ sampleRate: 44100, async generateAsync() { return { samples: new Float32Array(1).fill(0.125) }; } });
-createReplyReader({ env: JSON.parse(envJson), hostname: "hs-node", loadSherpa })({ registerCommand: (n, o) => commands.set(n, o), on: (e, h) => events.set(e, h) });
+createReplyReader({ env: JSON.parse(envJson), hostname: "hs-node", loadSherpa })({ registerCommand: (n, o) => commands.set(n, o), registerShortcut: () => {}, on: (e, h) => events.set(e, h) });
 const message = (id, role, text) => ({ type: "message", id, timestamp: "t", message: role === "user" ? { role, content: text } : { role, stopReason: "stop", content: [{ type: "text", text }] } });
 const branch = [message("u1", "user", "hola"), message("a1", "assistant", "Primera respuesta.")];
 const ctx = {
@@ -539,15 +610,24 @@ const ctx = {
 		select: async (title) => { state.asked.push(title); save(); return undefined; },
 		confirm: async () => false,
 		custom: async () => { state.asked.push("custom"); save(); return undefined; },
-		setStatus: (_key, text) => { state.statuses.push(text ?? null); save(); },
+		// The reading's part of each footer change: the auto-read indicator (S23) taken off, null when only it is left.
+		setStatus: (_key, text) => {
+			const indicator = /^Auto-read (?:on|questions)(?: · (.*))?$/.exec(text ?? "");
+			const part = !indicator ? (text ?? null) : indicator[1] && /^(?:Reading|Paused) /.test(indicator[1]) ? indicator[1] : null;
+			if (part !== (state.statuses.length > 0 ? state.statuses.at(-1) : null)) state.statuses.push(part);
+			save();
+		},
 		onTerminalInput: () => () => {},
 	},
 };
 events.get("session_start")({ reason: "startup" }, ctx);
 await commands.get("read-auto").handler("on", ctx);
-events.get("agent_start")({ type: "agent_start" }, ctx);
-branch.push(message("u2", "user", "sigue"), message("a2", "assistant", "Uno."));
-events.get("agent_settled")({ type: "agent_settled", aborted: false }, ctx);
+// Pi stores each message after its message_end handlers return; the reader looks on the next turn (T42).
+for (const entry of [message("u2", "user", "sigue"), message("a2", "assistant", "Uno.")]) {
+	events.get("message_end")({ type: "message_end", message: entry.message }, ctx);
+	branch.push(entry);
+}
+await new Promise((resolve) => setTimeout(resolve, 0));
 state.waiting = true;
 save();
 setInterval(() => {}, 1000);
@@ -712,6 +792,28 @@ registerHooks({
 		expect(await result.code).toBe(130);
 		await waitFor(() => !alive(pid));
 		expect(result.err).toBe("");
+	});
+
+	it("(S13 e) does not exit before a TERM-ignoring orphan it reaped has been SIGKILLed", { timeout: 15000 }, async () => {
+		installVoice();
+		note("notes.md", "Hola.");
+		const orphan = deadOwnersPlayer();
+		const ended = new Promise((done) => orphan.on("exit", (_code, signal) => done(signal)));
+		await sleep(200);
+		const result = launch(["notes.md"]);
+		expect(await result.code).toBe(0);
+		expect(await Promise.race([ended, sleep(500).then(() => "still running")])).toBe("SIGKILL");
+		expect(result.err).toBe("");
+	});
+
+	it("(S13 f) REPLY_READER_PLAYER_TIMEOUT=3000000 warns once on stderr, uses 15 s and still plays", async () => {
+		installVoice();
+		note("notes.md", "Hola.");
+		env.REPLY_READER_PLAYER_TIMEOUT = "3000000";
+		const result = launch(["notes.md"]);
+		expect(await result.code).toBe(0);
+		expect(result.err).toBe(`${TIMEOUT_HINT}\n`);
+		expect(readFileSync(join(root, "play.audio"))).toHaveLength(2);
 	});
 
 	for (const [signal, code] of [["SIGTERM", 143], ["SIGHUP", 129]] as const) {

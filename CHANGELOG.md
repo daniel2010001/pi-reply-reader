@@ -2,6 +2,102 @@
 
 ## Unreleased
 
+- Music steps aside while the reader speaks: by default, music played by gentle-stream goes down to volume 20
+  (of gentle-stream's 0-100) and its volume comes back after. `/read-music off|pause|duck [level]` chooses (saved in `settings.json` as
+  `"music": { "mode": "duck", "level": 20 }`; no argument shows it). Pause mode plays the music again only if it
+  was playing before. Once per machine: the holder of the reading turn steps it aside when the machine starts
+  reading and restores it when nothing reads or waits, so queued readings do not flap; a pause restores it and a
+  resume steps it aside again. The prior state is kept in `$XDG_RUNTIME_DIR/pi-reply-reader/music.json`, so a
+  session start restores music a dead reader left aside; a volume you changed meanwhile stays. On a listener
+  output, `reply-reader --serve` does it on the listener. Generic `before`/`after` hooks (`sh -c`, as you) run at
+  the same moments. Every command runs in the background with a 3 s timeout and never delays speech; without
+  gentle-stream or with nothing playing, nothing happens and nothing is said. A new `/read` in the session already reading keeps the music
+  aside; a listener reading that fell back to local playback steps it aside again on resume; a broken, empty or
+  out-of-range `music.json` counts as no state and is replaced, never passed to gentle-stream.
+
+- Auto-read shows it is on: while `/read-auto` is on, the footer says `Auto-read on · desktop` or
+  `Auto-read questions · desktop` (just `Auto-read on` before an output is chosen), also with nothing playing,
+  and `Auto-read on · Reading P12.R1 on desktop · Alt+M pauses` while the session reads. With it off the footer
+  is unchanged.
+- Auto-read and the output are remembered: the last `/read-auto` choice (on, questions, off; the toggle
+  included) and the last output (`/read-output`, or the pick at the first reading's question) are saved in
+  `settings.json` (`autoRead`, `output`, keeping the other keys) and every new Pi session starts with them.
+  Nothing saved starts as before (off, the output asked). A saved output gone from `outputs.json` warns
+  `Saved output "desktop" is not in …/outputs.json; choose one.` and the first reading asks. A saved "on"
+  never reads the replies already in the session.
+
+- Synthesis on the listener: an output in `outputs.json` can be `{ "ssh": "you@host", "fallback": "<PULSE_SERVER>" }`.
+  The agent host sends each reading's fragments over SSH to `reply-reader --serve` on the listener, which
+  synthesizes and plays them, so a slow agent host no longer delays readings. Pause/resume, `/read-stop`, the
+  line, announcements and the player timeout behave as for any output. When the listener does not answer,
+  lacks `reply-reader`, its voice or `paplay`, or fails mid-reading, the reading goes on from the sentence last
+  heard on the agent host through `fallback`, with one warning per session; without a fallback it fails with
+  `Playback on "<output>" failed: <reason>`. The listener waits while it reads something of its own; a
+  `/read-stop` or `/read` there drops the agent host's reading still waiting, which ends quietly. Long
+  readings (over 5000 sentences or 1 MiB) are sent in several messages and stay on the listener. Bad `ssh`
+  values (empty, a leading `-`, whitespace, control characters) and unknown keys are reported and the entry
+  skipped. Text from the listener or `ssh` is shown without control characters. `--serve` ends quietly when
+  the agent host goes away, and a reading on the listener never ends a running `--serve` as an orphan.
+- `reply-reader --download-voice` downloads the voice (asking `[y/N]` on a terminal) and exits; a listener
+  without its voice names it in the warning.
+
+- Readings say their project when it changes: a reading whose project (the folder name of its Git root, or of
+  its working folder outside a repository) differs from the last reading's on the machine, or the first one,
+  starts with the project's name, then its announcement if it waited ("pi-reply-reader. Respuesta P tres, R
+  dos."). Readings of the same project say none. Every Pi session and the `reply-reader` command share the
+  memory under `$XDG_RUNTIME_DIR/pi-reply-reader/`; resuming does not repeat it.
+- `pauseKey` refuses `ctrl` with a digit and any `super` key (one warning, Alt+M is used): terminals without
+  the Kitty keyboard protocol never send them, so they silently never fired.
+- Esc is Pi's again: the reader never takes it. Esc interrupts the agent and closes dialogs and screens
+  (pi-reply-thread's Alt+R view, `ask_user_question`) even while a reading plays or is paused. Before, a reading
+  took every Esc and paused or resumed instead, so a view could not be closed and the agent could not be
+  interrupted. Readings stop with Esc no longer: Alt+M pauses and resumes them. Set `"pauseKey"` in
+  `settings.json` (as `"alt+o"`) to use another key. A key that is not valid or that Pi, gentle-pi,
+  pi-reply-thread or the terminal already uses gets one warning, and Alt+M is used instead.
+- Pause and resume: `/read-pause` pauses the reading playing, in this or any other Pi session on the machine
+  (`Reading paused.`), and run again resumes it (`Reading resumed.`); with nothing playing it says `Nothing is
+  being read.`. The pause key, Alt+M, does the same with the same messages (`pauseKey` in settings.json picks
+  another one). Pausing drops nothing that waits. A paused reading's player is ended (so the player timeout never fires on it) but it keeps
+  its turn on the machine: nothing waiting starts. Resuming starts again from the sentence, item or row that was
+  being heard, with the same voice and speed. The footer reads `Reading P12.R1 on local · Alt+M pauses`, and
+  while paused `Paused P12.R1 · Alt+M resumes · /read-stop ends`. `/read-stop` ends a reading, playing or paused,
+  and drops what waits, as before. A prompt's reading is ended instead of paused (`Reading stopped: a prompt is
+  not paused.`); a `reply-reader` command reading cannot be paused from Pi.
+- See and skip the line: `/read-queue` lists the readings waiting on the machine, in order, with their session
+  (`Waiting on this machine:` / `1. P12.R2 · api (this session)`), or says `Nothing waits to be read.`;
+  `/read-next` ends the reading, playing or paused, here or in another session, and the next one waiting starts
+  with its announcement (`Skipped to the next reading.`; `Reading stopped; nothing else waits.` when nothing
+  does). Each session publishes its line under `$XDG_RUNTIME_DIR/pi-reply-reader/`, and the footer's
+  `· N waiting ·` now counts every session's; without a usable `XDG_RUNTIME_DIR` both stay per session.
+  Readings play in the listed order: a session with readings waiting refreshes its line every 250 ms, and a
+  session whose next reading has an earlier one of another session before it yields to it while that
+  session's line is under 2 s old (10 s at most per reading, counting only time the machine is free, never
+  time another reading plays), so a frozen session holds the others about 2 s. A session waiting for you (the
+  output question, the voice download confirm) says so in its line and is not waited for, and a session that
+  ends or drops its line stops beating at once, even mid-start. Two sessions with the
+  same label are listed with a tag from their session ID (`api #3f9c`).
+- Auto-read also reads the prompts that wait for you, through the same line: an `ask_user_question` /
+  `ask_user_choice` call reads the text written before it in the same message (cleaned like a reply, on its own; not in
+  `questions` mode), then each
+  question with its option labels only ("Pregunta 1 de 2: ¿Cómo suena? Opciones: uno, Bien; dos, Mal."); text
+  before other tool calls is not read; a command confirmation reads only the program ("Confirmación de comando:
+  git." / "Command confirmation: git."), and any other dialog its title. Once answered, a prompt's reading is
+  dropped, or stopped if it plays, as a whole. The reader's own questions are not read.
+- Auto-read reads every new reply, each once and in order, as soon as it is written, even while the agent keeps
+  working. Before, only the last reply of a run was read: a reply followed by a background-job or subagent
+  notice that started another turn was skipped.
+- Between queued readings (auto-reads and **Read after it**): about 1.5 s of silence, then the next reading
+  says which it is, in its language (`Respuesta P12.R2.` / `Reply P12.R2.`, `Archivo notas.md.` / `File
+  notes.md.`). A reading with nothing before it starts as before. While readings wait, the footer counts them:
+  `Reading P12.R2 on local · 2 waiting · Alt+M pauses`.
+- A player that hangs no longer piles up: when `paplay` takes no audio for 15 s (say, a Pulse server behind an
+  SSH tunnel whose far side does not answer), or does not finish within the audio's length plus 15 s, the
+  reading fails with `Playback on "<output>" failed: timed out`. `REPLY_READER_PLAYER_TIMEOUT` sets the 15 s
+  (5 to 86400 seconds; any other value warns once and uses 15). Every stop sends SIGTERM, then SIGKILL 2 s
+  later if the player is still there, also from `reply-reader` before it exits. Players left by a Pi that
+  died are ended when a Pi session or a reading starts, and with `setpriv` installed a player dies with its
+  reader even when that is killed outright. Only this package's own players, in the same PID namespace, are
+  touched.
 - Numbers are spoken as words in the text's language (Supertonic mispronounced digits): "51" "cincuenta y
   uno", with Spanish "un"/"una" agreement by the next word, decimals, versions and IP addresses group by group,
   and numbers over 9 digits or starting with 0 digit by digit.
@@ -29,17 +125,17 @@
 - `npm run build` removes `dist/` before compiling, so a packed tarball never carries stale files.
 - Auto-read no longer interrupts: a reply due while a reading plays, in this or any other session on the
   machine, waits and is read once nothing plays, one session's replies in order. A manual `/read` (or a read
-  request from another extension), `/read-stop` and Esc stop the reading playing and drop every auto-read
+  request from another extension) and `/read-stop` stop the reading playing and drop every auto-read
   waiting on the machine; `/read-auto off` and the session's end drop that session's. Sessions coordinate
   through `$XDG_RUNTIME_DIR/pi-reply-reader/` as before (`waiting.json` and a short `reading.lock` mutex);
   without it a reply only waits for its own session.
 - A manual `/read` or a read request (pi-reply-thread's Alt+R `s`) while something is being read anywhere on
   the machine asks first: `Something is being read.` with **Stop it and read now** (as before: stop, drop the
   waiting auto-reads, read) and **Read after it** (it waits like an auto-read, after the session's waiting
-  replies; `/read-stop`, Esc and another manual reading drop it, `/read-auto off` keeps it). Dismissing the
+  replies; `/read-stop` and another manual reading drop it, `/read-auto off` keeps it). Dismissing the
   question changes nothing. In Pi's TUI the question is a small overlay of its own, so it shows above the Alt+R
   view; elsewhere it uses the host's selector. With nothing playing, or without a UI, it reads at once as
-  before. `/read-stop` and Esc never ask.
+  before. `/read-stop` and the pause key never ask.
 - The `reply-reader` command now drops the auto-reads waiting in Pi sessions when it starts reading, as a
   manual `/read` does; it never asks.
 
