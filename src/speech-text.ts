@@ -71,6 +71,20 @@ export function speechNarration(markdown: string, language: Language = detectLan
 }
 
 /**
+ * (S18, T48) Several documents read one after another, each cleaned on its own, so no Markdown block of one (an
+ * unclosed code fence, a list) runs into the next. Empty parts say nothing.
+ */
+export function speechNarrationOfParts(parts: readonly string[], language: Language): Narration {
+	const narrations = parts.map((part) => speechNarration(part, language)).filter((narration) => narration.text);
+	return {
+		text: narrations.map((narration) => narration.text).join("\n\n"),
+		language,
+		fragments: narrations.flatMap((narration) => narration.fragments),
+		diagnostics: narrations.flatMap((narration) => narration.diagnostics),
+	};
+}
+
+/**
  * (S7) English or Spanish, from the text's own function words; code, URLs and paths do not count.
  * Spanish wins ties, so a reply with no clear English majority reads as it always did.
  */
@@ -182,6 +196,19 @@ export function announcement(kind: "reply" | "file", name: string, language: Lan
 	// As inline code, so a name's own `_` or `*` is not read as emphasis.
 	const named = name.includes("`") ? name : `\`${name}\``;
 	const fragments = speechNarration(`${PHRASEBOOKS[language][kind]} ${named}.`, language).fragments;
+	const last = fragments.at(-1);
+	if (last) last.after = "paragraph";
+	return fragments;
+}
+
+/**
+ * (S19) What a reading of another project than the last one says first: the project's name, read like any text in
+ * `language` ("pi-reply-reader.", "p uno."), with a section break after it.
+ */
+export function projectAnnouncement(project: string, language: Language): Fragment[] {
+	// As inline code, so a name's own `_` or `*` is not read as emphasis.
+	const named = project.includes("`") ? project : `\`${project}\``;
+	const fragments = speechNarration(`${named}.`, language).fragments;
 	const last = fragments.at(-1);
 	if (last) last.after = "paragraph";
 	return fragments;

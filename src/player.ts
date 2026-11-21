@@ -112,6 +112,8 @@ export function track(child: ChildProcess): void {
  * line carries PLAYER_MARK and whose OWNER_VAR names a process that no longer runs (a Pi killed with SIGKILL, say). A
  * paplay without both marks, whose reader still runs, or in another PID namespace (or one that cannot be read: an
  * owner pid means something only in its own namespace, so a reader in a sandbox keeps its player), is never touched.
+ * A listener's `reply-reader --serve` (S20) carries PLAYER_MARK too, but is never reaped here: an OWNER_VAR it got from
+ * the agent host (ssh SendEnv) names a process of another machine; it ends itself when its standard input closes.
  * Returns the pids it signalled; nothing where /proc is missing.
  */
 export function reapOrphans(): number[] {
@@ -131,7 +133,8 @@ export function reapOrphans(): number[] {
 		if (pid === process.pid) continue;
 		try {
 			if (uid !== undefined && statSync(`/proc/${pid}`).uid !== uid) continue;
-			if (!readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").includes(PLAYER_MARK)) continue;
+			const args = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+			if (!args.includes(PLAYER_MARK) || isListenerServe(args)) continue;
 			if (pidNamespace(String(pid)) !== namespace) continue;
 			const tag = readFileSync(`/proc/${pid}/environ`, "utf8")
 				.split("\0")
@@ -146,6 +149,18 @@ export function reapOrphans(): number[] {
 		} catch {}
 	}
 	return reaped;
+}
+
+/**
+ * Whether a command line is a listener's `reply-reader --serve` (S20): "--serve" right after the path of the
+ * reply-reader script (`…/reply-reader`, `…/reply-reader.ts` or `.js`). The agent host's ssh child, whose remote
+ * command is the bare word `reply-reader`, does not match, so an orphaned one is still reaped.
+ */
+export function isListenerServe(args: readonly string[]): boolean {
+	const at = args.indexOf("--serve");
+	if (at < 1) return false;
+	const script = args[at - 1];
+	return script.includes("/") && /^reply-reader(\.[cm]?[jt]s)?$/.test(script.slice(script.lastIndexOf("/") + 1));
 }
 
 /** The PID namespace of `/proc/<pid>` ("self" for this process), as `pid:[inode]`; undefined when unreadable. */

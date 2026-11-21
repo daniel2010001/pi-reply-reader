@@ -112,9 +112,10 @@ says `Nothing is being read.`. Alt+M does exactly the same, with the same messag
 
 The pause key is Alt+M unless `settings.json` (the file `/read-speed` saves to, see [Speed](#speed)) names
 another as `"pauseKey"`, for example `{ "speed": 1.1, "pauseKey": "alt+o" }`. It is read when Pi loads the
-extension, so a change applies the next time Pi starts. A key is `ctrl`, `alt` or `super`, maybe
-with `shift`, plus a letter, digit or F1-F12 (`alt+o`, `ctrl+shift+e`, `super+f5`). A key that is not like
-that, or that Pi (on any platform), gentle-pi, pi-reply-thread (Alt+R) or the terminal (as `ctrl+s`) already
+extension, so a change applies the next time Pi starts. A key is `ctrl` or `alt`, maybe with `shift`, plus a
+letter, digit or F1-F12 (`alt+o`, `alt+5`, `ctrl+shift+e`, `ctrl+f5`). `ctrl` with a digit and any `super` key are
+refused: terminals without the Kitty keyboard protocol never send them, so they would never fire. A key that is
+not like that, or that Pi (on any platform), gentle-pi, pi-reply-thread (Alt+R) or the terminal (as `ctrl+s`) already
 uses, gets one warning when the session starts, such as
 `Ignored pauseKey "alt+r" in …/settings.json: pi-reply-thread already uses it. Alt+M pauses and resumes readings.`,
 and Alt+M is used. Alt+M is the default because it is free in all of them, and terminals send it reliably.
@@ -237,14 +238,28 @@ something, that prompt is read through the same line, in the conversation's lang
 
 | Prompt | What is read |
 |---|---|
-| `ask_user_question` / `ask_user_choice` | Each question with its option labels, never descriptions or values: "Pregunta 1 de 2: ¿Cómo suena? Opciones: uno, Bien; dos, Mal." ("Pregunta: …" for a single question; "Question 1 of 2: … Options: one, …" in English) |
+| `ask_user_question` / `ask_user_choice` | With auto-read `on`, the text written before the question (in the same message, cleaned like a reply on its own, so none of its Markdown runs into the questions; its language decides the reading's when it tells), then each question with its option labels, never descriptions or values: "Pregunta 1 de 2: ¿Cómo suena? Opciones: uno, Bien; dos, Mal." ("Pregunta: …" for a single question; "Question 1 of 2: … Options: one, …" in English). With `questions`, only the questions are read. Text written before other tool calls, command confirmations included, is not read |
 | A command confirmation (a confirm while a `bash` call waits to run) | "Confirmación de comando: git." / "Command confirmation: git.": the program only, never its arguments (they may hold private values); `NAME=value` assignments, a leading `sudo` or `env` and the program's folder are left out |
 | Any other dialog (RDD consent, other confirms and selects) | Its title only; nothing when it has none (Pi does not give extensions a dialog's text or options) |
 
-Once you answer (the dialog closes, or the tool finishes), its reading is dropped if it still waits, or
-stopped if it plays; other waiting readings stay. A prompt that waited starts after the usual 1.5 s of
+Once you answer (the dialog closes, or the tool finishes), its reading, the text before the question included,
+is dropped if it still waits, or stopped if it plays; other waiting readings stay. A prompt that waited starts after the usual 1.5 s of
 silence, without an announcement (it says what it is). The reader's own questions (output, voice, speed,
 download, **Something is being read.**) are never read. With auto-read off, nothing of this plays.
+
+#### Which project
+
+A reading's project is the folder name of the Git root its session's working folder is in (the folder holding
+`.git`; outside a repository, the working folder's own name). Two sessions of the same repository are the same
+project, and so is a linked worktree of it (named by the main repository's folder); a submodule is a project of
+its own, named by its own folder. The machine
+remembers the project of the last reading that started, in any Pi session or `reply-reader` command (in
+`$XDG_RUNTIME_DIR/pi-reply-reader/`). A reading of another project, or the first one when none is remembered,
+starts by saying the project's name, read like any text in the reading's language, then its announcement if it
+waited: `pi-reply-reader. Respuesta P tres, R dos.`. A reading of the same project says no project, so with
+one project you never hear it again. This applies to replies, files, prompts and command readings alike; a
+resumed reading does not say it again. Without a usable `XDG_RUNTIME_DIR`, each Pi process (and each command
+run) remembers only its own.
 
 ### pi-reply-thread
 
@@ -288,13 +303,16 @@ voice, saved speed, outputs and one-reading-per-machine rule as `/read`. `-` rea
 | `--output <name>` | where it sounds: `local` (default) or a name from `outputs.json` |
 | `--speed <n>` | voice speed from 0.5 to 2.0 for this run only; settings.json is not changed |
 | `--voice male\|female` | the voice (default male) |
+| `--download-voice` | download the voice and exit; asks `[y/N]` first, so it needs a terminal |
+| `--serve` | act as a listener: play what an agent host sends over SSH (see [Synthesize on the listener](#synthesize-on-the-listener)) |
 | `-h`, `--help` | usage |
 
 If the voice is missing, the command asks `[y/N]` before downloading it. Without a terminal, or when reading
 standard input, it exits with an error instead of downloading. Ctrl+C, `kill` or closing the terminal stops
 the reading. A new `/read` or `/read-stop` in any Pi session stops a command reading, and the command stops a
 Pi reading without asking, dropping the auto-reads waiting in Pi sessions as a manual `/read` does. Ctrl+C
-stops it; it has no pause, and `/read-pause` in Pi cannot pause it.
+stops it; it has no pause, and `/read-pause` in Pi cannot pause it. Its project is that of the folder it runs
+in, said first when it differs from the last reading's (see [Which project](#which-project)).
 
 Exit codes: 0 read (or nothing to read, or stopped by another reading), 1 cannot read, download or play,
 2 bad arguments, 129/130/143 stopped by SIGHUP, Ctrl+C or SIGTERM.
@@ -423,7 +441,8 @@ in `$XDG_CONFIG_HOME/pi-reply-reader/outputs.json` (`~/.config/pi-reply-reader/o
 ```
 
 - Names use letters, digits and `-`, and `local` is built in, so it cannot be redefined.
-- Each value must be a non-empty string.
+- Each value must be a non-empty string, or an object `{ "ssh": "you@host", "fallback": "<PULSE_SERVER>" }`
+  for a listener that synthesizes the reading itself (see [Synthesize on the listener](#synthesize-on-the-listener)).
 - The first `/read` of a session asks `Where should readings sound?` when there is more than one output;
   `/read-output` switches later, and completes the names.
 - An entry that breaks a rule is skipped with a warning such as
@@ -480,6 +499,65 @@ server, enable lingering for your user there (`loginctl enable-linger`).
 
 The desktop needs only PipeWire (with pipewire-pulse) or PulseAudio and an SSH server. It needs no TTS, no
 Pi and no change to its configuration. A new client is one more unit and one more entry in `outputs.json`.
+
+## Synthesize on the listener
+
+In the setup above, the machine that runs Pi (the **agent host**) synthesizes every reading and only the audio
+travels. When the agent host is slow (a small VPS, a loaded server), readings start late and stutter. A
+**listener** output moves the synthesis to the machine where you listen: the agent host sends each reading's
+cleaned text, voice, speed and pauses over SSH to `reply-reader --serve` on the listener, which synthesizes
+and plays it there. Example: Pi on a home server, a desktop as the listener.
+
+On the listener:
+
+1. Install the command and its voice (Node 22.19 or newer, PipeWire with pipewire-pulse or PulseAudio, `paplay`):
+
+   ```sh
+   npm i -g pi-reply-reader
+   reply-reader --download-voice
+   ```
+
+2. Make sure `reply-reader` is on the `PATH` of a non-interactive SSH command: from the agent host,
+   `ssh you@listener reply-reader --help` must print the usage.
+
+On the agent host:
+
+3. The agent host must reach the listener with `ssh` and a key, without a password prompt (it runs
+   `ssh -o BatchMode=yes … you@listener reply-reader --serve --client-name=pi-reply-reader`).
+4. Name the output in `~/.config/pi-reply-reader/outputs.json`, with a fallback (optional, recommended):
+
+   ```json
+   { "desktop": { "ssh": "you@listener", "fallback": "tcp:127.0.0.1:4714" } }
+   ```
+
+   `ssh` is what you would type after `ssh` (a host, `user@host`, or a `Host` alias of your SSH client
+   configuration); it cannot start with `-` or hold spaces or control characters. `fallback` is a `PULSE_SERVER` value, such as the
+   tunnel above. Any other key is reported and the entry skipped.
+5. In Pi, `/read-output desktop`, then `/read` (or `reply-reader --output desktop notes.md`).
+
+Everything else works as for any output: the line and its order, the announcements, prompts read aloud,
+pause and resume (from the sentence being heard on the listener), `/read-stop` and a new reading from any
+session (they end the `ssh` child, which ends the reading on the listener), and the player timeout. The
+listener respects its own turn: while it reads something of its own, the agent host's reading waits. A
+reading of its own started on the listener ends the one it serves, and a `/read-stop` (or a `/read`) there
+while the agent host's reading still waits drops it; either way the agent host's reading ends quietly, with
+no fallback. Long readings are sent in several messages, so they stay on the listener; only a single
+sentence over 1 MiB goes to the fallback (`a sentence is too long to send to the listener (over 1048576 bytes)`).
+
+**The fallback.** When the listener does not answer (no route, a refused key, `ssh` not installed, nothing
+heard within the player timeout), lacks `reply-reader`, its voice or `paplay`, runs an incompatible version,
+or fails while reading, the reading goes on from the sentence last heard: synthesized on the agent host and
+played through `fallback`, with one warning per session such as
+`Output "desktop": the listener did not answer; reading here through its fallback.` or, without the voice,
+`Output "desktop": the listener has no voice (install it there with "reply-reader --download-voice"); reading here through its fallback.`
+Without a fallback the reading fails with `Playback on "desktop" failed: <reason>`. The agent host still
+needs its own voice for the fallback. Text from the listener or `ssh` shown in these messages has its control
+characters removed, and a line from the listener over 64 KiB ends the reading there
+(`the listener sent a line longer than 65536 bytes`).
+
+`reply-reader --serve` never downloads and writes no file besides the reading lock under
+`$XDG_RUNTIME_DIR/pi-reply-reader/`. It only plays what it is sent; whoever can run `ssh` as you to the
+listener can make it speak.
 
 ## Requirements
 

@@ -1,16 +1,20 @@
 import { readFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { loadOutputs } from "./outputs.ts";
-import { type SherpaTts, startReading } from "./playback.ts";
-import { playerTimeoutMs, signalledPlayersEnded } from "./player.ts";
+import { serve, startOutputReading } from "./listener.ts";
+import type { SherpaTts } from "./playback.ts";
+import { PLAYER_MARK, playerTimeoutMs, signalledPlayersEnded } from "./player.ts";
+import { projectChanged, projectOf } from "./project.ts";
 import { openReadingLock } from "./reading-lock.ts";
 import { loadSpeed, parseSpeed, SPEED_HINT } from "./settings.ts";
-import { speechNarration } from "./speech-text.ts";
+import { projectAnnouncement, speechNarration } from "./speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice, VOICE_ARCHIVE, type VoiceArchive } from "./voice.ts";
 
 /** What `reply-reader --help` prints (S6). */
 export const USAGE = `Usage: reply-reader [options] <file.md | ->
+       reply-reader --download-voice
+       reply-reader --serve
 
 Reads a Markdown file aloud with local text-to-speech; "-" reads standard input.
 
@@ -18,6 +22,8 @@ Options:
   --output <name>      where it sounds: local (default) or a name from outputs.json
   --speed <n>          voice speed from 0.5 to 2.0 for this run (default: the saved speed, else 1.1)
   --voice male|female  the voice (default: male)
+  --download-voice     download the voice (asks first, so it needs a terminal) and exit
+  --serve              act as a listener: play what an agent host sends over SSH (a listener output in outputs.json)
   -h, --help           show this help
 
 Ctrl+C stops the reading.
@@ -104,6 +110,41 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 	const { env, stdout, stderr, signal } = deps;
 	const say = (message: string): void => void stderr.write(`${message}\n`);
 
+	// A listener (S20): the agent host runs `reply-reader --serve --client-name=pi-reply-reader` over SSH.
+	if (argv[0] === "--serve") {
+		const extra = argv.slice(1).find((arg) => arg !== PLAYER_MARK);
+		if (extra !== undefined) {
+			stderr.write(`reply-reader: --serve takes no other arguments ("${extra}").\n\n${USAGE}`);
+			return USAGE_ERROR;
+		}
+		// The agent host gone (EPIPE on standard output, A5): the reading stops quietly, like standard input closing.
+		const gone = new AbortController();
+		const leave = (): void => gone.abort();
+		signal?.addEventListener("abort", leave, { once: true });
+		if (signal?.aborted) leave();
+		const out = stdout as CliDeps["stdout"] & { on?: (event: "error", listener: () => void) => unknown };
+		out.on?.("error", leave);
+		const write = (text: string): void => {
+			if (gone.signal.aborted) return;
+			try {
+				stdout.write(text);
+			} catch {
+				leave();
+			}
+		};
+		try {
+			return await serve({ env, stdin: deps.stdin, write, warn: say, loadSherpa: deps.loadSherpa, signal: gone.signal });
+		} finally {
+			signal?.removeEventListener("abort", leave);
+			await signalledPlayersEnded();
+		}
+	}
+	if (argv[0] === "--download-voice") {
+		if (argv.length === 1) return downloadOnly(deps);
+		stderr.write(`reply-reader: --download-voice takes no other arguments ("${argv[1]}").\n\n${USAGE}`);
+		return USAGE_ERROR;
+	}
+
 	const parsed = parse(argv);
 	if (parsed === "help") {
 		stdout.write(USAGE);
@@ -188,11 +229,15 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 	// Without a usable XDG_RUNTIME_DIR there is no claim, and only Ctrl+C stops this reading. Like a manual /read it drops
 	// the auto-reads waiting in Pi sessions (S8, T33); it never asks.
 	const claim = openReadingLock(env)?.claim({ dropWaiting: true });
+	// A project other than the last reading's on the machine is said first (S19); without XDG_RUNTIME_DIR this process
+	// remembers none, so it always is.
+	const project = projectOf(deps.cwd ?? process.cwd());
+	const said = projectChanged(env, project, {}) ? projectAnnouncement(project, narration.language) : [];
 	let interrupted = false;
-	const reading = startReading({
+	const reading = startOutputReading({
 		voice,
 		speaker,
-		fragments: narration.fragments,
+		fragments: [...said, ...narration.fragments],
 		output,
 		env,
 		loadSherpa: deps.loadSherpa,
@@ -201,6 +246,9 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 		onPlayer: (pid) => {
 			if (claim && !claim.setPlayer(pid)) reading.stop();
 		},
+		// A listener that cannot read sends the reading through its fallback (S20); one reading, so said once.
+		onFallback: say,
+		lost: () => claim?.lost() ?? false,
 	});
 	const interrupt = (): void => {
 		interrupted = true;
@@ -226,6 +274,39 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 		await signalledPlayersEnded();
 	}
 	return interrupted ? INTERRUPTED : OK;
+}
+
+/**
+ * `reply-reader --download-voice` (S20: how a listener gets its voice, which `--serve` never downloads): asks y/N on a
+ * terminal, then downloads it. Exit 0 when it is installed, 1 otherwise.
+ */
+async function downloadOnly(deps: CliDeps): Promise<number> {
+	const { env, signal } = deps;
+	const say = (message: string): void => void deps.stderr.write(`${message}\n`);
+	const existing = findVoice(env);
+	if (existing) {
+		say(`The voice is already installed in ${dirname(dirname(existing.supertonic.ttsJson))}.`);
+		return OK;
+	}
+	if (!deps.isTTY) {
+		const megabytes = Math.round((deps.archive ?? VOICE_ARCHIVE).bytes / 1_000_000);
+		say(`Downloading the voice (${megabytes} MB) needs a terminal to confirm it. Run reply-reader --download-voice from a terminal.`);
+		return FAILED;
+	}
+	try {
+		const voice = await downloadVoice({ env, confirm: deps.confirm, archive: deps.archive, signal });
+		if (signal?.aborted) return INTERRUPTED;
+		if (!voice) {
+			say("Download cancelled: the voice was not downloaded.");
+			return FAILED;
+		}
+		say(`Voice installed in ${dirname(dirname(voice.supertonic.ttsJson))}.`);
+		return OK;
+	} catch (error) {
+		if (signal?.aborted) return INTERRUPTED;
+		say((error as Error).message);
+		return FAILED;
+	}
 }
 
 async function readAll(input: AsyncIterable<Buffer | string>): Promise<string> {

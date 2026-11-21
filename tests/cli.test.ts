@@ -33,6 +33,8 @@ const MODEL_FILES = [
 ];
 
 const USAGE = `Usage: reply-reader [options] <file.md | ->
+       reply-reader --download-voice
+       reply-reader --serve
 
 Reads a Markdown file aloud with local text-to-speech; "-" reads standard input.
 
@@ -40,6 +42,8 @@ Options:
   --output <name>      where it sounds: local (default) or a name from outputs.json
   --speed <n>          voice speed from 0.5 to 2.0 for this run (default: the saved speed, else 1.1)
   --voice male|female  the voice (default: male)
+  --download-voice     download the voice (asks first, so it needs a terminal) and exit
+  --serve              act as a listener: play what an agent host sends over SSH (a listener output in outputs.json)
   -h, --help           show this help
 
 Ctrl+C stops the reading.
@@ -64,6 +68,9 @@ beforeEach(() => {
 		XDG_CONFIG_HOME: join(root, "config"),
 		XDG_RUNTIME_DIR: join(root, "run"),
 	};
+	// The machine already remembers the project of `<root>/work`, as after an earlier reading there, so tests of other
+	// rules hear no project (S19); the S19 tests read elsewhere or without XDG_RUNTIME_DIR.
+	openReadingLock(env)!.swapProject("work");
 });
 
 afterEach(async () => {
@@ -143,6 +150,8 @@ interface RunOptions {
 	confirm?: (message: string) => Promise<boolean>;
 	signal?: AbortSignal;
 	archive?: VoiceArchive;
+	/** Where the command runs (S19 names its project); `<root>/work` by default. */
+	cwd?: string;
 }
 
 /** Runs main() the way bin/reply-reader.ts does, capturing what it prints and its exit code. */
@@ -153,7 +162,7 @@ function run(argv: string[], options: RunOptions = {}) {
 	const confirm = options.confirm ?? (async () => false);
 	const code = main(argv, {
 		env,
-		cwd: join(root, "work"),
+		cwd: options.cwd ?? join(root, "work"),
 		hostname: "hs-node",
 		stdin: Readable.from(options.stdin === undefined ? [] : [Buffer.from(options.stdin)]),
 		stdout: { write: (text: string) => ((out += text), true) },
@@ -324,6 +333,10 @@ describe("reply-reader command (S6)", () => {
 			[["notes.md", "--output"], "--output needs a value"],
 			[["--speed"], "--speed needs a value"],
 			[["notes.md", "--voice"], "--voice needs a value"],
+			// S20: the listener's and the voice's own modes take nothing else; elsewhere they are not file options.
+			[["--serve", "notes.md"], '--serve takes no other arguments ("notes.md")'],
+			[["--download-voice", "notes.md"], '--download-voice takes no other arguments ("notes.md")'],
+			[["notes.md", "--serve"], 'unknown option "--serve"'],
 		];
 		for (const [argv, problem] of cases) {
 			expect(await finished(argv)).toEqual({ code: 2, out: "", err: `reply-reader: ${problem}.\n\n${USAGE}`, asked: [] });
@@ -527,6 +540,32 @@ describe("reply-reader command (S6)", () => {
 		await sleep(900);
 		expect(seen()).toEqual({ statuses: [], notes: [["Auto-read on: full replies.", "info"]], asked: [], waiting: true });
 	}, 20000);
+
+	it("(S19) says the project (its working folder's Git root) when it differs from the last reading's on the machine", async () => {
+		installVoice();
+		for (const repo of ["p1", "p2"]) mkdirSync(join(root, repo, ".git"), { recursive: true });
+		mkdirSync(join(root, "p1", "docs"));
+		writeFileSync(join(root, "notas.md"), "Hola.");
+		const file = join(root, "notas.md");
+		const readIn = async (cwd: string) => {
+			const before = synthesized.length;
+			expect(await finished([file], { cwd })).toEqual({ code: 0, out: "", err: "", asked: [] });
+			return texts().slice(before);
+		};
+		expect(await readIn(join(root, "p1", "docs"))).toEqual(["p uno.", "Hola."]);
+		expect(await readIn(join(root, "p1"))).toEqual(["Hola."]);
+		expect(await readIn(join(root, "p2"))).toEqual(["p dos.", "Hola."]);
+		expect(await readIn(join(root, "p1"))).toEqual(["p uno.", "Hola."]);
+	});
+
+	it("(S19) without a usable XDG_RUNTIME_DIR each run is its own process: it always says the project", async () => {
+		installVoice();
+		delete env.XDG_RUNTIME_DIR;
+		note("notes.md", "Hola.");
+		expect((await finished(["notes.md"])).code).toBe(0);
+		expect((await finished(["notes.md"])).code).toBe(0);
+		expect(texts()).toEqual(["work.", "Hola.", "work.", "Hola."]);
+	});
 });
 
 const TIMEOUT_HINT = "REPLY_READER_PLAYER_TIMEOUT must be a number of seconds from 5 to 86400; using 15.";

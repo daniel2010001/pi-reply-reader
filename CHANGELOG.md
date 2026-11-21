@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Synthesis on the listener: an output in `outputs.json` can be `{ "ssh": "you@host", "fallback": "<PULSE_SERVER>" }`.
+  The agent host sends each reading's fragments over SSH to `reply-reader --serve` on the listener, which
+  synthesizes and plays them, so a slow agent host no longer delays readings. Pause/resume, `/read-stop`, the
+  line, announcements and the player timeout behave as for any output. When the listener does not answer,
+  lacks `reply-reader`, its voice or `paplay`, or fails mid-reading, the reading goes on from the sentence last
+  heard on the agent host through `fallback`, with one warning per session; without a fallback it fails with
+  `Playback on "<output>" failed: <reason>`. The listener waits while it reads something of its own; a
+  `/read-stop` or `/read` there drops the agent host's reading still waiting, which ends quietly. Long
+  readings (over 5000 sentences or 1 MiB) are sent in several messages and stay on the listener. Bad `ssh`
+  values (empty, a leading `-`, whitespace, control characters) and unknown keys are reported and the entry
+  skipped. Text from the listener or `ssh` is shown without control characters. `--serve` ends quietly when
+  the agent host goes away, and a reading on the listener never ends a running `--serve` as an orphan.
+- `reply-reader --download-voice` downloads the voice (asking `[y/N]` on a terminal) and exits; a listener
+  without its voice names it in the warning.
+
+- Readings say their project when it changes: a reading whose project (the folder name of its Git root, or of
+  its working folder outside a repository) differs from the last reading's on the machine, or the first one,
+  starts with the project's name, then its announcement if it waited ("pi-reply-reader. Respuesta P tres, R
+  dos."). Readings of the same project say none. Every Pi session and the `reply-reader` command share the
+  memory under `$XDG_RUNTIME_DIR/pi-reply-reader/`; resuming does not repeat it.
+- `pauseKey` refuses `ctrl` with a digit and any `super` key (one warning, Alt+M is used): terminals without
+  the Kitty keyboard protocol never send them, so they silently never fired.
 - Esc is Pi's again: the reader never takes it. Esc interrupts the agent and closes dialogs and screens
   (pi-reply-thread's Alt+R view, `ask_user_question`) even while a reading plays or is paused. Before, a reading
   took every Esc and paused or resumed instead, so a view could not be closed and the agent could not be
@@ -31,10 +53,12 @@
   ends or drops its line stops beating at once, even mid-start. Two sessions with the
   same label are listed with a tag from their session ID (`api #3f9c`).
 - Auto-read also reads the prompts that wait for you, through the same line: an `ask_user_question` /
-  `ask_user_choice` call reads each question with its option labels only ("Pregunta 1 de 2: ¿Cómo suena?
-  Opciones: uno, Bien; dos, Mal."), a command confirmation reads only the program ("Confirmación de comando:
+  `ask_user_choice` call reads the text written before it in the same message (cleaned like a reply, on its own; not in
+  `questions` mode), then each
+  question with its option labels only ("Pregunta 1 de 2: ¿Cómo suena? Opciones: uno, Bien; dos, Mal."); text
+  before other tool calls is not read; a command confirmation reads only the program ("Confirmación de comando:
   git." / "Command confirmation: git."), and any other dialog its title. Once answered, a prompt's reading is
-  dropped, or stopped if it plays. The reader's own questions are not read.
+  dropped, or stopped if it plays, as a whole. The reader's own questions are not read.
 - Auto-read reads every new reply, each once and in order, as soon as it is written, even while the agent keeps
   working. Before, only the last reply of a run was read: a reply followed by a background-job or subagent
   notice that started another turn was skipped.

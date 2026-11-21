@@ -7,16 +7,27 @@ import { type Component, type KeyId, SelectList } from "@earendil-works/pi-tui";
 import { createAutoQueue, type StartResult } from "../src/auto-queue.ts";
 import { loadOutputs, type Output } from "../src/outputs.ts";
 import { keyName, loadPauseKey } from "../src/pause-key.ts";
-import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
+import { startOutputReading } from "../src/listener.ts";
+import type { Reading, SherpaTts } from "../src/playback.ts";
 import { playerTimeoutMs, reapOrphans } from "../src/player.ts";
 import { questionsSection } from "../src/questions.ts";
-import { askedQuestions, commandMarkdown, commandProgram, dialogTitle, QUESTION_TOOLS, questionsMarkdown } from "../src/prompts.ts";
+import { projectChanged, projectOf } from "../src/project.ts";
+import { askedQuestions, commandMarkdown, commandProgram, dialogTitle, QUESTION_TOOLS, questionsMarkdown, writtenCalls } from "../src/prompts.ts";
 import { isPing, parseReadRequest, READER_EVENTS, READER_EVENTS_VERSION } from "../src/reader-events.ts";
 import { type Claim, openReadingLock, type WaitingItem } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { sectionFrom } from "../src/sections.ts";
 import { formatSpeed, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSpeed } from "../src/settings.ts";
-import { announcement, detectLanguage, type Fragment, type Language, languageOfWords, speechNarration } from "../src/speech-text.ts";
+import {
+	announcement,
+	detectLanguage,
+	type Fragment,
+	type Language,
+	languageOfWords,
+	projectAnnouncement,
+	speechNarration,
+	speechNarrationOfParts,
+} from "../src/speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
 
 const STATUS = "reply-reader";
@@ -138,7 +149,8 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * interrupts (S8 Queue, T32): a reply due while a reading plays here or in another session waits, in order, and is read
  * once the machine is free; an explicit /read (or read request) or /read-stop drops every reply waiting on the
  * machine (the pause key pauses instead, S15), and /read-auto off or the session's end drops this session's. A reading that waited in this line starts after
- * 1.5 s of silence by saying which reply or file it is, and the footer counts what waits (S14, T38).
+ * 1.5 s of silence by saying which reply or file it is, and the footer counts what waits (S14, T38). A reading whose
+ * project (its Git root's folder name, src/project.ts) differs from the last reading's on the machine says it first (S19).
  * Ask before cutting (S8, T33): a manual /read or read request while a reading plays anywhere asks "Something is being
  * read.": "Stop it and read now" (the above), "Read after it" (it waits like an auto-read, after this session's waiting
  * replies, and explicit actions drop it), or dismissed (nothing changes). Without a UI, or with nothing playing, it reads.
@@ -159,11 +171,15 @@ export function createReplyReader(
 		holdLine?: () => boolean;
 		/** Test seam: replaces YIELD_CAP_MS (S16). */
 		yieldCapMs?: number;
+		/** Test seam: the project this process remembers at first, without XDG_RUNTIME_DIR (S19), as after a reading of it. */
+		lastProject?: string;
 	} = {},
 ) {
 	const yieldCapMs = deps.yieldCapMs ?? YIELD_CAP_MS;
 	const env = deps.env ?? process.env;
 	const hostname = deps.hostname ?? osHostname();
+	/** The last reading's project when there is no usable XDG_RUNTIME_DIR to share it through: this process's (S19). */
+	const lastProject: { last?: string } = { last: deps.lastProject };
 
 	return (pi: ExtensionAPI): void => {
 		/** This session's reading, playing or paused (S15). */
@@ -196,6 +212,8 @@ export function createReplyReader(
 		let sessionSpeed: number | undefined;
 		/** Whether this session already reported a problem in settings.json. */
 		let speedWarned = false;
+		/** Whether this session already warned that a listener output read through its fallback (S20: once per session). */
+		let fallbackWarned = false;
 		/** The pause key (S15, L147): settings.json `pauseKey`, else Alt+M; read once, as Pi registers shortcuts at load. */
 		const pauseKey = loadPauseKey(env);
 		const pauseName = keyName(pauseKey.key);
@@ -221,6 +239,8 @@ export function createReplyReader(
 		const pending = new Map<string, { toolName: string; args: unknown }>();
 		/** The prompt readings the open ui_prompt span answers when it ends (S18). */
 		let spanPrompts: string[] = [];
+		/** The text the latest assistant message wrote, by the IDs of the tool calls it made (S18 Context, T48). */
+		let writtenBefore = new Map<string, string>();
 		/** The keys of the prompt readings queued and not yet answered (S18). */
 		const prompts = new Set<string>();
 		/** Numbers dialogs, so each gets its own prompt key. */
@@ -242,7 +262,8 @@ export function createReplyReader(
 			ctx: ExtensionContext;
 			name: string;
 			label: string;
-			markdown: string;
+			/** One document, or parts cleaned apart and read in order (a prompt's text, then its questions: T48). */
+			markdown: string | readonly string[];
 			language: Language | undefined;
 			mark: string | undefined;
 			manual?: true;
@@ -491,11 +512,11 @@ export function createReplyReader(
 			ctx: ExtensionContext,
 			name: string,
 			label: string,
-			markdown: string,
+			markdown: string | readonly string[],
 			language?: Language,
 			auto?: { mark: string | undefined; still: () => boolean; announce?: "reply" | "file" | "prompt"; prompt?: string },
 		): Promise<StartResult> => {
-			const narration = speechNarration(markdown, language);
+			const narration = typeof markdown === "string" ? speechNarration(markdown, language) : speechNarrationOfParts(markdown, language ?? detectLanguage(markdown.join("\n\n")));
 			if (!narration.text) {
 				ctx.ui.notify(`${label} has nothing to read.`, "info");
 				return "done";
@@ -545,10 +566,14 @@ export function createReplyReader(
 			const timeoutMs = playerTimeoutMs(env, (message) => ctx.ui.notify(message, "warning"));
 			// Resuming (S15) uses the voice, speed and output the reading started with.
 			const voiceOf = SPEAKERS[speaker];
-			const fragments: readonly Fragment[] =
-				auto?.announce && auto.announce !== "prompt"
-					? [...announcement(auto.announce, name, narration.language), ...narration.fragments]
-					: narration.fragments;
+			// Started: a project other than the last reading's on the machine is said first (S19), then which it is (S14).
+			const project = projectOf(ctx.cwd);
+			const said = projectChanged(env, project, lastProject) ? projectAnnouncement(project, narration.language) : [];
+			const fragments: readonly Fragment[] = [
+				...said,
+				...(auto?.announce && auto.announce !== "prompt" ? announcement(auto.announce, name, narration.language) : []),
+				...narration.fragments,
+			];
 			const state: Current = { ctx, claim, name, output: output.name, prompt: auto?.prompt, from: 0, play: () => {} };
 			/** Stopped by another session: no message, just the footer. */
 			const stoppedElsewhere = (): void => {
@@ -556,7 +581,7 @@ export function createReplyReader(
 			};
 			/** Plays from fragment `from`; the gap before a reading that waited only comes before its very start (S14). */
 			const play = (from: number, leadSilence?: number): void => {
-				const reading = startReading({
+				const reading = startOutputReading({
 					voice,
 					speaker: voiceOf,
 					fragments: fragments.slice(from),
@@ -571,6 +596,13 @@ export function createReplyReader(
 						if (state.reading !== reading) return;
 						if (claim && !claim.setPlayer(pid)) stoppedElsewhere();
 					},
+					// A listener output that cannot read goes on through its fallback (S20), said once per session.
+					onFallback: (message) => {
+						if (fallbackWarned) return;
+						fallbackWarned = true;
+						ctx.ui.notify(message, "warning");
+					},
+					lost: () => current !== state || state.reading !== reading || (claim?.lost() ?? false),
 				});
 				state.reading = reading;
 				state.from = from;
@@ -585,7 +617,8 @@ export function createReplyReader(
 						stop();
 					});
 			};
-			state.play = (from) => play(from);
+			// Resuming never says the project again, even when paused while it was being said (S19).
+			state.play = (from) => play(Math.max(from, said.length));
 			play(0, auto?.announce ? GAP_SECONDS : undefined);
 			// Another session's /read-stop, newer reading, /read-next or /read-pause (S1, S15, S16) reach this reading through
 			// its entry; the footer also follows what waits on the machine.
@@ -809,7 +842,11 @@ export function createReplyReader(
 			getArgumentCompletions: (prefix) =>
 				loadOutputs(env, hostname)
 					.outputs.filter((output) => output.name.startsWith(prefix.trim()))
-					.map((output) => ({ value: output.name, label: output.name, description: output.pulseServer ?? `this machine (${hostname})` })),
+					.map((output) => ({
+						value: output.name,
+						label: output.name,
+						description: output.ssh ? `listener ${output.ssh}` : (output.pulseServer ?? `this machine (${hostname})`),
+					})),
 			handler: async (args, ctx) => {
 				const list = outputs(ctx);
 				const name = args.trim();
@@ -928,7 +965,11 @@ export function createReplyReader(
 		// Each final reply joins the line as soon as it is stored (S8 Timing, T42), even while the agent keeps working
 		// (an injected user-role message can chain another turn into the same run). Pi stores the entry only after the
 		// message_end handlers return, so the branch is read on the next turn of the event loop, as pi-reply-thread does.
-		pi.on("message_end", (_event, ctx) => {
+		pi.on("message_end", (event, ctx) => {
+			// What an assistant message wrote, kept for the calls it makes (S18 Context, T48): Pi runs a message's tool calls
+			// after its message_end, so their tool_execution_start finds it here, from the event itself, not the branch.
+			const written = writtenCalls(event.message);
+			if (written) writtenBefore = new Map(written.calls.map((id) => [id, written.text]));
 			if (auto === "off") return;
 			const asked = generation;
 			setTimeout(() => {
@@ -948,8 +989,8 @@ export function createReplyReader(
 		};
 
 		/** Queues a blocking prompt's reading (S18), when auto-read is on and it has something to say. */
-		const queuePrompt = (ctx: ExtensionContext, key: string, name: string, markdown: string, language: Language): void => {
-			if (!speechNarration(markdown, language).text) return;
+		const queuePrompt = (ctx: ExtensionContext, key: string, name: string, markdown: string | readonly string[], language: Language): void => {
+			if (!(typeof markdown === "string" ? speechNarration(markdown, language) : speechNarrationOfParts(markdown, language)).text) return;
 			prompts.add(key);
 			queue.push({ ctx, name, label: name, markdown, language, mark: openReadingLock(env)?.waitingMark(), prompt: key, at: joined() });
 			footer();
@@ -968,8 +1009,14 @@ export function createReplyReader(
 			if (auto === "off" || !QUESTION_TOOLS.has(event.toolName)) return;
 			const questions = askedQuestions(event.toolName, event.args);
 			if (!questions) return;
-			const language = promptLanguage(ctx, questions.map(({ question, labels }) => [question, ...labels].join("\n")).join("\n"));
-			queuePrompt(ctx, `tool:${event.toolCallId}`, "question", questionsMarkdown(questions, language), language);
+			// The text written before the call, in the same message, is read first, in its own language when it tells (T48);
+			// questions mode reads only the questions. Each is cleaned apart, so no Markdown block of the text swallows them.
+			const context = auto === "questions" ? "" : (writtenBefore.get(event.toolCallId) ?? "");
+			const language =
+				(context ? languageOfWords(context) : undefined) ??
+				promptLanguage(ctx, questions.map(({ question, labels }) => [question, ...labels].join("\n")).join("\n"));
+			const markdown = questionsMarkdown(questions, language);
+			queuePrompt(ctx, `tool:${event.toolCallId}`, "question", context ? [context, markdown] : markdown, language);
 		});
 
 		pi.on("tool_execution_end", (event) => {
@@ -1055,6 +1102,7 @@ export function createReplyReader(
 			queue.clear();
 			seen = new Set();
 			pending.clear();
+			writtenBefore = new Map();
 			prompts.clear();
 			spanPrompts = [];
 			chosen = undefined;
@@ -1062,6 +1110,7 @@ export function createReplyReader(
 			warned = false;
 			sessionSpeed = undefined;
 			speedWarned = false;
+			fallbackWarned = false;
 			if (pauseKey.problem && ctx.hasUI && !pauseKeyWarned) {
 				pauseKeyWarned = true;
 				ctx.ui.notify(pauseKey.problem, "warning");
