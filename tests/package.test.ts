@@ -23,8 +23,8 @@ function packResult(json: string): { files: { path: string }[] } {
 }
 
 describe("package metadata", () => {
-	it("is version 0.2.0 and names the public GitHub repository", () => {
-		expect(pkg.version).toBe("0.2.0");
+	it("is version 0.2.1 and names the public GitHub repository", () => {
+		expect(pkg.version).toBe("0.2.1");
 		expect(pkg.repository).toEqual({ type: "git", url: "git+https://github.com/daniel2010001/pi-reply-reader.git" });
 		expect(pkg.homepage).toBe("https://github.com/daniel2010001/pi-reply-reader#readme");
 		expect(pkg.bugs).toEqual({ url: "https://github.com/daniel2010001/pi-reply-reader/issues" });

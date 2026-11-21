@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 — 2026-11-20
 
 - A paused reading shows in every Pi session's footer, not only the pausing one: elsewhere
   `Paused 12 min in homelab · 3 waiting · Alt+M resumes` (the pausing session's label as in `/read-queue`, its tag
