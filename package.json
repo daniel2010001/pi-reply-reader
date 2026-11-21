@@ -1,6 +1,6 @@
 {
   "name": "pi-reply-reader",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read a Pi or Gentle Shell reply aloud on request, with local text-to-speech and Markdown cleaned up for listening.",
   "type": "module",
   "license": "MIT",

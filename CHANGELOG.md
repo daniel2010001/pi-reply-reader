@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-11-20
 
 - The SSH audio tunnel example now ends in a private Unix socket (`unix:/run/user/<uid>/reply-reader-pulse.sock`,
   mode 0600) instead of the loopback port `127.0.0.1:4714`, which every local process and host-network container
