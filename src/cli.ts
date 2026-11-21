@@ -5,12 +5,12 @@ import { loadOutputs } from "./outputs.ts";
 import { serve, startOutputReading } from "./listener.ts";
 import { createMusic, loadMusic } from "./music.ts";
 import type { SherpaTts } from "./playback.ts";
-import { PLAYER_MARK, playerTimeoutMs, signalledPlayersEnded } from "./player.ts";
+import { checkDeathSignal, PLAYER_MARK, playerTimeoutMs, signalledPlayersEnded } from "./player.ts";
 import { projectChanged, projectOf } from "./project.ts";
 import { openReadingLock } from "./reading-lock.ts";
 import { loadSpeed, parseSpeed, SPEED_HINT } from "./settings.ts";
 import { projectAnnouncement, speechNarration } from "./speech-text.ts";
-import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice, VOICE_ARCHIVE, type VoiceArchive } from "./voice.ts";
+import { downloadVoice, findVoice, onPath, SPEAKERS, type SpeakerName, type Voice, VOICE_ARCHIVE, type VoiceArchive } from "./voice.ts";
 
 /** What `reply-reader --help` prints (S6). */
 export const USAGE = `Usage: reply-reader [options] <file.md | ->
@@ -176,6 +176,10 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 		return USAGE_ERROR;
 	}
 
+	// The one-time setpriv check (S13 h) runs from here, while the file and the voice load; the first player waits for
+	// it below, so a one-shot reading gets the death signal too. A terminal command is not Pi's UI thread: it may wait.
+	const deathSignal = checkDeathSignal(onPath("setpriv", env));
+
 	const fromStdin = parsed.file === "-";
 	let markdown: string;
 	try {
@@ -226,6 +230,9 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 
 	// An invalid REPLY_READER_PLAYER_TIMEOUT is reported once and the default used (S13 f).
 	const timeoutMs = playerTimeoutMs(env, say);
+
+	// At most the check's 2 s limit; Ctrl+C meanwhile ends the command.
+	if (await untilAborted(deathSignal, signal)) return INTERRUPTED;
 
 	// Without a usable XDG_RUNTIME_DIR there is no claim, and only Ctrl+C stops this reading. Like a manual /read it drops
 	// the auto-reads waiting in Pi sessions (S8, T33); it never asks.
@@ -304,6 +311,23 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 		await signalledPlayersEnded();
 	}
 	return interrupted ? INTERRUPTED : OK;
+}
+
+/** Waits for `promise`; true when `signal` aborted first (or already had). */
+async function untilAborted(promise: Promise<unknown>, signal: AbortSignal | undefined): Promise<boolean> {
+	if (!signal) {
+		await promise;
+		return false;
+	}
+	if (signal.aborted) return true;
+	let leave!: () => void;
+	const aborted = new Promise<true>((done) => (leave = () => done(true)));
+	signal.addEventListener("abort", leave, { once: true });
+	try {
+		return await Promise.race([promise.then(() => false), aborted]);
+	} finally {
+		signal.removeEventListener("abort", leave);
+	}
 }
 
 /**

@@ -1,4 +1,4 @@
-import { type ChildProcess, spawnSync } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 
 /** Every player we start carries this argument, so a pid can be told apart from an unrelated process. */
@@ -204,22 +204,68 @@ export function playerTimeoutMs(env: NodeJS.ProcessEnv, warn: (message: string) 
 	return ms;
 }
 
+/** How long the one-time setpriv check may take before it is ended and setpriv is not used. */
+const DEATH_SIGNAL_CHECK_MS = 2000;
+/** The result of each setpriv path's check, once it ended. */
 const deathSignal = new Map<string, boolean>();
+const deathSignalChecks = new Map<string, Promise<boolean>>();
+
+/**
+ * Whether `setpriv` (a path) runs and supports `--pdeathsig KILL` (S13 h): checked once per path, in the background,
+ * by running `setpriv --pdeathsig KILL <setpriv> --version` (setpriv itself as the program: no shell assumed). The
+ * check never blocks the JS thread; one that has not ended within 2 s is ended and counts as not supported, as does a
+ * setpriv that cannot be run (missing, not executable). Started by withDeathSignal at its first use, or earlier (a Pi
+ * session's start), so the first reading may already use it; the CLI and `--serve` await it before their first player
+ * (Pi never does). Like a player, the check is SIGKILLed if this process exits while it runs.
+ */
+export function checkDeathSignal(setpriv: string | undefined): Promise<boolean> {
+	if (!setpriv) return Promise.resolve(false);
+	let check = deathSignalChecks.get(setpriv);
+	if (check) return check;
+	check = new Promise<boolean>((done) => {
+		let child: ChildProcess;
+		try {
+			child = spawn(setpriv, ["--pdeathsig", "KILL", setpriv, "--version"], { stdio: "ignore" });
+		} catch {
+			done(false);
+			return;
+		}
+		// Only the check we started is ever signalled; it keeps this process alive at most that long, and dies with it.
+		track(child);
+		const timer = setTimeout(() => {
+			try {
+				child.kill("SIGKILL");
+			} catch {}
+			done(false);
+		}, DEATH_SIGNAL_CHECK_MS);
+		timer.unref();
+		child.once("error", () => {
+			clearTimeout(timer);
+			done(false);
+		});
+		child.once("exit", (code) => {
+			clearTimeout(timer);
+			done(code === 0);
+		});
+	}).then((works) => {
+		deathSignal.set(setpriv, works);
+		return works;
+	});
+	deathSignalChecks.set(setpriv, check);
+	return check;
+}
 
 /**
  * The command and arguments that start `command` so it gets SIGKILL when this process dies (S13 h), however it dies:
- * `setpriv --pdeathsig KILL` when setpriv (`setpriv`, found by the caller on PATH) runs and supports it, else
- * `command` alone. Checked under Pi's Bun (T37): a player started through it from the JS thread is not cut while its
- * reader runs, and dies when the reader is SIGKILLed.
+ * `setpriv --pdeathsig KILL` once setpriv (`setpriv`, found by the caller on PATH) passed checkDeathSignal, else
+ * `command` alone; until the check has passed (it starts here at the first use), players start without it. Checked
+ * under Pi's Bun (T37): a player started through it from the JS thread is not cut while its reader runs, and dies
+ * when the reader is SIGKILLed.
  */
 export function withDeathSignal(setpriv: string | undefined, command: string, args: string[]): [string, string[]] {
 	if (!setpriv) return [command, args];
-	let works = deathSignal.get(setpriv);
-	if (works === undefined) {
-		const check = spawnSync(setpriv, ["--pdeathsig", "KILL", "/bin/sh", "-c", ":"], { stdio: "ignore", timeout: 2000 });
-		works = check.status === 0;
-		deathSignal.set(setpriv, works);
-	}
+	const works = deathSignal.get(setpriv);
+	if (works === undefined) void checkDeathSignal(setpriv);
 	return works ? [setpriv, ["--pdeathsig", "KILL", command, ...args]] : [command, args];
 }
 

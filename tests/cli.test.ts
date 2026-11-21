@@ -541,6 +541,29 @@ describe("reply-reader command (S6)", () => {
 		expect(seen()).toEqual({ statuses: [], notes: [["Auto-read on: full replies.", "info"]], asked: [], waiting: true });
 	}, 20000);
 
+	it("(S13 h) waits for the setpriv check before its first player: a working setpriv starts it with the death signal", async () => {
+		installVoice();
+		script("setpriv", `echo "$*" >> "${root}/setpriv.log"; case "$1" in --pdeathsig) shift 2; exec "$@";; --version) exit 0;; esac; exit 1`);
+		note("notes.md", "Hola.");
+		expect(await finished(["notes.md"])).toEqual({ code: 0, out: "", err: "", asked: [] });
+		const setpriv = join(root, "bin", "setpriv");
+		const log = readFileSync(join(root, "setpriv.log"), "utf8").trim().split("\n");
+		expect(log.slice(0, 2)).toEqual([`--pdeathsig KILL ${setpriv} --version`, "--version"]);
+		expect(log[2]).toMatch(new RegExp(`^--pdeathsig KILL ${join(root, "bin", "paplay")} .*${PLAYER_MARK}`));
+		expect(log).toHaveLength(3);
+	});
+
+	it("(S13 h) a setpriv check that never ends holds the first player at most about 2 s; it then plays without setpriv", { timeout: 10000 }, async () => {
+		installVoice();
+		script("setpriv", `echo "$*" >> "${root}/setpriv.log"; exec sleep 30`);
+		note("notes.md", "Hola.");
+		const started = Date.now();
+		expect(await finished(["notes.md"])).toEqual({ code: 0, out: "", err: "", asked: [] });
+		expect(Date.now() - started).toBeLessThan(3500);
+		expect(readFileSync(join(root, "setpriv.log"), "utf8")).toBe(`--pdeathsig KILL ${join(root, "bin", "setpriv")} --version\n`);
+		expect(played()).toBe(true);
+	});
+
 	it("(S19) says the project (its working folder's Git root) when it differs from the last reading's on the machine", async () => {
 		installVoice();
 		for (const repo of ["p1", "p2"]) mkdirSync(join(root, repo, ".git"), { recursive: true });
@@ -729,7 +752,7 @@ registerHooks({
 
 	it("is registered as the reply-reader command through its compiled build (tests/package.test.ts)", () => {
 		const pkg = JSON.parse(readFileSync(resolve(import.meta.dirname, "..", "package.json"), "utf8"));
-		expect(pkg.bin).toEqual({ "reply-reader": "./dist/bin/reply-reader.js" });
+		expect(pkg.bin).toEqual({ "reply-reader": "dist/bin/reply-reader.js" });
 		expect(pkg.files).toContain("dist");
 	});
 

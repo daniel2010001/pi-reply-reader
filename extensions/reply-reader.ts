@@ -10,12 +10,12 @@ import { createMusic, describeMusic, loadMusic, MUSIC_MODES, type MusicSettings,
 import { keyName, loadPauseKey } from "../src/pause-key.ts";
 import { startOutputReading } from "../src/listener.ts";
 import type { Reading, SherpaTts } from "../src/playback.ts";
-import { playerTimeoutMs, reapOrphans } from "../src/player.ts";
+import { checkDeathSignal, playerTimeoutMs, reapOrphans } from "../src/player.ts";
 import { questionsSection } from "../src/questions.ts";
 import { projectChanged, projectOf } from "../src/project.ts";
 import { askedQuestions, commandMarkdown, commandProgram, dialogTitle, QUESTION_TOOLS, questionsMarkdown, writtenCalls } from "../src/prompts.ts";
 import { isPing, parseReadRequest, READER_EVENTS, READER_EVENTS_VERSION } from "../src/reader-events.ts";
-import { type Claim, openReadingLock, type WaitingItem } from "../src/reading-lock.ts";
+import { type Claim, openReadingLock, pausedReading, type WaitingItem } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { sectionFrom } from "../src/sections.ts";
 import { formatSpeed, loadSaved, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSettings, saveSpeed } from "../src/settings.ts";
@@ -29,7 +29,7 @@ import {
 	speechNarration,
 	speechNarrationOfParts,
 } from "../src/speech-text.ts";
-import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
+import { downloadVoice, findVoice, onPath, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
 
 const STATUS = "reply-reader";
 const ASK_OUTPUT = "Where should readings sound?";
@@ -43,6 +43,12 @@ const MARKDOWN_FILE = /\.(md|markdown)$/i;
  * a waiting auto-read checks whether the machine is free (T32).
  */
 const WATCH_MS = 250;
+/**
+ * How often a session with no reading of its own looks for a reading paused in another session, so its footer shows it
+ * and its minutes (S25); the pausing session's own footer follows its reading's WATCH_MS check.
+ */
+const PAUSE_WATCH_MS = 1000;
+const MINUTE_MS = 60_000;
 /** What auto-read reads at the end of each agent turn (S8). */
 type AutoMode = "off" | "full" | "questions";
 const AUTO_CHOICES = [
@@ -209,6 +215,8 @@ export function createReplyReader(
 			prompt?: string;
 			/** The fragment `reading` started from; paused, the one it resumes from (S15). */
 			from: number;
+			/** When it was paused, while it is (S25: the footer says for how long). */
+			pausedAt?: number;
 			/** Starts playing again from fragment `from`, with the same voice, speed and output (S15). */
 			play: (from: number) => void;
 		}
@@ -239,6 +247,8 @@ export function createReplyReader(
 		let auto: AutoMode = "off";
 		/** The footer last shown (S14, S23): shown again only when it changed. */
 		let shownFooter: string | undefined;
+		/** Looks for a reading paused in another session while this one has none (S25); set from session start to its end. */
+		let pauseWatch: ReturnType<typeof setInterval> | undefined;
 		/**
 		 * The entry IDs of the replies auto-read already queued or must never read (S8 Timing, T42): those on the branch
 		 * when auto-read was turned on or the branch changed under it. Every other final reply is queued once.
@@ -460,9 +470,34 @@ export function createReplyReader(
 				},
 			});
 
+		/** How long since `at`, as the footer says it (S25): `12 min`, nothing under a minute. */
+		const pausedFor = (at: number | undefined): string | undefined => {
+			const minutes = at === undefined ? 0 : Math.floor((Date.now() - at) / MINUTE_MS);
+			return minutes >= 1 ? `${minutes} min` : undefined;
+		};
+		/**
+		 * A reading paused in another session (S25), as this session's footer shows it: `Paused 12 min in homelab · 3
+		 * waiting · Alt+M resumes`, the pausing session's label told apart with its tag when this session or another one
+		 * waiting on the machine has the same label (S16).
+		 */
+		const pausedElsewhere = (): string | undefined => {
+			const paused = pausedReading(env);
+			if (!paused) return undefined;
+			const list = openReadingLock(env)?.waitingList() ?? [];
+			const label = paused.session;
+			const twin =
+				sessionLabel() === label || list.some((item) => item.token !== paused.line && (item.session === label || item.session.startsWith(`${label} #`)));
+			const where = twin && paused.tag ? `${label} #${paused.tag}` : label;
+			const time = pausedFor(paused.at);
+			const count = list.length > 0 ? `${list.length} waiting · ` : "";
+			return `Paused ${time ? `${time} ` : ""}in ${where} · ${count}${pauseName} resumes`;
+		};
+
 		/**
 		 * Shows this session's reading in the footer, with how many readings wait on the machine (S14, S16):
-		 * `Reading P12.R2 on local · 2 waiting · Alt+M pauses`, or paused (S15) `Paused P12.R2 · Alt+M resumes · /read-stop ends`.
+		 * `Reading P12.R2 on local · 2 waiting · Alt+M pauses`, or paused (S15) `Paused P12.R2 · Alt+M resumes · /read-stop ends`,
+		 * with how long once a minute passed (S25: `Paused P12.R2 · 12 min · …`). With no reading here, a reading paused in
+		 * another session shows as pausedElsewhere says (S25).
 		 * While auto-read is on (S23) it always shows it, with the chosen output while nothing is read here
 		 * (`Auto-read on · desktop`, `Auto-read questions`) and before the reading's status while one is
 		 * (`Auto-read on · Reading P12.R2 on desktop · Alt+M pauses`). Shown again only when it changed.
@@ -472,9 +507,13 @@ export function createReplyReader(
 			if (current) {
 				const waiting = waitingCount();
 				const count = waiting > 0 ? `${waiting} waiting · ` : "";
+				const time = pausedFor(current.pausedAt);
 				reading = current.reading
 					? `Reading ${current.name} on ${current.output} · ${count}${pauseName} pauses`
-					: `Paused ${current.name} · ${count}${pauseName} resumes · /read-stop ends`;
+					: `Paused ${current.name} · ${time ? `${time} · ` : ""}${count}${pauseName} resumes · /read-stop ends`;
+			} else if (pauseWatch) {
+				// Only while the session runs: once it ended its footer is cleared.
+				reading = pausedElsewhere();
 			}
 			const mode = auto === "off" ? undefined : `Auto-read ${auto === "full" ? "on" : "questions"}`;
 			const text = mode ? [mode, reading ?? chosen].filter(Boolean).join(" · ") : reading;
@@ -523,7 +562,9 @@ export function createReplyReader(
 			const { reading } = state;
 			state.from += reading.position();
 			state.reading = undefined;
-			state.claim?.setPaused(true);
+			state.pausedAt = Date.now();
+			// Who paused it and when, for every session's footer (S25).
+			state.claim?.setPaused(true, { session: sessionLabel(), tag: sessionTag() ?? lineToken.slice(-4), line: lineToken, at: state.pausedAt });
 			reading.stop();
 			// Paused, the music comes back; resuming steps it aside again (S22).
 			music.settle({ force: true });
@@ -534,6 +575,7 @@ export function createReplyReader(
 		const resume = (): void => {
 			const state = current;
 			if (!state || state.reading) return;
+			state.pausedAt = undefined;
 			state.claim?.setPaused(false);
 			// A listener reading that went to its fallback sounds here: it steps the music here aside again too (S20, S22).
 			state.play(state.from);
@@ -868,6 +910,8 @@ export function createReplyReader(
 			const result = openReadingLock(env)?.togglePause();
 			const messages = { paused: PAUSED, resumed: RESUMED, stopped: PROMPT_STOPPED, unsupported: CANNOT_PAUSE };
 			ctx.ui.notify(result ? messages[result] : NOTHING_READ, "info");
+			// Resumed from here: this footer drops the pause at once (S25).
+			footer(ctx);
 		};
 
 		command("read-pause", {
@@ -1224,6 +1268,8 @@ export function createReplyReader(
 			latest = ctx;
 			// Players left by a Pi that died (S13 h): a hung paplay spins at about a core until it is ended.
 			reapOrphans();
+			// The one-time setpriv check runs in the background from here, so the first reading can already use it (S13 h).
+			void checkDeathSignal(onPath("setpriv", env));
 			musicWarned = false;
 			musicProblemWarned = false;
 			sessionMusic = undefined;
@@ -1254,7 +1300,12 @@ export function createReplyReader(
 				pauseKeyWarned = true;
 				ctx.ui.notify(pauseKey.problem, "warning");
 			}
-			// The saved auto-read shows from the session's start (S23).
+			clearInterval(pauseWatch);
+			pauseWatch = setInterval(() => {
+				if (!current) footer();
+			}, PAUSE_WATCH_MS);
+			pauseWatch.unref?.();
+			// The saved auto-read shows from the session's start (S23); a reading paused elsewhere too, and then (S25).
 			footer(ctx);
 			listen();
 		});
@@ -1264,6 +1315,8 @@ export function createReplyReader(
 			// The session's end drops its waiting replies (S8), before its reading ends and would start one; its footer goes.
 			auto = "off";
 			queue.clear();
+			clearInterval(pauseWatch);
+			pauseWatch = undefined;
 			stop();
 			footer();
 			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), []);

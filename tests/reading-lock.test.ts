@@ -19,7 +19,7 @@ const LOCK = pathToFileURL(resolve(import.meta.dirname, "..", "src", "reading-lo
  * then stays until its reading clears the footer (or 20 s), and keeps `<out>` up to date with what the user saw.
  * When `<root>/hold-<name>` exists at start, loading the voice waits until it is removed.
  * Besides commands: `turn <text>` is an agent run that ends with that reply (T32), `await <file>` waits until
- * `<root>/<file>` exists, and `pause-key` presses the pause key (Alt+M). The "Something is being read." question (T33) is answered as Pi's TUI
+ * `<root>/<file>` exists, `name <label>` names the session as Pi's /name does, and `pause-key` presses the pause key (Alt+M). The "Something is being read." question (T33) is answered as Pi's TUI
  * would, with the keys of `answer now|after|dismiss` (default now, today's behaviour), and recorded in `asked`.
  * `shutdown` ends the session as Pi does (session_shutdown) and `exit` ends the process at once. While
  * `<root>/ask-<name>` exists, the output question stays open (`<root>/asked-<name>` says it was asked), as a human who
@@ -34,6 +34,7 @@ const out = root + "/" + name + ".json";
 const state = { pid: process.pid, notes: [], statuses: [], ran: false, consumedEsc: [], asked: [] };
 const KEYS = { now: ["\\r"], after: ["\\x1b[B", "\\r"], dismiss: ["\\x1b"] };
 let answer = "now";
+let sessionName;
 const save = () => { writeFileSync(out + ".tmp", JSON.stringify(state)); renameSync(out + ".tmp", out); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const hold = root + "/hold-" + name;
@@ -57,7 +58,7 @@ const user = (id, text) => ({ type: "message", id, timestamp: "t", message: { ro
 const assistant = (id, text) => ({ type: "message", id, timestamp: "t", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] } });
 const branch = [user("u1", "hola"), assistant("a1", "Primera respuesta."), user("u2", "otra"), assistant("a2", "Segunda respuesta.")];
 const ctx = {
-	hasUI: true, mode: "tui", cwd: root, sessionManager: { getBranch: () => branch },
+	hasUI: true, mode: "tui", cwd: root, sessionManager: { getBranch: () => branch, getSessionName: () => sessionName },
 	ui: {
 		notify: (message, type) => { state.notes.push([message, type]); save(); },
 		select: async () => {
@@ -100,6 +101,8 @@ for (const command of commands) {
 		while (!existsSync(root + "/" + rest)) await sleep(20);
 	} else if (cmd === "answer") {
 		answer = rest;
+	} else if (cmd === "name") {
+		sessionName = rest;
 	} else if (cmd === "shutdown") {
 		events.get("session_shutdown")({ type: "session_shutdown" }, ctx);
 	} else if (cmd === "exit") {
@@ -410,6 +413,15 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 	const plain = (statuses: (string | null)[]) => statuses.map((status) => status?.replace(/ · \d+ waiting/, "") ?? null);
 	const lines = () => (existsSync(join(root, "log")) ? readFileSync(join(root, "log"), "utf8").trim().split("\n") : []);
 	const hasPlayer = (s: Session) => existsSync(join(root, `play-${s.child.pid}.pid`));
+	/** Another session's pause as this one's footer shows it (S25): every session here has the same label, so its tag too. */
+	const pausedHere = expect.stringMatching(/^Paused in reply-reader-lock-\w+ #\w{4} · 1 waiting · Alt\+M resumes$/);
+	const showsPause = (s: Session) => waitFor(() => s.seen().statuses.some((status) => /^Paused in /.test(status ?? "")));
+	/** Whether the session read its reply P3.R1 to its end (its footer cleared after it). */
+	const readP3 = (s: Session) => {
+		const statuses = s.seen().statuses;
+		const at = statuses.indexOf("Reading P3.R1 on local · Alt+M pauses");
+		return at >= 0 && statuses.slice(at).includes(null);
+	};
 	/** What the session's footer showed, once it showed `n` readings and cleared after the last. */
 	const readings = async (s: Session, n: number) => {
 		await waitFor(() => existsSync(join(root, `${s.name}.json`)) && s.seen().statuses.filter((x) => x === null).length === n);
@@ -517,12 +529,14 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 		expect([entry.pid, entry.player, entry.paused]).toEqual([a.child.pid, undefined, true]);
 		await wait();
 		expect(hasPlayer(b)).toBe(false);
+		// The other session's footer shows the pause (S25).
+		await showsPause(b);
 		go("esc2-a");
 		const pidFile = join(root, `play-${a.child.pid}.pid`);
 		await waitFor(() => readFileSync(pidFile, "utf8").trim() !== "" && Number(readFileSync(pidFile, "utf8")) !== playerA);
 		finish(Number(readFileSync(pidFile, "utf8")));
 		await a.exited;
-		await playThrough(() => b.seen().statuses.includes(null));
+		await playThrough(() => readP3(b));
 		go("go-b");
 		await b.exited;
 		expect(a.seen().notes).toEqual([
@@ -538,7 +552,9 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 			"Reading P2.R1 on local · 1 waiting · Alt+M pauses",
 			null,
 		]);
-		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Alt+M pauses", null] });
+		expect(b.seen().notes).toEqual([["Auto-read on: full replies.", "info"]]);
+		expect(b.seen().statuses.filter((status) => status !== null)).toEqual([pausedHere, "Reading P3.R1 on local · Alt+M pauses"]);
+		expect(b.seen().statuses.at(-1)).toBe(null);
 	});
 
 	it("the pause key in another session pauses the reading playing here, as /read-pause does (S15, L147)", async () => {
@@ -857,14 +873,50 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		const file = join(root, "run", "pi-reply-reader", "reading.json");
 		await waitFor(() => (JSON.parse(readFileSync(file, "utf8")) as { paused?: boolean }).paused === true);
 		expect(hasPlayer(b)).toBe(false);
+		await showsPause(b);
 		const from = Date.now();
 		a.child.kill("SIGKILL");
 		await waitFor(() => hasPlayer(b), 1500);
 		expect(Date.now() - from).toBeLessThan(1500);
-		await playThrough(() => b.seen().statuses.includes(null));
+		await playThrough(() => readP3(b));
 		go("go-b");
 		await b.exited;
-		expect(b.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Alt+M pauses", null] });
+		// A pause whose session died is no pause: the footer drops it as the reply starts.
+		expect(b.seen().notes).toEqual([["Auto-read on: full replies.", "info"]]);
+		expect(b.seen().statuses.filter((status) => status !== null)).toEqual([pausedHere, "Reading P3.R1 on local · Alt+M pauses"]);
+		expect(b.seen().statuses.at(-1)).toBe(null);
+	});
+
+	it("(S25) a reading paused in one process shows in another process's footer, with the pausing session's label and what waits; its pause key resumes it", async () => {
+		const a = start("a", ["name homelab", "read", "await pause-a", "pause-key", "await go-a"]);
+		const playerA = await playerOf(a.child);
+		const b = start("b", ["name otra", "read-auto on", "turn Uno.", "await resume-b", "pause-key", "await go-b"]);
+		await noted(b);
+		go("pause-a");
+		await waitFor(() => !alive(playerA));
+		const shown = "Auto-read on · Paused in homelab · 1 waiting · Alt+M resumes";
+		await waitFor(() => ((b.seen() as Seen & { footers?: (string | null)[] }).footers ?? []).includes(shown));
+		expect(a.seen().statuses.at(-1)).toBe("Paused P2.R1 · 1 waiting · Alt+M resumes · /read-stop ends");
+		expect(hasPlayer(b)).toBe(false);
+		go("resume-b");
+		const pidFile = join(root, `play-${a.child.pid}.pid`);
+		await waitFor(() => readFileSync(pidFile, "utf8").trim() !== "" && Number(readFileSync(pidFile, "utf8")) !== playerA);
+		await waitFor(() => (b.seen() as Seen & { footers: (string | null)[] }).footers.at(-1) === "Auto-read on");
+		expect(b.seen().notes).toEqual([
+			["Auto-read on: full replies.", "info"],
+			["esc", null],
+			["Reading resumed.", "info"],
+		]);
+		finish(Number(readFileSync(pidFile, "utf8")));
+		// b's own reply plays once a's ends.
+		await playThrough(() => {
+			const statuses = b.seen().statuses;
+			const reading = statuses.indexOf("Reading P3.R1 on local · Alt+M pauses");
+			return reading >= 0 && statuses.slice(reading).includes(null);
+		});
+		go("go-a");
+		go("go-b");
+		await Promise.all([a.exited, b.exited]);
 	});
 
 	it("(S16, L135 PROBE3) /read-next from another session while a reading is paused ends it and the next one waiting starts", async () => {
@@ -879,10 +931,11 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		await waitFor(() => (JSON.parse(readFileSync(file, "utf8")) as { paused?: boolean }).paused === true);
 		await wait();
 		expect(hasPlayer(c)).toBe(false);
+		await showsPause(c);
 		const b = start("b", ["read-next"]);
 		expect((await ran(b)).notes).toEqual([["Skipped to the next reading.", "info"]]);
 		await playerOf(c.child);
-		await playThrough(() => c.seen().statuses.includes(null));
+		await playThrough(() => readP3(c));
 		// The paused session learns it was ended even when the next reading already ended and released the machine.
 		await waitFor(() => a.seen().statuses.at(-1) === null);
 		go("go-a");
@@ -893,7 +946,9 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 			["esc", null],
 			["Reading paused.", "info"],
 		]);
-		expect(c.seen()).toMatchObject({ notes: [["Auto-read on: full replies.", "info"]], statuses: ["Reading P3.R1 on local · Alt+M pauses", null] });
+		expect(c.seen().notes).toEqual([["Auto-read on: full replies.", "info"]]);
+		expect(c.seen().statuses.filter((status) => status !== null)).toEqual([pausedHere, "Reading P3.R1 on local · Alt+M pauses"]);
+		expect(c.seen().statuses.at(-1)).toBe(null);
 	});
 
 	it("with auto-read on, a manual /read still stops another session's reading at once (S1)", async () => {

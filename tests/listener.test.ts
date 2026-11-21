@@ -485,6 +485,7 @@ function session() {
 	const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
 	const events = new Map<string, (event: unknown, ctx: unknown) => void>();
 	const notes: [string, string | undefined][] = [];
+	const footers: (string | undefined)[] = [];
 	createReplyReader({ env, hostname: "agent-node", loadSherpa, lastProject: "work" })({
 		registerCommand: (name: string, options: never) => commands.set(name, options),
 		registerShortcut: () => {},
@@ -497,10 +498,15 @@ function session() {
 		mode: "rpc",
 		cwd: join(root, "work"),
 		sessionManager: { getBranch: () => branch },
-		ui: { notify: (message: string, type?: string) => notes.push([message, type]), setStatus: () => {}, select: async () => undefined, confirm: async () => false },
+		ui: {
+			notify: (message: string, type?: string) => notes.push([message, type]),
+			setStatus: (_key: string, text: string | undefined) => footers.push(text),
+			select: async () => undefined,
+			confirm: async () => false,
+		},
 	};
 	events.get("session_start")!({ reason: "startup" }, ctx);
-	return { notes, run: (name: string, args = "") => commands.get(name)!.handler(args, ctx) };
+	return { notes, footers, run: (name: string, args = "") => commands.get(name)!.handler(args, ctx) };
 }
 
 describe("the Pi extension on a listener output (S15, S20)", () => {
@@ -529,6 +535,32 @@ describe("the Pi extension on a listener output (S15, S20)", () => {
 		await pi.run("read-stop");
 		expect(agentTexts()).toEqual([]);
 	});
+
+	for (const how of ["another session's /read-stop", "a newer reading in another process"] as const) {
+		it(`a listener reading ended by ${how} ends quietly: no error, no fallback, footer cleared (S1, S20)`, { timeout: 20000 }, async () => {
+			installVoice(join(dev, "data"));
+			devicePaplay("trap 'kill $! 2>/dev/null; exit 143' TERM; sleep 30 & wait;");
+			const pi = session();
+			await pi.run("read-output", "desk");
+			await pi.run("read");
+			await waitFor(devicePlayed);
+			const [ssh, player] = [sshPid(), devicePlayer()];
+			const entry = () => JSON.parse(readFileSync(join(root, "run", "pi-reply-reader", "reading.json"), "utf8")) as { player?: number };
+			await waitFor(() => entry().player === ssh);
+			expect(pi.footers.at(-1)).toBe("Reading P1.R1 on desk · Alt+M pauses");
+			let newer: ReturnType<NonNullable<ReturnType<typeof openReadingLock>>["claim"]> | undefined;
+			if (how === "another session's /read-stop") await session().run("read-stop");
+			else newer = openReadingLock(env)!.claim();
+			await waitFor(() => !alive(ssh) && !alive(player));
+			await waitFor(() => pi.footers.at(-1) === undefined);
+			await sleep(500);
+			newer?.release();
+			expect(pi.footers.at(-1)).toBeUndefined();
+			expect(pi.notes).toEqual([["Readings will sound on desk (listener you@host).", "info"]]);
+			expect(agentTexts()).toEqual([]);
+			expect(existsSync(join(root, "play.audio"))).toBe(false);
+		});
+	}
 
 	it("warns about the fallback once per session", async () => {
 		const pi = session();
@@ -622,6 +654,19 @@ describe("reply-reader --serve (the listener's side, S20)", () => {
 		expect(await voice.code).toBe(1);
 		expect(voice.lines).toEqual([{ type: "error", message: 'no voice named "robot"' }]);
 		expect(agentTexts()).toEqual([]);
+	});
+
+	it("(S13 h) waits for the setpriv check before its first player: a working setpriv starts it with the death signal", async () => {
+		installVoice(join(dev, "data"));
+		const setpriv = join(dev, "bin", "setpriv");
+		script(setpriv, `echo "$*" >> "${dev}/setpriv.log"; case "$1" in --pdeathsig) shift 2; exec "$@";; --version) exit 0;; esac; exit 1`);
+		const run = serve(PROTOCOL_LINES([hello, fragments([{ text: "Hola.", after: "sentence" }]), { type: "end" }]));
+		expect(await run.code).toBe(0);
+		expect(run.lines.at(-1)).toEqual({ type: "done" });
+		const log = readFileSync(join(dev, "setpriv.log"), "utf8").trim().split("\n");
+		expect(log.slice(0, 2)).toEqual([`--pdeathsig KILL ${setpriv} --version`, "--version"]);
+		expect(log[2]).toMatch(new RegExp(`^--pdeathsig KILL ${join(dev, "bin", "paplay")} .*${PLAYER_MARK}`));
+		expect(log).toHaveLength(3);
 	});
 
 	it("standard input closing before the fragments ends it with nothing played", async () => {

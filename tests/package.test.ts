@@ -33,7 +33,8 @@ describe("package metadata", () => {
 
 	it("points the bin at the compiled file that the build emits, and builds before packing", () => {
 		expect(buildConfig.compilerOptions.outDir).toBe("dist");
-		expect(pkg.bin).toEqual({ "reply-reader": "./dist/bin/reply-reader.js" });
+		// No "./" prefix: npm publish rewrote "./dist/…" and warned that the script name was invalid (L181).
+		expect(pkg.bin).toEqual({ "reply-reader": "dist/bin/reply-reader.js" });
 		expect(pkg.scripts.build).toBe("npm run clean && tsc -p tsconfig.build.json");
 		expect(pkg.scripts.prepack).toBe("npm run build");
 	});
@@ -112,7 +113,7 @@ describe("compiled reply-reader bin", () => {
 		work = mkdtempSync(join(tmpdir(), "reply-reader-work-"));
 		// The same build as `npm run build`, written to a temp folder instead of dist/.
 		execFileSync(process.execPath, [TSC, "-p", "tsconfig.build.json", "--outDir", out], { cwd: ROOT, stdio: "pipe" });
-		bin = join(out, pkg.bin["reply-reader"].replace(/^\.\/dist\//, ""));
+		bin = join(out, pkg.bin["reply-reader"].replace(/^dist\//, ""));
 	}, 120_000);
 
 	afterAll(() => {

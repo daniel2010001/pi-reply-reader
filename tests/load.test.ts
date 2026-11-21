@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stripTerminalSequences, Text, TuiMainScreen } from "@earendil-works/pi-tui";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import replyReader, { createReplyReader } from "../extensions/reply-reader.ts";
 import type { SherpaRequest, SherpaTts } from "../src/playback.ts";
 import { main } from "../src/cli.ts";
@@ -171,6 +171,8 @@ function load(
 		ui?: Record<string, unknown>;
 		/** The session's name, as Pi's /name sets it (S16 lists it). */
 		session?: string;
+		/** Pi's session id (its last four characters tell two sessions with the same label apart, S16). */
+		id?: string;
 		/** The session's working folder (S19 names its project); `<root>/work` by default. */
 		cwd?: string;
 		/**
@@ -222,7 +224,11 @@ function load(
 		hasUI: answers.hasUI ?? true,
 		mode: answers.mode ?? "tui",
 		cwd: answers.cwd ?? join(root, "work"),
-		sessionManager: { getBranch: () => entries, ...(answers.session ? { getSessionName: () => answers.session } : {}) },
+		sessionManager: {
+			getBranch: () => entries,
+			...(answers.session ? { getSessionName: () => answers.session } : {}),
+			...(answers.id ? { getSessionId: () => answers.id } : {}),
+		},
 		ui: {
 			notify: (message: string, type?: string) => notes.push([message, type]),
 			select: async (title: string, options: string[]) => (selects.push([title, options]), answers.select),
@@ -1325,7 +1331,8 @@ describe("reply-reader extension", () => {
 				rmSync(log("hold"));
 				await wait();
 				await wait();
-				expect([has(1), b.statuses]).toEqual([false, []]);
+				// Paused in the other session: this one's footer shows it (S25); same label, so with its tag.
+				expect([has(1), b.statuses]).toEqual([false, [expect.stringMatching(/^Paused in work #\w{4} · 1 waiting · Alt\+M resumes$/)]]);
 			});
 
 			it("Esc while the question is open is not taken by the reader; once closed, the pause key pauses (S8 f, S15)", async () => {
@@ -3494,6 +3501,120 @@ describe("reply-reader extension", () => {
 			const before = synthesized.length;
 			expect(await cli(p1)).toBe(0);
 			expect(texts().slice(before)).toEqual(["p uno.", "Hola."]);
+		});
+	});
+
+	it("(S13 h, preserved) Pi never waits for the setpriv check: with a slow setpriv the first reading's player starts at once, without it", async () => {
+		installVoice();
+		script("setpriv", `echo "$*" >> "${root}/setpriv.log"; sleep 3; exit 0`);
+		const started = Date.now();
+		const reader = load();
+		await reader.run("read");
+		await waitFor(() => existsSync(log("play-0.pid")));
+		expect(Date.now() - started).toBeLessThan(1000);
+		await reader.settled();
+		expect(read("setpriv.log")).toBe(`--pdeathsig KILL ${join(root, "bin", "setpriv")} --version\n`);
+	});
+
+	describe("a pause shows in every session (T53, S25)", { timeout: 20000 }, () => {
+		const wait = () => new Promise((resolve) => setTimeout(resolve, 700));
+		const has = (n: number) => existsSync(log(`play-${n}.pid`));
+		const pid = (n: number) => Number(read(`play-${n}.pid`));
+		const MINUTE = 60_000;
+		/** Only Date is faked, so the reader's 250 ms checks still run; `later` moves the machine's clock on. */
+		const fakeClock = () => vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+		const later = (ms: number) => vi.setSystemTime(Date.now() + ms);
+		beforeEach(() => {
+			env.XDG_RUNTIME_DIR = join(root, "run");
+			mkdirSync(env.XDG_RUNTIME_DIR, { recursive: true });
+			writeFileSync(log("hold"), "");
+			installVoice(`while [ -e "${root}/hold" ]; do sleep 0.02; done;`);
+		});
+		/** The sessions of the test, ended as Pi ends them, so none of their checks outlives the test's folder. */
+		let sessions: ReturnType<typeof load>[] = [];
+		const open = (answers: Parameters<typeof load>[0]) => {
+			const session = load(answers);
+			sessions.push(session);
+			return session;
+		};
+		afterEach(() => {
+			for (const session of sessions) session.shutdown();
+			sessions = [];
+			vi.useRealTimers();
+		});
+
+		it("another session shows where it is paused, how long and what waits; the pausing session shows how long; minutes follow the clock", async () => {
+			fakeClock();
+			const a = open({ session: "homelab" });
+			const b = open({ session: "otra" });
+			await a.run("read");
+			await waitFor(() => has(0));
+			await a.run("read-pause");
+			await waitFor(() => !alive(pid(0)));
+			// Under a minute no time is shown.
+			await waitFor(() => b.footers.at(-1) === "Paused in homelab · Alt+M resumes");
+			expect(a.footers.at(-1)).toBe("Paused P2.R1 · Alt+M resumes · /read-stop ends");
+			later(12 * MINUTE);
+			await waitFor(() => b.footers.at(-1) === "Paused 12 min in homelab · Alt+M resumes");
+			await waitFor(() => a.footers.at(-1) === "Paused P2.R1 · 12 min · Alt+M resumes · /read-stop ends");
+			// Readings that wait are counted, machine-wide; auto-read's prefix leads (S23).
+			await b.run("read-auto", "on");
+			await b.turn([user("a"), assistant("Uno.")]);
+			await waitFor(() => b.footers.at(-1) === "Auto-read on · Paused 12 min in homelab · 1 waiting · Alt+M resumes");
+			await waitFor(() => a.footers.at(-1) === "Paused P2.R1 · 12 min · 1 waiting · Alt+M resumes · /read-stop ends");
+			later(MINUTE);
+			await waitFor(() => b.footers.at(-1) === "Auto-read on · Paused 13 min in homelab · 1 waiting · Alt+M resumes");
+			// The pause key in the other session resumes it (S15); its footer goes back to auto-read alone.
+			await b.pauseKey();
+			await waitFor(() => has(1));
+			await waitFor(() => b.footers.at(-1) === "Auto-read on");
+			expect(a.footers.at(-1)).toBe("Reading P2.R1 on local · 1 waiting · Alt+M pauses");
+			expect(b.notes.at(-1)).toEqual(["Reading resumed.", "info"]);
+			await a.run("read-stop");
+		});
+
+		it("a session with the same label as the pausing one names it with its tag; the configured pause key is named", async () => {
+			writeSettings(JSON.stringify({ pauseKey: "alt+j" }));
+			const a = open({ session: "homelab", id: "0000-a1b2" });
+			const b = open({ session: "homelab", id: "0000-c3d4" });
+			await a.run("read");
+			await waitFor(() => has(0));
+			await b.run("read-pause");
+			await waitFor(() => b.footers.at(-1) === "Paused in homelab #a1b2 · Alt+J resumes");
+			await waitFor(() => a.footers.at(-1) === "Paused P2.R1 · Alt+J resumes · /read-stop ends");
+			await b.run("read-stop");
+			await waitFor(() => b.footers.at(-1) === undefined && a.footers.at(-1) === undefined);
+		});
+
+		it("a pause never ends by itself: hours later it still holds the machine and what waits still waits", async () => {
+			fakeClock();
+			const a = open({ session: "homelab" });
+			const b = open({ session: "otra" });
+			await a.run("read");
+			await waitFor(() => has(0));
+			await a.run("read-pause");
+			await b.run("read-auto", "on");
+			await b.turn([user("a"), assistant("Uno.")]);
+			later(10 * 60 * MINUTE);
+			await wait();
+			await wait();
+			expect(has(1)).toBe(false);
+			expect(openReadingLock(env)!.busy()).toBe(true);
+			expect(a.footers.at(-1)).toBe("Paused P2.R1 · 600 min · 1 waiting · Alt+M resumes · /read-stop ends");
+			expect(b.footers.at(-1)).toBe("Auto-read on · Paused 600 min in homelab · 1 waiting · Alt+M resumes");
+			await a.run("read-pause");
+			await waitFor(() => has(1));
+			await a.run("read-stop");
+		});
+
+		it("(preserved) with nothing paused another session's footer is as before", async () => {
+			const a = open({ session: "homelab" });
+			const b = open({ session: "otra" });
+			await a.run("read");
+			await waitFor(() => has(0));
+			await wait();
+			expect(b.footers).toEqual([]);
+			await a.run("read-stop");
 		});
 	});
 

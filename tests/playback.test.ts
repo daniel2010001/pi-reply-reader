@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Output } from "../src/outputs.ts";
 import { type SherpaRequest, type SherpaTts, startReading } from "../src/playback.ts";
 import { speechText, spokenFragments } from "../src/speech-text.ts";
-import { playerTimeout, reapOrphans } from "../src/player.ts";
+import { checkDeathSignal, playerTimeout, reapOrphans, withDeathSignal } from "../src/player.ts";
 import { PLAYER_MARK } from "../src/reading-lock.ts";
 import { SPEAKERS, type Voice } from "../src/voice.ts";
 import { endProcessesOf } from "./processes.ts";
@@ -644,6 +644,9 @@ const PLAYBACK = pathToFileURL(resolve(import.meta.dirname, "..", "src", "playba
 const OWNER = `
 const [playback, envJson, mode] = process.argv.slice(2);
 const { startReading } = await import(playback);
+// A reader uses setpriv once its one-time check has passed (S13 h); a Pi session starts that check at its start.
+const setpriv = JSON.parse(envJson).PATH + "/setpriv";
+if ((await import("node:fs")).existsSync(setpriv)) await (await import(playback.replace(/playback\\.ts$/, "player.ts"))).checkDeathSignal(setpriv);
 const voice = { supertonic: {} };
 startReading({
 	voice, speaker: { sid: 6, gain: 1 }, fragments: [{ text: "Uno.", after: "sentence" }],
@@ -819,6 +822,70 @@ describe("(S13) review additions (T37)", { timeout: 20000 }, () => {
 		expect(reapOrphans()).not.toContain(player);
 		await new Promise((done) => setTimeout(done, GRACE_MS + 300));
 		expect(alive(player!)).toBe(true);
+	});
+
+	it("(h) the one-time setpriv check never holds the first reading back: a slow setpriv, the player starts at once without it", async () => {
+		script("setpriv", `echo "$*" >> "${log("setpriv.log")}"; sleep 3; exit 0`);
+		fakePaplay();
+		const loadSherpa = fakeSherpa(() => new Float32Array(tone(441)));
+		const started = Date.now();
+		await startReading({ voice, speaker: male, fragments: spokenFragments("Uno."), output: local, env, loadSherpa }).done;
+		expect(Date.now() - started).toBeLessThan(1000);
+		expect(read("paplay.args")).toContain(PLAYER_MARK);
+		// Only the check ran through setpriv, with setpriv itself as its program (no /bin/sh assumed).
+		await waitFor(() => existsSync(log("setpriv.log")));
+		expect(read("setpriv.log")).toBe(`--pdeathsig KILL ${join(root, "bin", "setpriv")} --version\n`);
+	});
+
+	it("(h) a working setpriv is used for the players started once its check passed", async () => {
+		const setpriv = script(
+			"setpriv",
+			`echo "$*" >> "${log("setpriv.log")}"; case "$1" in --pdeathsig) shift 2; exec "$@";; --version) exit 0;; esac; exit 1`,
+		);
+		fakePaplay();
+		const loadSherpa = fakeSherpa(() => new Float32Array(tone(441)));
+		await startReading({ voice, speaker: male, fragments: spokenFragments("Uno."), output: local, env, loadSherpa }).done;
+		expect(await checkDeathSignal(setpriv)).toBe(true);
+		const checked = `--pdeathsig KILL ${setpriv} --version\n--version\n`;
+		// The first reading started before the check passed: its player ran without setpriv.
+		expect(read("setpriv.log")).toBe(checked);
+		await startReading({ voice, speaker: male, fragments: spokenFragments("Dos."), output: local, env, loadSherpa }).done;
+		expect(read("setpriv.log")).toBe(`${checked}--pdeathsig KILL ${join(root, "bin", "paplay")} ${read("paplay.args").trim()}\n`);
+		expect(pcm("paplay.audio").length).toBe(441);
+		// A setpriv that fails its check is never used.
+		const broken = script("setpriv-broken", "exit 1");
+		expect(await checkDeathSignal(broken)).toBe(false);
+	});
+
+	it("(h) a check that never ends is killed at 2 s and cached as unsupported: players start without setpriv", { timeout: 10000 }, async () => {
+		// exec: the check's pid is the sleep itself, so the SIGKILL leaves nothing of it behind.
+		const setpriv = script("setpriv", `echo "$*" >> "${log("setpriv.log")}"; echo $$ > "${log("setpriv.pid")}"; exec sleep 30`);
+		const started = Date.now();
+		expect(await checkDeathSignal(setpriv)).toBe(false);
+		const took = Date.now() - started;
+		expect(took).toBeGreaterThanOrEqual(1900);
+		expect(took).toBeLessThan(3000);
+		const check = Number(read("setpriv.pid"));
+		await waitFor(() => !alive(check), 1000);
+		// Cached: asked again, it answers at once without running setpriv again.
+		const again = Date.now();
+		expect(await checkDeathSignal(setpriv)).toBe(false);
+		expect(Date.now() - again).toBeLessThan(100);
+		expect(withDeathSignal(setpriv, "/bin/paplay", ["-v"])).toEqual(["/bin/paplay", ["-v"]]);
+		expect(read("setpriv.log")).toBe(`--pdeathsig KILL ${setpriv} --version\n`);
+	});
+
+	it("(h) a missing or non-executable setpriv is cached as unsupported, even once it becomes a working one", async () => {
+		const missing = join(root, "bin", "setpriv-missing");
+		const plain = join(root, "bin", "setpriv-plain");
+		writeFileSync(plain, "#!/bin/sh\nexit 0\n");
+		for (const path of [missing, plain]) {
+			expect(await checkDeathSignal(path)).toBe(false);
+			writeFileSync(path, "#!/bin/sh\nexit 0\n");
+			chmodSync(path, 0o755);
+			expect(await checkDeathSignal(path)).toBe(false);
+			expect(withDeathSignal(path, "/bin/paplay", ["-v"])).toEqual(["/bin/paplay", ["-v"]]);
+		}
 	});
 
 	it("(h) with setpriv on PATH, a player dies with its reader even when the reader is killed outright", async () => {

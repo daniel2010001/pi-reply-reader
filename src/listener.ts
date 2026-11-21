@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Output } from "./outputs.ts";
 import { type Reading, type SherpaTts, startReading } from "./playback.ts";
-import { OWNER_VAR, ownerTag, PLAYER_MARK, playerTimeout, playerTimeoutMs, reapOrphans, terminate, track, withDeathSignal } from "./player.ts";
+import { checkDeathSignal, OWNER_VAR, ownerTag, PLAYER_MARK, playerTimeout, playerTimeoutMs, reapOrphans, terminate, track, withDeathSignal } from "./player.ts";
 import { createMusic, holdMusic, LISTENER_HOLD_MS, loadMusic } from "./music.ts";
 import { type Claim, openReadingLock } from "./reading-lock.ts";
 import { MAX_SPEED, MIN_SPEED } from "./settings.ts";
@@ -374,6 +374,9 @@ export async function serve(deps: {
 			return typed.type === "stop" ? undefined : typed;
 		}
 	};
+	// The one-time setpriv check (S13 h) runs from here; the player waits for it (at most its 2 s limit), so the first
+	// reading this --serve plays gets the death signal too.
+	const deathSignal = checkDeathSignal(onPath("setpriv", env));
 	// The listener's music steps aside while it reads what the agent host sent (S22), with the listener's own settings.
 	const lock = openReadingLock(env);
 	let musicWarned = false;
@@ -389,10 +392,30 @@ export async function serve(deps: {
 	});
 	/** Whether the reading played to its end (`done`): the agent host's next one may follow, so the music stays aside a while. */
 	let finished = false;
+	/** Whether the music was aside for this reading (this --serve stepped it aside, or kept it so). */
+	let aside = false;
 	const code = await serveReading();
-	// After a reading that ended, the music stays aside LISTENER_HOLD_MS for the agent host's next one in its line; a
-	// newer --serve that steps it aside meanwhile keeps it so. Stopped, it comes back at once.
-	if (finished && holdMusic(env, LISTENER_HOLD_MS)) await new Promise((resolve) => setTimeout(resolve, LISTENER_HOLD_MS));
+	// What gentle-stream said is known first: music that turned out not to be playing is no music aside.
+	await music.idle();
+	// After a reading that ended with the music aside, it stays aside LISTENER_HOLD_MS for the agent host's next one in
+	// its line (its input closing, as ssh ends after `done`, does not end the hold); a newer --serve that steps it aside
+	// meanwhile keeps it so. Stopped, or nothing aside, it comes back (or the process ends) at once. Interrupted
+	// (SIGTERM, SIGINT) during the hold, the hold ends and the music comes back before this process exits.
+	if (finished && aside && !deps.signal?.aborted && holdMusic(env, LISTENER_HOLD_MS)) {
+		await new Promise<void>((resolve) => {
+			const abort = (): void => {
+				clearTimeout(timer);
+				resolve();
+			};
+			// The hold ran out: its abort listener goes with it.
+			const timer = setTimeout(() => {
+				deps.signal?.removeEventListener("abort", abort);
+				resolve();
+			}, LISTENER_HOLD_MS);
+			deps.signal?.addEventListener("abort", abort, { once: true });
+		});
+		if (deps.signal?.aborted) holdMusic(env, 0);
+	}
 	music.settle();
 	await music.idle();
 	return code;
@@ -445,6 +468,8 @@ export async function serve(deps: {
 				ended();
 			})();
 
+			await Promise.race([deathSignal, interrupted]);
+			if (quit) return 0;
 			// This machine's own turn (S1): wait while a reading of its own plays; never stop it. The waiting mark is taken
 			// once, so an explicit drop of what waits here (/read-stop, /read, S8) drops this reading too (A6, L157).
 			const mark = lock?.waitingMark();
@@ -461,7 +486,7 @@ export async function serve(deps: {
 				await new Promise((resolve) => setTimeout(resolve, CHECK_MS));
 			}
 			if (quit) return 0;
-			music.stepAside();
+			aside = music.stepAside();
 
 			let lost = false;
 			const current = startReading({
