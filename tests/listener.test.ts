@@ -7,8 +7,9 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createReplyReader } from "../extensions/reply-reader.ts";
 import { main } from "../src/cli.ts";
-import { startOutputReading } from "../src/listener.ts";
+import { MAX_LINE_BYTES, MAX_FRAGMENTS, startOutputReading } from "../src/listener.ts";
 import type { SherpaRequest, SherpaTts } from "../src/playback.ts";
+import { isListenerServe, reapOrphans } from "../src/player.ts";
 import { openReadingLock, PLAYER_MARK } from "../src/reading-lock.ts";
 import { SPEAKERS } from "../src/voice.ts";
 import { endProcessesOf } from "./processes.ts";
@@ -21,6 +22,7 @@ import { endProcessesOf } from "./processes.ts";
  */
 
 const BIN = resolve(import.meta.dirname, "..", "bin", "reply-reader.ts");
+const VERSION = (JSON.parse(readFileSync(resolve(import.meta.dirname, "..", "package.json"), "utf8")) as { version: string }).version;
 const BUNDLE = "sherpa-onnx-supertonic-3-tts-int8-2026-05-11";
 const MODEL_FILES = [
 	"duration_predictor.int8.onnx",
@@ -57,10 +59,13 @@ let env: NodeJS.ProcessEnv;
 let dev: string;
 let synthesized: SherpaRequest[];
 let spawned: ChildProcess[];
+/** Process groups of the stand-in players this test started (detached), ended whole in afterEach. */
+let groups: number[];
 
 beforeEach(() => {
 	synthesized = [];
 	spawned = [];
+	groups = [];
 	root = mkdtempSync(join(tmpdir(), "reply-reader-listener-"));
 	dev = join(root, "device");
 	for (const dir of ["bin", "work", "run", join("device", "bin"), join("device", "run"), join("device", "home")]) mkdirSync(join(root, dir), { recursive: true });
@@ -122,6 +127,12 @@ registerHooks({
 
 afterEach(async () => {
 	for (const child of spawned) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+	// A stand-in player's whole group, its `sleep` too (a SIGKILL of the shell alone orphans it).
+	for (const group of groups) {
+		try {
+			process.kill(-group, "SIGKILL");
+		} catch {}
+	}
 	await endProcessesOf(root);
 	rmSync(root, { recursive: true, force: true });
 });
@@ -154,6 +165,14 @@ function installVoice(data: string): void {
 	const dir = join(data, "pi-reply-reader", "voices", BUNDLE);
 	mkdirSync(dir, { recursive: true });
 	for (const name of MODEL_FILES) writeFileSync(join(dir, name), name);
+}
+
+/** A player of the listener's own (its mark in its command line), in its own process group. */
+function ownPlayer(): ChildProcess {
+	const own = spawn("/bin/sh", ["-c", "sleep 30; :", "paplay", PLAYER_MARK], { stdio: "ignore", detached: true });
+	spawned.push(own);
+	if (own.pid) groups.push(own.pid);
+	return own;
 }
 
 /** The listener's paplay: records its pid and audio; `before` runs first (a hold, a failure). */
@@ -409,8 +428,7 @@ describe("an output whose listener synthesizes (S20)", () => {
 	it("the listener waits while it reads something of its own (its beats keep the watchdog quiet), then reads", { timeout: 25000 }, async () => {
 		installVoice(join(dev, "data"));
 		env.REPLY_READER_PLAYER_TIMEOUT = "5";
-		const own = spawn("/bin/sh", ["-c", "sleep 30; :", "paplay", PLAYER_MARK], { stdio: "ignore" });
-		spawned.push(own);
+		const own = ownPlayer();
 		const theirs = openReadingLock(deviceEnv())!.claim();
 		expect(theirs.setPlayer(own.pid!)).toBe(true);
 		note("notes.md", "Uno.");
@@ -610,8 +628,211 @@ describe("reply-reader --serve (the listener's side, S20)", () => {
 		installVoice(join(dev, "data"));
 		const run = serve(PROTOCOL_LINES([hello]), true);
 		expect(await run.code).toBe(0);
-		expect(run.lines).toEqual([{ type: "ready", v: 1, version: "0.1.0" }]);
+		expect(run.lines).toEqual([{ type: "ready", v: 1, version: VERSION }]);
 		expect(devicePlayed()).toBe(false);
+	});
+});
+
+/** `reply-reader --serve` as the listener runs it (the real bin through the listener's PATH), with pipes. */
+function serveProcess(extra: NodeJS.ProcessEnv = {}) {
+	const child = spawn(join(dev, "bin", "reply-reader"), ["--serve", PLAYER_MARK], {
+		env: { ...deviceEnv(), REPLY_READER_PLAYER_TIMEOUT: "5", ...extra },
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+	spawned.push(child);
+	let out = "";
+	let err = "";
+	child.stdout!.on("data", (chunk: Buffer) => (out += chunk.toString()));
+	child.stderr!.on("data", (chunk: Buffer) => (err += chunk.toString()));
+	child.stdin!.on("error", () => {});
+	const exited = new Promise<number | null>((done) => child.on("exit", (code) => done(code)));
+	return {
+		child,
+		exited,
+		send: (lines: object[]) => child.stdin!.write(lines.map((line) => `${JSON.stringify(line)}\n`).join("")),
+		get out() {
+			return out;
+		},
+		get err() {
+			return err;
+		},
+	};
+}
+
+const HELLO = { type: "hello", v: 1, voice: "male" };
+const OUTPUT = { name: "desk", label: "desk", ssh: "you@host", fallback: FALLBACK };
+const VOICE = { supertonic: {} as never };
+const items = (texts: string[]) => texts.map((text) => ({ text, role: "paragraph" as const, after: "sentence" as const }));
+
+describe("T45 correction: the listener's text and lines on the agent host (A2, R1-001)", () => {
+	it("a line from the listener longer than 64 KiB ends the reading through the fallback, with the reason", async () => {
+		fakeSsh("head -c 70000 /dev/zero | tr '\\0' x; exec sleep 30");
+		note("notes.md", "Uno.");
+		const began = Date.now();
+		const run = cli(["--output", "desk", "notes.md"]);
+		expect(await run.code).toBe(0);
+		expect(run.err).toBe(fellBack("the listener sent a line longer than 65536 bytes"));
+		expect(Date.now() - began).toBeLessThan(5000);
+		expect(agentTexts()).toEqual(["Uno."]);
+		await waitFor(() => !alive(sshPid()));
+	});
+
+	it("control characters in the listener's error message are stripped from the warning", async () => {
+		writeFileSync(join(root, "said"), `${JSON.stringify({ type: "error", message: "bad\u001b[31m\u0085\u0007\u009b\u0000x\r" })}\n`);
+		fakeSsh(`cat "${root}/said"; exec sleep 30`);
+		note("notes.md", "Uno.");
+		const run = cli(["--output", "desk", "notes.md"]);
+		expect(await run.code).toBe(0);
+		expect(run.err).toBe(fellBack("the listener failed (bad[31mx)"));
+	});
+
+	it("control characters in ssh's last stderr line are stripped from the failure", async () => {
+		writeFileSync(join(root, "said"), "first\nssh: \u001b]0;t\u0007refused\u0085\r\n");
+		fakeSsh(`cat "${root}/said" >&2; exit 255`);
+		note("notes.md", "Uno.");
+		const run = cli(["--output", "bare", "notes.md"]);
+		expect(await run.code).toBe(1);
+		expect(run.err).toBe('Playback on "bare" failed: the listener did not answer (ssh: ]0;trefused)\n');
+	});
+
+	it("control characters in the listener's protocol version are stripped from the warning", async () => {
+		writeFileSync(join(root, "said"), `${JSON.stringify({ type: "ready", v: "2\u001b[2J\u0085" })}\n`);
+		fakeSsh(`cat "${root}/said"; exec sleep 30`);
+		note("notes.md", "Uno.");
+		const run = cli(["--output", "desk", "notes.md"]);
+		expect(await run.code).toBe(0);
+		expect(run.err).toBe(fellBack("the listener's reply-reader speaks protocol 2[2J, this one 1 (update both)"));
+	});
+});
+
+describe("T45 correction: --serve and the reaper (A3)", () => {
+	it("a --serve started with PI_REPLY_READER_OWNER naming a gone process is never reaped while it runs", async () => {
+		installVoice(join(dev, "data"));
+		const listener = serveProcess({ PI_REPLY_READER_OWNER: "999999:1" });
+		listener.send([HELLO]);
+		await waitFor(() => listener.out.includes('"ready"'));
+		expect(reapOrphans()).not.toContain(listener.child.pid);
+		await sleep(300);
+		expect(alive(listener.child.pid!)).toBe(true);
+		listener.child.stdin!.end();
+		expect(await listener.exited).toBe(0);
+	});
+
+	it("only a reply-reader script's --serve is spared: the agent host's ssh child stays reapable (S13)", () => {
+		expect(isListenerServe(["node", BIN, "--serve", PLAYER_MARK])).toBe(true);
+		expect(isListenerServe(["node", "/usr/lib/node_modules/pi-reply-reader/dist/bin/reply-reader.js", "--serve", PLAYER_MARK])).toBe(true);
+		expect(isListenerServe(["node", "/home/you/.local/bin/reply-reader", "--serve", PLAYER_MARK])).toBe(true);
+		expect(isListenerServe(["ssh", ...SSH_ARGS])).toBe(false);
+		expect(isListenerServe(["/usr/bin/setpriv", "--pdeathsig", "KILL", "/usr/bin/ssh", ...SSH_ARGS])).toBe(false);
+		expect(isListenerServe(["paplay", "--raw", PLAYER_MARK])).toBe(false);
+	});
+});
+
+describe("T45 correction: large readings stay on the listener (A4)", () => {
+	it(`a text of more than ${MAX_FRAGMENTS} fragments plays on the listener, not the fallback`, { timeout: 60000 }, async () => {
+		installVoice(join(dev, "data"));
+		script(join(dev, "bin", "paplay"), `echo $$ > "${dev}/play.pid"; cat > /dev/null`);
+		const texts = Array.from({ length: MAX_FRAGMENTS + 700 }, (_, index) => `F${index}.`);
+		const warned: string[] = [];
+		const reading = startOutputReading({ voice: VOICE, speaker: SPEAKERS.male, fragments: items(texts), output: OUTPUT, env, loadSherpa, onFallback: (message) => warned.push(message) });
+		await reading.done;
+		expect(warned).toEqual([]);
+		expect(agentTexts()).toEqual([]);
+		expect(deviceTexts()).toEqual([texts]);
+	});
+
+	it("fragments that add up to more than one line's cap are sent in several messages and play on the listener", { timeout: 20000 }, async () => {
+		installVoice(join(dev, "data"));
+		const texts = ["a", "b", "c"].map((letter) => letter.repeat(600 * 1024));
+		const warned: string[] = [];
+		const reading = startOutputReading({ voice: VOICE, speaker: SPEAKERS.male, fragments: items(texts), output: OUTPUT, env, loadSherpa, onFallback: (message) => warned.push(message) });
+		await reading.done;
+		expect(warned).toEqual([]);
+		expect(deviceTexts()).toEqual([texts]);
+	});
+
+	it("a single fragment too large for one line reads through the fallback, saying why", { timeout: 20000 }, async () => {
+		installVoice(join(dev, "data"));
+		const texts = ["Uno.", "x".repeat(MAX_LINE_BYTES)];
+		const warned: string[] = [];
+		const reading = startOutputReading({ voice: VOICE, speaker: SPEAKERS.male, fragments: items(texts), output: OUTPUT, env, loadSherpa, onFallback: (message) => warned.push(message) });
+		await reading.done;
+		expect(warned).toEqual([`Output "desk": a sentence is too long to send to the listener (over ${MAX_LINE_BYTES} bytes); reading here through its fallback.`]);
+		expect(agentTexts()).toEqual(texts);
+		expect(existsSync(join(root, "ssh.pid"))).toBe(false);
+	});
+
+	it("a huge lead and speed: the listener reads at speed 1.1 and says done", { timeout: 20000 }, async () => {
+		installVoice(join(dev, "data"));
+		const warned: string[] = [];
+		const reading = startOutputReading({
+			voice: VOICE,
+			speaker: SPEAKERS.male,
+			fragments: items(["Hola."]),
+			output: OUTPUT,
+			env,
+			loadSherpa,
+			speed: 1e300,
+			leadSilence: 1e300,
+			onFallback: (message) => warned.push(message),
+		});
+		await reading.done;
+		expect(warned).toEqual([]);
+		expect(deviceRuns()).toEqual([[["Hola.", SPEAKERS.male.sid, 1.1]]]);
+		expect(agentTexts()).toEqual([]);
+	});
+});
+
+describe("T45 correction: --serve when the agent host is gone (A5)", () => {
+	it("EPIPE on its standard output stops its player and exits 0 quietly", { timeout: 20000 }, async () => {
+		installVoice(join(dev, "data"));
+		devicePaplay("trap 'kill $! 2>/dev/null; exit 143' TERM; sleep 30 & wait;");
+		const listener = serveProcess();
+		listener.send([HELLO]);
+		await waitFor(() => listener.out.includes('"ready"'));
+		listener.send([{ type: "fragments", lead: 0, speed: 1.1, items: [{ text: "Uno.", after: "sentence" }] }, { type: "end" }]);
+		await waitFor(devicePlayed);
+		const player = devicePlayer();
+		listener.child.stdout!.destroy();
+		expect(await listener.exited).toBe(0);
+		expect(listener.err).toBe("");
+		await waitFor(() => !alive(player));
+	});
+});
+
+describe("T45 correction: a remote reading waiting its turn on the listener (A6)", () => {
+	it("/read-stop on the listener drops it: --serve answers stopped, the agent host ends it quietly, no fallback", { timeout: 25000 }, async () => {
+		installVoice(join(dev, "data"));
+		const own = ownPlayer();
+		const theirs = openReadingLock(deviceEnv())!.claim();
+		expect(theirs.setPlayer(own.pid!)).toBe(true);
+		note("notes.md", "Uno.");
+		const run = cli(["--output", "desk", "notes.md"]);
+		await waitFor(() => deviceRuns().length === 1);
+		await sleep(2500);
+		expect(devicePlayed()).toBe(false);
+		expect(openReadingLock(deviceEnv())!.stopOthers()).toBe(true);
+		expect(await run.code).toBe(0);
+		expect(run.err).toBe("");
+		expect(devicePlayed()).toBe(false);
+		expect(deviceTexts()).toEqual([[]]);
+		expect(agentTexts()).toEqual([]);
+		theirs.release();
+	});
+
+	it("--serve answers stopped when the listener's waiting readings are dropped (S8)", { timeout: 25000 }, async () => {
+		installVoice(join(dev, "data"));
+		const theirs = openReadingLock(deviceEnv())!.claim();
+		const listener = serveProcess();
+		listener.send([HELLO, { type: "fragments", lead: 0, speed: 1.1, items: [{ text: "Uno.", after: "sentence" }] }, { type: "end" }]);
+		await waitFor(() => listener.out.includes('"ready"'));
+		await sleep(1000);
+		openReadingLock(deviceEnv())!.dropWaiting();
+		expect(await listener.exited).toBe(0);
+		const said = listener.out.trim().split("\n").map((line) => (JSON.parse(line) as { type: string }).type).filter((type) => type !== "beat");
+		expect(said).toEqual(["ready", "stopped"]);
+		expect(devicePlayed()).toBe(false);
+		theirs.release();
 	});
 });
 

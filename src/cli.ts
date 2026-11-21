@@ -117,9 +117,27 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 			stderr.write(`reply-reader: --serve takes no other arguments ("${extra}").\n\n${USAGE}`);
 			return USAGE_ERROR;
 		}
-		const code = await serve({ env, stdin: deps.stdin, write: (text) => void stdout.write(text), warn: say, loadSherpa: deps.loadSherpa, signal });
-		await signalledPlayersEnded();
-		return code;
+		// The agent host gone (EPIPE on standard output, A5): the reading stops quietly, like standard input closing.
+		const gone = new AbortController();
+		const leave = (): void => gone.abort();
+		signal?.addEventListener("abort", leave, { once: true });
+		if (signal?.aborted) leave();
+		const out = stdout as CliDeps["stdout"] & { on?: (event: "error", listener: () => void) => unknown };
+		out.on?.("error", leave);
+		const write = (text: string): void => {
+			if (gone.signal.aborted) return;
+			try {
+				stdout.write(text);
+			} catch {
+				leave();
+			}
+		};
+		try {
+			return await serve({ env, stdin: deps.stdin, write, warn: say, loadSherpa: deps.loadSherpa, signal: gone.signal });
+		} finally {
+			signal?.removeEventListener("abort", leave);
+			await signalledPlayersEnded();
+		}
 	}
 	if (argv[0] === "--download-voice") {
 		if (argv.length === 1) return downloadOnly(deps);

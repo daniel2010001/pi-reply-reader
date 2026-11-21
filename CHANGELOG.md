@@ -8,8 +8,12 @@
   line, announcements and the player timeout behave as for any output. When the listener does not answer,
   lacks `reply-reader`, its voice or `paplay`, or fails mid-reading, the reading goes on from the sentence last
   heard on the agent host through `fallback`, with one warning per session; without a fallback it fails with
-  `Playback on "<output>" failed: <reason>`. The listener waits while it reads something of its own. Bad `ssh`
-  values (empty, a leading `-`, whitespace) and unknown keys are reported and the entry skipped.
+  `Playback on "<output>" failed: <reason>`. The listener waits while it reads something of its own; a
+  `/read-stop` or `/read` there drops the agent host's reading still waiting, which ends quietly. Long
+  readings (over 5000 sentences or 1 MiB) are sent in several messages and stay on the listener. Bad `ssh`
+  values (empty, a leading `-`, whitespace, control characters) and unknown keys are reported and the entry
+  skipped. Text from the listener or `ssh` is shown without control characters. `--serve` ends quietly when
+  the agent host goes away, and a reading on the listener never ends a running `--serve` as an orphan.
 - `reply-reader --download-voice` downloads the voice (asking `[y/N]` on a terminal) and exits; a listener
   without its voice names it in the warning.
 

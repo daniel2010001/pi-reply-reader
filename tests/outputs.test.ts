@@ -120,6 +120,24 @@ describe("loadOutputs: a listener that synthesizes (S20)", () => {
 		);
 	});
 
+	it("skips an ssh holding a control character (C0, DEL, C1 with U+0085, NUL) or a line/paragraph separator", () => {
+		const bad = {
+			nel: "h\u0085x",
+			esc: "h\u001bx",
+			nul: "h\u0000x",
+			del: "h\u007fx",
+			c1: "h\u009bx",
+			cr: "h\rx",
+			ls: "h x",
+			ps: "h x",
+			lead: "\u0085h",
+		};
+		configure(JSON.stringify({ ...Object.fromEntries(Object.entries(bad).map(([name, ssh]) => [name, { ssh }])), good: { ssh: "you@host" } }));
+		const { outputs, problems } = loadOutputs(env, "hs-node");
+		expect(outputs.map((o) => o.name)).toEqual(["local", "good"]);
+		expect(problems).toEqual(Object.keys(bad).map((name) => `Ignored output "${name}" in ${file()}: ${SSH_HINT}.`));
+	});
+
 	it("skips an object with an unknown key or a fallback that is not a non-empty string, and names why", () => {
 		configure(
 			JSON.stringify({

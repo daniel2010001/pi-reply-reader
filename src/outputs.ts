@@ -20,8 +20,11 @@ const NAME = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
 const VALUE_HINT = 'the value must be a PULSE_SERVER string such as "tcp:192.168.1.50:4713"';
 const SSH_HINT = '"ssh" must be a host such as "you@host", without spaces or a leading "-"';
 const FALLBACK_HINT = '"fallback" must be a PULSE_SERVER string such as "unix:/run/user/1000/reply-reader-pulse.sock"';
-/** An SSH destination that ssh cannot take for an option (S20): no leading "-", no whitespace or newline. */
-const SSH_HOST = /^[^-\s][^\s]*$/;
+/**
+ * An SSH destination that ssh cannot take for an option (S20): no leading "-", no whitespace or newline, no control
+ * character (C0 with NUL, DEL, C1 with U+0085) and no Unicode line or paragraph separator.
+ */
+const SSH_HOST = /^[^-\s\p{Cc}\u2028\u2029][^\s\p{Cc}\u2028\u2029]*$/u;
 const LISTENER_KEYS = ["ssh", "fallback"];
 
 /**

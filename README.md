@@ -531,7 +531,7 @@ On the agent host:
    ```
 
    `ssh` is what you would type after `ssh` (a host, `user@host`, or a `Host` alias of your SSH client
-   configuration); it cannot start with `-` or hold spaces. `fallback` is a `PULSE_SERVER` value, such as the
+   configuration); it cannot start with `-` or hold spaces or control characters. `fallback` is a `PULSE_SERVER` value, such as the
    tunnel above. Any other key is reported and the entry skipped.
 5. In Pi, `/read-output desktop`, then `/read` (or `reply-reader --output desktop notes.md`).
 
@@ -539,7 +539,10 @@ Everything else works as for any output: the line and its order, the announcemen
 pause and resume (from the sentence being heard on the listener), `/read-stop` and a new reading from any
 session (they end the `ssh` child, which ends the reading on the listener), and the player timeout. The
 listener respects its own turn: while it reads something of its own, the agent host's reading waits. A
-reading of its own started on the listener ends the one it serves.
+reading of its own started on the listener ends the one it serves, and a `/read-stop` (or a `/read`) there
+while the agent host's reading still waits drops it; either way the agent host's reading ends quietly, with
+no fallback. Long readings are sent in several messages, so they stay on the listener; only a single
+sentence over 1 MiB goes to the fallback (`a sentence is too long to send to the listener (over 1048576 bytes)`).
 
 **The fallback.** When the listener does not answer (no route, a refused key, `ssh` not installed, nothing
 heard within the player timeout), lacks `reply-reader`, its voice or `paplay`, runs an incompatible version,
@@ -548,7 +551,9 @@ played through `fallback`, with one warning per session such as
 `Output "desktop": the listener did not answer; reading here through its fallback.` or, without the voice,
 `Output "desktop": the listener has no voice (install it there with "reply-reader --download-voice"); reading here through its fallback.`
 Without a fallback the reading fails with `Playback on "desktop" failed: <reason>`. The agent host still
-needs its own voice for the fallback.
+needs its own voice for the fallback. Text from the listener or `ssh` shown in these messages has its control
+characters removed, and a line from the listener over 64 KiB ends the reading there
+(`the listener sent a line longer than 65536 bytes`).
 
 `reply-reader --serve` never downloads and writes no file besides the reading lock under
 `$XDG_RUNTIME_DIR/pi-reply-reader/`. It only plays what it is sent; whoever can run `ssh` as you to the

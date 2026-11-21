@@ -1,7 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
 import type { Output } from "./outputs.ts";
 import { type Reading, type SherpaTts, startReading } from "./playback.ts";
 import { OWNER_VAR, ownerTag, PLAYER_MARK, playerTimeout, playerTimeoutMs, reapOrphans, terminate, track, withDeathSignal } from "./player.ts";
@@ -14,7 +13,8 @@ import { findVoice, onPath, SPEAKERS, type SpeakerName, type Voice } from "./voi
  * Synthesis on the listener (S20). The agent host runs `ssh … <host> reply-reader --serve --client-name=pi-reply-reader`
  * and the two speak JSON lines, one object per line with a `type`:
  *
- * - agent host → listener: `hello {v, voice}`, `fragments {lead, speed, items: [{text, after}]}`, `end`, `stop`.
+ * - agent host → listener: `hello {v, voice}`, `fragments {lead, speed, items: [{text, after}]}` (one or more, each
+ *   within the listener's caps; the listener joins their items and takes lead and speed from the first), `end`, `stop`.
  * - listener → agent host: `ready {v, version}`, `missing {what: "voice" | "player"}`, `progress {index}` (the fragment
  *   being heard), `beat` (every BEAT_MS), `done`, `stopped` (a reading of the listener's own took its turn),
  *   `error {message}`.
@@ -22,9 +22,15 @@ import { findVoice, onPath, SPEAKERS, type SpeakerName, type Voice } from "./voi
  * Closing the listener's standard input (ssh ended) stops it at once, as `stop` does.
  */
 export const PROTOCOL_VERSION = 1;
-/** The longest line the listener accepts, and the most fragments in one reading. */
+/** The longest line the listener accepts, and the most fragments in one `fragments` message. */
 export const MAX_LINE_BYTES = 1024 * 1024;
 export const MAX_FRAGMENTS = 5000;
+/** Room left in each `fragments` line for its type, lead, speed and brackets. */
+const LINE_OVERHEAD_BYTES = 1024;
+/** The longest line the agent host accepts from the listener; a longer one ends the reading there (fallback). */
+export const MAX_REPLY_LINE_BYTES = 64 * 1024;
+/** The most characters of the listener's own text (an error, ssh's stderr) shown in a warning or failure. */
+const MAX_SHOWN = 500;
 /** How often the listener says it is alive, so the agent host's watchdog (S13) only fires on a silent listener. */
 const BEAT_MS = 2000;
 /** How often the listener checks the fragment heard, and whether a reading of its own took its turn. */
@@ -34,6 +40,43 @@ export const DOWNLOAD_COMMAND = "reply-reader --download-voice";
 const BOUNDARIES: readonly Boundary[] = ["sentence", "line", "paragraph"];
 /** The longest lead silence the listener plays before the first fragment, in seconds. */
 const MAX_LEAD_SECONDS = 10;
+
+/**
+ * Text from the listener or ssh, fit to show (R1-001): control characters (C0, DEL, C1) and Unicode line/paragraph
+ * separators removed, trimmed, at most MAX_SHOWN characters.
+ */
+export function shown(text: string): string {
+	const bare = text.replace(/[\p{Cc}\u2028\u2029]/gu, "").trim();
+	return bare.length > MAX_SHOWN ? `${bare.slice(0, MAX_SHOWN)}…` : bare;
+}
+
+type Item = { text: string; after: Boundary };
+
+/**
+ * The items split into `fragments` messages that each fit the listener's caps (S20): at most MAX_FRAGMENTS items and
+ * MAX_LINE_BYTES per line, JSON included. Undefined when one fragment alone cannot fit a line.
+ */
+function batches(fragments: readonly Fragment[]): Item[][] | undefined {
+	const room = MAX_LINE_BYTES - LINE_OVERHEAD_BYTES;
+	const all: Item[][] = [];
+	let batch: Item[] = [];
+	let bytes = 0;
+	for (const fragment of fragments) {
+		const item = { text: fragment.text, after: fragment.after };
+		// Its JSON and the comma before it.
+		const size = Buffer.byteLength(JSON.stringify(item)) + 1;
+		if (size > room) return undefined;
+		if (batch.length === MAX_FRAGMENTS || bytes + size > room) {
+			all.push(batch);
+			batch = [];
+			bytes = 0;
+		}
+		batch.push(item);
+		bytes += size;
+	}
+	all.push(batch);
+	return all;
+}
 
 export type ReadingOptions = Parameters<typeof startReading>[0] & {
 	/**
@@ -74,6 +117,7 @@ function startListenerReading(options: ReadingOptions, output: Output & { ssh: s
 	let fallback: { reading: Reading; from: number } | undefined;
 	let child: ChildProcess | undefined;
 	let watchdog: NodeJS.Timeout | undefined;
+	const messages = batches(fragments);
 	let resolveDone!: () => void;
 	let rejectDone!: (error: Error) => void;
 	const done = new Promise<void>((resolve, reject) => {
@@ -124,14 +168,9 @@ function startListenerReading(options: ReadingOptions, output: Output & { ssh: s
 		switch (message.type) {
 			case "ready":
 				if (message.v !== PROTOCOL_VERSION) {
-					return fail(`the listener's reply-reader speaks protocol ${String(message.v)}, this one ${PROTOCOL_VERSION} (update both)`);
+					return fail(`the listener's reply-reader speaks protocol ${shown(String(message.v))}, this one ${PROTOCOL_VERSION} (update both)`);
 				}
-				send({
-					type: "fragments",
-					lead: options.leadSilence ?? 0,
-					speed: options.speed,
-					items: fragments.map((fragment) => ({ text: fragment.text, after: fragment.after })),
-				});
+				for (const items of messages ?? []) send({ type: "fragments", lead: options.leadSilence ?? 0, speed: options.speed, items });
 				send({ type: "end" });
 				return;
 			case "missing":
@@ -145,7 +184,7 @@ function startListenerReading(options: ReadingOptions, output: Output & { ssh: s
 			case "stopped":
 				return settle();
 			case "error":
-				return fail(`the listener failed (${String(message.message)})`);
+				return fail(`the listener failed (${shown(String(message.message))})`);
 		}
 	};
 
@@ -153,6 +192,7 @@ function startListenerReading(options: ReadingOptions, output: Output & { ssh: s
 		// After the caller has the reading in hand: onPlayer may compare it with its own.
 		await null;
 		if (stopped) return settle();
+		if (!messages) return fail(`a sentence is too long to send to the listener (over ${MAX_LINE_BYTES} bytes)`);
 		const ssh = onPath("ssh", env);
 		if (!ssh) return fail("ssh was not found on PATH");
 		const args = [
@@ -185,13 +225,20 @@ function startListenerReading(options: ReadingOptions, output: Output & { ssh: s
 		});
 		started.on("close", (code, signal) => {
 			if (stopped) return settle();
-			const detail = stderr.trim().split("\n").at(-1)?.trim();
+			const detail = shown(stderr.trim().split("\n").at(-1) ?? "");
 			if (code === 255) return fail(`the listener did not answer (${detail || "ssh exit code 255"})`);
 			if (code === 127) return fail("reply-reader is not installed on the listener");
 			fail(`the listener stopped (${detail || (signal ? `killed by ${signal}` : `exit code ${code}`)})`);
 		});
 		if (started.pid !== undefined) options.onPlayer?.(started.pid);
-		createInterface({ input: started.stdout! }).on("line", (line) => {
+		const lines = new LineSplitter(MAX_REPLY_LINE_BYTES);
+		started.stdout?.on("data", (chunk: Buffer) => {
+			if (settled || fallback || child !== started) return;
+			const got = lines.push(chunk);
+			if (got === undefined) return fail(`the listener sent a line longer than ${MAX_REPLY_LINE_BYTES} bytes`);
+			for (const line of got) receive(line);
+		});
+		const receive = (line: string): void => {
 			if (settled || fallback || child !== started) return;
 			let message: unknown;
 			try {
@@ -203,7 +250,7 @@ function startListenerReading(options: ReadingOptions, output: Output & { ssh: s
 			if (!message || typeof message !== "object") return;
 			arm();
 			handle(message as Record<string, unknown>);
-		});
+		};
 		arm();
 		const name = (Object.keys(SPEAKERS) as SpeakerName[]).find((key) => SPEAKERS[key].sid === speaker.sid) ?? "male";
 		send({ type: "hello", v: PROTOCOL_VERSION, voice: name });
@@ -238,6 +285,25 @@ function packageVersion(): string {
 	return "unknown";
 }
 
+/** Splits chunks into lines; `push` gives undefined once a line grows past `max` bytes without its newline. */
+class LineSplitter {
+	private pending = Buffer.alloc(0);
+	private readonly max: number;
+	constructor(max: number) {
+		this.max = max;
+	}
+	push(chunk: Buffer): string[] | undefined {
+		this.pending = Buffer.concat([this.pending, chunk]);
+		const got: string[] = [];
+		for (let at = this.pending.indexOf(10); at !== -1; at = this.pending.indexOf(10)) {
+			if (at > this.max) return undefined;
+			got.push(this.pending.subarray(0, at).toString("utf8"));
+			this.pending = this.pending.subarray(at + 1);
+		}
+		return this.pending.length > this.max ? undefined : got;
+	}
+}
+
 /** Splits `input` into lines; throws when one grows past MAX_LINE_BYTES without its newline. */
 async function* lines(input: AsyncIterable<Buffer | string>): AsyncGenerator<string> {
 	let pending = Buffer.alloc(0);
@@ -259,8 +325,10 @@ class ProtocolError extends Error {}
  * `reply-reader --serve` (S20), on the listener: reads the agent host's lines on `stdin` and answers on `write`. It
  * never downloads (no terminal): without the voice it answers `missing`. It takes this machine's reading turn (S1) the
  * way an auto-read does, waiting while a reading of its own plays, and gives it up when a reading of its own takes it
- * (`stopped`). Its player is under S13 like any other (startReading). Standard input closing or `stop` ends the
- * reading at once. Writes no file besides the reading lock. Resolves with the exit code; nothing throws.
+ * (`stopped`); a remote reading still waiting for its turn is dropped (`stopped`) by an explicit drop of the machine's
+ * waiting readings (/read-stop or /read there, S8). Its player is under S13 like any other (startReading); the agent
+ * host's OWNER_VAR is never passed on. Standard input closing, `stop` or `signal` (Ctrl+C, the agent host gone) ends
+ * the reading at once. Writes no file besides the reading lock. Resolves with the exit code; nothing throws.
  */
 export async function serve(deps: {
 	env: NodeJS.ProcessEnv;
@@ -270,13 +338,28 @@ export async function serve(deps: {
 	loadSherpa?: (voice: Voice) => Promise<SherpaTts>;
 	signal?: AbortSignal;
 }): Promise<number> {
-	const { env } = deps;
+	const env = { ...deps.env };
+	// An agent host's owner (ssh SendEnv) means nothing here; this machine's readings set their own (S13).
+	delete env[OWNER_VAR];
 	const send = (message: object): void => deps.write(`${JSON.stringify(message)}\n`);
 	const input = lines(deps.stdin)[Symbol.asyncIterator]();
-	/** The next message; undefined at the end of input or on `stop`. */
+	// Interrupted (Ctrl+C, the agent host gone): no more input is awaited and the reading, if any, stops.
+	let quit = false;
+	let reading: Reading | undefined;
+	let wake!: () => void;
+	const interrupted = new Promise<{ done: true; value: undefined }>((resolve) => (wake = () => resolve({ done: true, value: undefined })));
+	const ended = (): void => {
+		quit = true;
+		wake();
+		reading?.stop();
+	};
+	if (deps.signal?.aborted) ended();
+	else deps.signal?.addEventListener("abort", ended, { once: true });
+	/** The next message; undefined at the end of input, on `stop`, or once interrupted. */
 	const next = async (): Promise<Record<string, unknown> | undefined> => {
 		for (;;) {
-			const { value, done } = await input.next();
+			if (quit) return undefined;
+			const { value, done } = await Promise.race([input.next(), interrupted]);
 			if (done) return undefined;
 			if (value.trim() === "") continue;
 			let message: unknown;
@@ -310,29 +393,26 @@ export async function serve(deps: {
 		}
 		send({ type: "ready", v: PROTOCOL_VERSION, version: packageVersion() });
 
-		const batch = await next();
-		if (!batch) return 0;
-		if (batch.type !== "fragments" || !Array.isArray(batch.items)) throw new ProtocolError("expected fragments");
-		if (batch.items.length > MAX_FRAGMENTS) throw new ProtocolError(`more than ${MAX_FRAGMENTS} fragments`);
-		const fragments: Fragment[] = batch.items.map((item: unknown) => {
-			const { text, after } = (item ?? {}) as Record<string, unknown>;
-			if (typeof text !== "string" || !BOUNDARIES.includes(after as Boundary)) throw new ProtocolError("a fragment needs text and after");
-			return { text, role: "paragraph", after: after as Boundary };
-		});
-		const speed = typeof batch.speed === "number" && batch.speed >= MIN_SPEED && batch.speed <= MAX_SPEED ? batch.speed : undefined;
-		const lead = typeof batch.lead === "number" && batch.lead >= 0 ? Math.min(batch.lead, MAX_LEAD_SECONDS) : 0;
-		const end = await next();
-		if (!end) return 0;
-		if (end.type !== "end") throw new ProtocolError(`expected end, got ${String(end.type)}`);
+		// One or more `fragments` messages, each within the caps, then `end`; lead and speed come from the first.
+		const first = await next();
+		if (!first) return 0;
+		const fragments: Fragment[] = [];
+		for (let batch: Record<string, unknown> | undefined = first; batch?.type !== "end"; batch = await next()) {
+			if (!batch) return 0;
+			if (batch.type !== "fragments" || !Array.isArray(batch.items)) {
+				throw new ProtocolError(batch === first ? "expected fragments" : `expected fragments or end, got ${String(batch.type)}`);
+			}
+			if (batch.items.length > MAX_FRAGMENTS) throw new ProtocolError(`more than ${MAX_FRAGMENTS} fragments`);
+			for (const item of batch.items as unknown[]) {
+				const { text, after } = (item ?? {}) as Record<string, unknown>;
+				if (typeof text !== "string" || !BOUNDARIES.includes(after as Boundary)) throw new ProtocolError("a fragment needs text and after");
+				fragments.push({ text, role: "paragraph", after: after as Boundary });
+			}
+		}
+		const speed = typeof first.speed === "number" && first.speed >= MIN_SPEED && first.speed <= MAX_SPEED ? first.speed : undefined;
+		const lead = typeof first.lead === "number" && first.lead >= 0 ? Math.min(first.lead, MAX_LEAD_SECONDS) : 0;
 
 		// From here, the end of input or `stop` (or this process being interrupted) ends the reading at once.
-		let quit = false;
-		let reading: Reading | undefined;
-		const ended = (): void => {
-			quit = true;
-			reading?.stop();
-		};
-		deps.signal?.addEventListener("abort", ended, { once: true });
 		void (async () => {
 			try {
 				while (await next());
@@ -340,13 +420,19 @@ export async function serve(deps: {
 			ended();
 		})();
 
-		// This machine's own turn (S1): wait while a reading of its own plays; never stop it.
+		// This machine's own turn (S1): wait while a reading of its own plays; never stop it. The waiting mark is taken
+		// once, so an explicit drop of what waits here (/read-stop, /read, S8) drops this reading too (A6, L157).
 		const lock = openReadingLock(env);
+		const mark = lock?.waitingMark();
 		while (lock && !quit) {
-			const taken = lock.claimIfFree(lock.waitingMark());
+			const taken = lock.claimIfFree(mark);
 			if (typeof taken === "object") {
 				claim = taken;
 				break;
+			}
+			if (taken === "dropped") {
+				send({ type: "stopped" });
+				return 0;
 			}
 			await new Promise((resolve) => setTimeout(resolve, CHECK_MS));
 		}
