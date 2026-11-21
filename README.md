@@ -55,13 +55,14 @@ sentence is synthesized, about 1-2 s.
 | `/read <file.md>` | | Reads a Markdown file (see below). |
 | `/read <target>#<section> [rest]` | | Reads one section of a file or reply (see [Reading one section](#reading-one-section)). |
 | `/read-stop` | Stop the reading playing, in this or another Pi session (Esc or a new /read stop it too) | Stops the reading playing, in any Pi session of yours on this machine, and says `Reading stopped.`; with nothing playing anywhere, says `Nothing is being read.` |
-| `/read-auto [on\|questions\|off]` | Read each new reply aloud when the agent finishes, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles | See [Auto-read](#auto-read). |
+| `/read-auto [on\|questions\|off]` | Read each new reply aloud as soon as it is written, and each prompt that waits for you, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles | See [Auto-read](#auto-read). |
 | `/read-output [name]` | Choose where readings sound: local or an output from outputs.json | With a name, switches to that output; without one, asks. See [Outputs](#outputs). |
 | `/read-voice [male\|female]` | Choose the voice for the next readings: male (default) or female | With a name, switches the voice; without one, asks. |
 | `/read-speed [n]` | Choose the voice speed for the next readings, 0.5 to 2.0 (default 1.1); saved for later sessions | With a number, sets that speed; without one, offers 0.8 to 1.5. See [Speed](#speed). |
 
 While a reading plays, the footer shows `Reading P12.R1 on local · Esc stops` (or the file name, as in
-`Reading notes.md on local · Esc stops`).
+`Reading notes.md on local · Esc stops`). While readings wait in this session's line (auto-reads and
+**Read after it**, see [Auto-read](#auto-read)), it adds how many: `Reading P12.R2 on local · 2 waiting · Esc stops`.
 
 - **Esc** stops the reading. While a reading plays, Esc is taken by the reader, so it does not also
   interrupt a running agent turn at that moment; press it again for that.
@@ -132,15 +133,21 @@ and nothing plays. Only `#` headings count.
 
 ### Auto-read
 
-`/read-auto on` reads each new reply aloud when the agent finishes its turn; `/read-auto questions` reads only
-the reply's closing **Needs your decision** section (nothing when a reply has none); `/read-auto off` stops.
+`/read-auto on` reads each new reply aloud as soon as it is written, even while the agent keeps working (a
+reply followed by a background-job or subagent notice that starts another turn is read too); every reply is
+read once, in order. `/read-auto questions` reads only each reply's closing **Needs your decision** section
+(nothing when a reply has none); `/read-auto off` stops.
 `/read-auto` alone toggles (off → on in full, on → off). It is per session and starts off in every new
 session. Replies from before you turned it on are never read. Auto-readings use the same output, voice,
 speed, footer and stop keys (Esc, `/read-stop`) as `/read`, and still follow one reading per machine.
 
 Auto-read never interrupts. A reply that is due while a reading plays, in this session or in any other Pi or
 Gentle Shell session or `reply-reader` command on the machine, waits and is read once nothing plays; one
-session's replies are read in order. Nothing shows while a reply waits. Explicit actions still win: a manual
+session's replies are read in order. While replies wait, the footer of the session reading counts its own
+waiting ones (`· 2 waiting ·`); another session's waiting replies are not counted. When a reading ends and
+another waits, there is about 1.5 s of silence, then the next one starts by saying which it is, in its own
+language: `Respuesta P12.R2.` / `Reply P12.R2.` for a reply, `Archivo notas.md.` / `File notes.md.` for a
+file. A reading with nothing before it starts at once, with no announcement. Explicit actions still win: a manual
 `/read` (or a read from pi-reply-thread's Alt+R view) answered **Stop it and read now**, `/read-stop` and Esc
 stop the reading playing, as always, and also drop every auto-read waiting on the machine at that moment; replies due after that are read
 as usual. The standalone `reply-reader` command drops them too when it starts reading. `/read-auto off` and the
@@ -151,6 +158,22 @@ A manual `/read` (or a read from Alt+R) that you answer **Read after it** joins 
 the replies already waiting in its session, once nothing plays, and `/read-stop`, Esc or another manual reading
 drops it, here or in any session. It is not an auto-read, so `/read-auto off` keeps it; the end of the session
 drops it.
+
+#### Prompts that wait for you
+
+With auto-read on (in full or `questions`; prompts are questions too), when the agent stops to ask you
+something, that prompt is read through the same line, in the conversation's language:
+
+| Prompt | What is read |
+|---|---|
+| `ask_user_question` / `ask_user_choice` | Each question with its option labels, never descriptions or values: "Pregunta 1 de 2: ¿Cómo suena? Opciones: uno, Bien; dos, Mal." ("Pregunta: …" for a single question; "Question 1 of 2: … Options: one, …" in English) |
+| A command confirmation (a confirm while a `bash` call waits to run) | "Confirmación de comando: git." / "Command confirmation: git.": the program only, never its arguments (they may hold private values); `NAME=value` assignments, a leading `sudo` or `env` and the program's folder are left out |
+| Any other dialog (RDD consent, other confirms and selects) | Its title only; nothing when it has none (Pi does not give extensions a dialog's text or options) |
+
+Once you answer (the dialog closes, or the tool finishes), its reading is dropped if it still waits, or
+stopped if it plays; other waiting readings stay. A prompt that waited starts after the usual 1.5 s of
+silence, without an announcement (it says what it is). The reader's own questions (output, voice, speed,
+download, **Something is being read.**) are never read. With auto-read off, nothing of this plays.
 
 ### pi-reply-thread
 

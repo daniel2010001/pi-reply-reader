@@ -68,9 +68,12 @@ for (const command of commands) {
 	const [cmd, ...args] = command.split(" ");
 	const rest = args.join(" ");
 	if (cmd === "turn") {
-		events.get("agent_start")({ type: "agent_start" }, ctx);
-		branch.push(user("u" + branch.length, "sigue"), assistant("a" + branch.length, rest));
-		events.get("agent_settled")({ type: "agent_settled", aborted: false }, ctx);
+		// Pi stores each message after its message_end handlers return; the reader looks on the next turn (T42).
+		for (const entry of [user("u" + branch.length, "sigue"), assistant("a" + branch.length, rest)]) {
+			events.get("message_end")({ type: "message_end", message: entry.message }, ctx);
+			branch.push(entry);
+		}
+		await sleep(0);
 	} else if (cmd === "await") {
 		while (!existsSync(root + "/" + rest)) await sleep(20);
 	} else if (cmd === "answer") {
@@ -363,7 +366,7 @@ describe("auto-read queue across sessions (T32, S8)", { timeout: 40000 }, () => 
 		finish(playerA);
 		await a.exited;
 		await playThrough(() => b.seen().statuses.filter((x) => x === null).length === 2);
-		expect(await readings(b, 2)).toEqual(["Reading P3.R1 on local · Esc stops", null, "Reading P4.R1 on local · Esc stops", null]);
+		expect(await readings(b, 2)).toEqual(["Reading P3.R1 on local · 1 waiting · Esc stops", null, "Reading P4.R1 on local · Esc stops", null]);
 		go("go-b");
 		await b.exited;
 		expect(lines()).toEqual([`start ${a.child.pid}`, `end ${a.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`, `start ${b.child.pid}`, `end ${b.child.pid}`]);
@@ -505,7 +508,7 @@ console.log(JSON.stringify({ auto: typeof auto === "string" ? auto : "claim", cl
 		const log = lines();
 		expect(log).toHaveLength(10);
 		for (let i = 0; i < log.length; i += 2) expect(log[i + 1]).toBe(log[i].replace("start", "end"));
-		expect(b.seen().statuses).toEqual(["Reading P3.R1 on local · Esc stops", null, "Reading P4.R1 on local · Esc stops", null]);
+		expect(b.seen().statuses).toEqual(["Reading P3.R1 on local · 1 waiting · Esc stops", null, "Reading P4.R1 on local · Esc stops", null]);
 	});
 
 	it("a manual /read cancelled at the output question drops nothing and stops nothing (S8)", async () => {

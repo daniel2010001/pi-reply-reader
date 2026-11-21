@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Auto-read also reads the prompts that wait for you, through the same line: an `ask_user_question` /
+  `ask_user_choice` call reads each question with its option labels only ("Pregunta 1 de 2: ¿Cómo suena?
+  Opciones: uno, Bien; dos, Mal."), a command confirmation reads only the program ("Confirmación de comando:
+  git." / "Command confirmation: git."), and any other dialog its title. Once answered, a prompt's reading is
+  dropped, or stopped if it plays. The reader's own questions are not read.
+- Auto-read reads every new reply, each once and in order, as soon as it is written, even while the agent keeps
+  working. Before, only the last reply of a run was read: a reply followed by a background-job or subagent
+  notice that started another turn was skipped.
+- Between queued readings (auto-reads and **Read after it**): about 1.5 s of silence, then the next reading
+  says which it is, in its language (`Respuesta P12.R2.` / `Reply P12.R2.`, `Archivo notas.md.` / `File
+  notes.md.`). A reading with nothing before it starts as before. While readings wait, the footer counts them:
+  `Reading P12.R2 on local · 2 waiting · Esc stops`.
 - A player that hangs no longer piles up: when `paplay` takes no audio for 15 s (say, a Pulse server behind an
   SSH tunnel whose far side does not answer), or does not finish within the audio's length plus 15 s, the
   reading fails with `Playback on "<output>" failed: timed out`. `REPLY_READER_PLAYER_TIMEOUT` sets the 15 s

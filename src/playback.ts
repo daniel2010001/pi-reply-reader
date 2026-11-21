@@ -68,6 +68,11 @@ export function startReading(options: {
 	 * pass playerTimeoutMs(env, warn), which also warns about an invalid value.
 	 */
 	timeoutMs?: number;
+	/**
+	 * Seconds of silence the player gets before the first fragment (S14: the gap before a reading that waited in the
+	 * line). Written at once, so the first synthesis overlaps it.
+	 */
+	leadSilence?: number;
 }): Reading {
 	const { voice, speaker, fragments: list, output, env, loadSherpa = loadSherpaTts, speed = DEFAULT_SPEED, onPlayer } = options;
 	let player: ChildProcess | undefined;
@@ -185,6 +190,8 @@ export function startReading(options: {
 			pump();
 		};
 
+		const lead = Math.round((options.leadSilence ?? 0) * tts.sampleRate);
+		if (lead > 0) send(new Float32Array(lead));
 		// Samples of pause already written after the last audible fragment; undefined before the first one.
 		let paused: number | undefined;
 		for (const [index, fragment] of list.entries()) {

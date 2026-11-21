@@ -545,8 +545,10 @@ describe("(S13) a player that hangs is ended", { timeout: 15000 }, () => {
 		);
 		const loadSherpa = fakeSherpa(() => new Float32Array(tone(200_000)));
 		const started = Date.now();
-		await startReading({ voice, speaker: SPEAKERS.female, fragments: spokenFragments("Uno. Dos."), output: local, env, loadSherpa, timeoutMs: 500 }).done;
-		expect(Date.now() - started).toBeGreaterThan(1000);
+		// The timeout leaves room for a loaded machine (each read spawns dd, tee and wc) while the whole reading, about
+		// 2.5 s at this rate, still runs well past it.
+		await startReading({ voice, speaker: SPEAKERS.female, fragments: spokenFragments("Uno. Dos."), output: local, env, loadSherpa, timeoutMs: 1500 }).done;
+		expect(Date.now() - started).toBeGreaterThan(1500);
 		const audio = pcm("paplay.audio");
 		expect(audio.length).toBe(400_000 + Math.round(0.35 * 44100));
 	});
