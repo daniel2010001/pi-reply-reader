@@ -1,20 +1,22 @@
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir, hostname as osHostname } from "node:os";
 import { basename, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type Component, Key, matchesKey, SelectList } from "@earendil-works/pi-tui";
+import { type Component, type KeyId, SelectList } from "@earendil-works/pi-tui";
 import { createAutoQueue, type StartResult } from "../src/auto-queue.ts";
 import { loadOutputs, type Output } from "../src/outputs.ts";
+import { keyName, loadPauseKey } from "../src/pause-key.ts";
 import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
 import { playerTimeoutMs, reapOrphans } from "../src/player.ts";
 import { questionsSection } from "../src/questions.ts";
 import { askedQuestions, commandMarkdown, commandProgram, dialogTitle, QUESTION_TOOLS, questionsMarkdown } from "../src/prompts.ts";
 import { isPing, parseReadRequest, READER_EVENTS, READER_EVENTS_VERSION } from "../src/reader-events.ts";
-import { type Claim, openReadingLock } from "../src/reading-lock.ts";
+import { type Claim, openReadingLock, type WaitingItem } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { sectionFrom } from "../src/sections.ts";
 import { formatSpeed, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSpeed } from "../src/settings.ts";
-import { announcement, detectLanguage, type Language, languageOfWords, speechNarration } from "../src/speech-text.ts";
+import { announcement, detectLanguage, type Fragment, type Language, languageOfWords, speechNarration } from "../src/speech-text.ts";
 import { downloadVoice, findVoice, SPEAKERS, type SpeakerName, type Voice } from "../src/voice.ts";
 
 const STATUS = "reply-reader";
@@ -48,8 +50,27 @@ const CUT_AFTER = "Read after it";
 const CUT_CHOICES = [CUT_NOW, CUT_AFTER];
 /** Just the question, centred over whatever is open (pi-reply-thread's Alt+R view is a capturing overlay too). */
 const CUT_OVERLAY = { anchor: "center", width: 48 } as const;
+/**
+ * Play order (S16, L135): a session's next waiting reading yields to an earlier one of another session while that
+ * session's line was published (its heartbeat, every WATCH_MS while it has readings waiting) within FRESH_MS, so a
+ * frozen or dead session stops holding the line about FRESH_MS after its last beat; 2 s leaves room for a loaded
+ * machine's late timers. YIELD_CAP_MS bounds the wait for one reading even for a session that beats but never starts;
+ * it counts only time the machine is free and the session yields, never time another reading plays (L138). A session
+ * waiting on a human (the output question, a voice download confirm) publishes it and is never yielded to.
+ */
+const FRESH_MS = 2000;
+const YIELD_CAP_MS = 10_000;
 /** Seconds of silence before a reading that waited in the line, which then says which it is (S14). */
 const GAP_SECONDS = 1.5;
+/** What /read-pause, /read-stop and /read-next say (S1, S15, S16). */
+const NOTHING_READ = "Nothing is being read.";
+const PAUSED = "Reading paused.";
+const RESUMED = "Reading resumed.";
+const PROMPT_STOPPED = "Reading stopped: a prompt is not paused.";
+const CANNOT_PAUSE = "The reading playing cannot be paused (it is not in a Pi session); /read-stop ends it.";
+const NOTHING_WAITS = "Nothing waits to be read.";
+const SKIPPED = "Skipped to the next reading.";
+const NOTHING_NEXT = "Reading stopped; nothing else waits.";
 
 /** The part of Pi's theme the question uses. */
 interface QuestionTheme {
@@ -104,16 +125,19 @@ function readProblem(error: NodeJS.ErrnoException): string {
 }
 
 /**
- * Reads replies aloud on request only (S1): `/read` speaks the latest reply or one by ID, a new reading,
- * Esc or `/read-stop` stops the one playing, `/read-output` picks where it sounds (S4) and `/read-voice` picks the male
+ * Reads replies aloud on request only (S1): `/read` speaks the latest reply or one by ID, a new reading or
+ * `/read-stop` ends the one playing or paused; the pause key (Alt+M, or settings.json `pauseKey`) or `/read-pause`
+ * pauses it and resumes it from the start of the fragment it was in (S15; a blocking prompt's reading is ended
+ * instead); Esc is Pi's, never the reader's (L145, L147); `/read-queue` lists what waits on the
+ * machine and `/read-next` ends the current reading so the next one waiting starts (S16); `/read-output` picks where it sounds (S4) and `/read-voice` picks the male
  * or female voice (S3), `/read-speed` the voice speed, saved in settings.json (S3). `/read <file.md>` reads a Markdown file the same way (S6). Nothing plays by itself.
  * One reading per machine (S1, T21): through `$XDG_RUNTIME_DIR/pi-reply-reader/`, a new reading in any session
  * stops the one playing in another, `/read-stop` stops it too, and the session stopped that way just clears its footer.
  * `/read <target>#<section>` reads only the section under a matching heading, or on to the end with `rest` (S9). `/read-auto` (S8) reads each new reply, or only its
  * "Needs your decision" section, as soon as it is stored, each once and in order (T42); it is off at every session start. Auto-read never
  * interrupts (S8 Queue, T32): a reply due while a reading plays here or in another session waits, in order, and is read
- * once the machine is free; an explicit /read (or read request), /read-stop or Esc drops every reply waiting on the
- * machine, and /read-auto off or the session's end drops this session's. A reading that waited in this line starts after
+ * once the machine is free; an explicit /read (or read request) or /read-stop drops every reply waiting on the
+ * machine (the pause key pauses instead, S15), and /read-auto off or the session's end drops this session's. A reading that waited in this line starts after
  * 1.5 s of silence by saying which reply or file it is, and the footer counts what waits (S14, T38).
  * Ask before cutting (S8, T33): a manual /read or read request while a reading plays anywhere asks "Something is being
  * read.": "Stop it and read now" (the above), "Read after it" (it waits like an auto-read, after this session's waiting
@@ -127,27 +151,41 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * answered with ready, ready is also sent at each session start, and a read request reads its text like `/read`.
  */
 export function createReplyReader(
-	deps: { env?: NodeJS.ProcessEnv; hostname?: string; loadSherpa?: (voice: Voice) => Promise<SherpaTts> } = {},
+	deps: {
+		env?: NodeJS.ProcessEnv;
+		hostname?: string;
+		loadSherpa?: (voice: Voice) => Promise<SherpaTts>;
+		/** Test seam: while it returns true, this session's line starts nothing, as a session slow to claim (S16). */
+		holdLine?: () => boolean;
+		/** Test seam: replaces YIELD_CAP_MS (S16). */
+		yieldCapMs?: number;
+	} = {},
 ) {
+	const yieldCapMs = deps.yieldCapMs ?? YIELD_CAP_MS;
 	const env = deps.env ?? process.env;
 	const hostname = deps.hostname ?? osHostname();
 
 	return (pi: ExtensionAPI): void => {
-		let current:
-			| {
-					reading: Reading;
-					ctx: ExtensionContext;
-					claim?: Claim;
-					watch?: ReturnType<typeof setInterval>;
-					/** What the footer names, and where it sounds. */
-					name: string;
-					output: string;
-					/** The footer last shown for it. */
-					shown?: string;
-					/** A blocking prompt's reading (S18): its answer stops it. */
-					prompt?: string;
-			  }
-			| undefined;
+		/** This session's reading, playing or paused (S15). */
+		interface Current {
+			/** Its player and synthesis; undefined while paused. */
+			reading?: Reading;
+			ctx: ExtensionContext;
+			claim?: Claim;
+			watch?: ReturnType<typeof setInterval>;
+			/** What the footer names, and where it sounds. */
+			name: string;
+			output: string;
+			/** The footer last shown for it. */
+			shown?: string;
+			/** A blocking prompt's reading (S18): its answer stops it, and a pause ends it instead (S15). */
+			prompt?: string;
+			/** The fragment `reading` started from; paused, the one it resumes from (S15). */
+			from: number;
+			/** Starts playing again from fragment `from`, with the same voice, speed and output (S15). */
+			play: (from: number) => void;
+		}
+		let current: Current | undefined;
 		/** The output chosen in this session, by name; asked on the first reading. */
 		let chosen: string | undefined;
 		/** The voice for the next reading in this session (S3: male unless changed). */
@@ -158,7 +196,11 @@ export function createReplyReader(
 		let sessionSpeed: number | undefined;
 		/** Whether this session already reported a problem in settings.json. */
 		let speedWarned = false;
-		let unsubscribe: (() => void) | undefined;
+		/** The pause key (S15, L147): settings.json `pauseKey`, else Alt+M; read once, as Pi registers shortcuts at load. */
+		const pauseKey = loadPauseKey(env);
+		const pauseName = keyName(pauseKey.key);
+		/** Whether the problem with `pauseKey` was told (once, at the first session start with a UI). */
+		let pauseKeyWarned = false;
 		/** This session's auto-read mode (S8: off at session start). */
 		let auto: AutoMode = "off";
 		/**
@@ -171,8 +213,6 @@ export function createReplyReader(
 		/** Ends this session's subscriptions on `pi.events`. */
 		let unsubscribeEvents: (() => void) | undefined;
 
-		/** How many "Something is being read." questions are open; Esc belongs to them meanwhile. */
-		let asking = 0;
 		/** Counts session starts and ends: an answer given after the session it was asked in ended or restarted is dropped. */
 		let generation = 0;
 		/** How many of the reader's own prompts (output, voice, speed, download confirm, the cut question) are open (S18). */
@@ -185,6 +225,14 @@ export function createReplyReader(
 		const prompts = new Set<string>();
 		/** Numbers dialogs, so each gets its own prompt key. */
 		let dialogs = 0;
+		/** Names this session's published line on the machine (S16). */
+		const lineToken = randomUUID();
+		/**
+		 * When the latest reading joined the line; each later one joins strictly after it. Sub-millisecond wall-clock time,
+		 * so readings two sessions queue within the same millisecond still list in the order they came (S16).
+		 */
+		let lastJoined = 0;
+		const joined = (): number => (lastJoined = Math.max(performance.timeOrigin + performance.now(), lastJoined + 0.001));
 
 		/**
 		 * A reply due for auto-read, or a manual request answered "Read after it" (T33), with the machine's waiting mark
@@ -202,12 +250,78 @@ export function createReplyReader(
 			file?: true;
 			/** A blocking prompt (S18): the key its answer drops it by. It says what it is, so it gets no announcement. */
 			prompt?: string;
+			/** When it joined the line (S16: the machine's list is in this order). */
+			at: number;
 		}
 		/** Whether a reading plays (or is starting) in this session or anywhere on the machine. */
 		const playing = (): boolean => current !== undefined || (openReadingLock(env)?.busy() ?? false);
+		/**
+		 * The first reading of this line while it yields to an earlier one elsewhere (S16): the free time spent yielding
+		 * so far, and the check that last counted (unset while another reading plays, so that time is not counted, L138).
+		 */
+		let yielding: { at: number; spent: number; last?: number } | undefined;
+		/**
+		 * Whether this line's first reading lets an earlier one of another session go first, so readings play in
+		 * /read-queue's order (S16, L135): while that session still beats (FRESH_MS) and is not waiting on a human, and
+		 * for at most the yield cap of free time per reading (L138).
+		 */
+		const yields = (): boolean => {
+			const head = queue.items[0];
+			const lock = head ? openReadingLock(env) : undefined;
+			const now = Date.now();
+			const earlier =
+				head !== undefined &&
+				(lock?.waitingList() ?? []).some(
+					(item) => item.token !== lineToken && item.at < head.at && !item.asking && item.beat !== undefined && now - item.beat < FRESH_MS,
+				);
+			if (!head || !earlier) {
+				yielding = undefined;
+				return false;
+			}
+			if (yielding?.at !== head.at) yielding = { at: head.at, spent: 0 };
+			if (yielding.last !== undefined) yielding.spent += now - yielding.last;
+			yielding.last = now;
+			return yielding.spent < yieldCapMs;
+		};
+		/** Whether this line must wait: a reading plays (its time does not count toward the yield cap), or it yields. */
+		const lineBusy = (): boolean => {
+			if (playing()) {
+				if (yielding) yielding.last = undefined;
+				return true;
+			}
+			return (deps.holdLine?.() ?? false) || yields();
+		};
+		/** How many of this session's questions to a human (output, voice download) are open before a reading (S16, L138). */
+		let humanWait = 0;
+		const human = async <T>(prompt: () => Promise<T>): Promise<T> => {
+			humanWait++;
+			publish();
+			try {
+				return await prompt();
+			} finally {
+				humanWait--;
+				publish();
+			}
+		};
+		/** Republishes this session's line every WATCH_MS while it has readings waiting: its heartbeat (S16). */
+		let beating: ReturnType<typeof setInterval> | undefined;
+		const heartbeat = (): void => {
+			if (queue.size === 0 && !queue.starting) {
+				clearInterval(beating);
+				beating = undefined;
+				return;
+			}
+			if (beating) return;
+			// Each beat also checks whether the line emptied meanwhile (a start dropped while it waited on a human, L138).
+			beating = setInterval(() => {
+				publish();
+				heartbeat();
+			}, WATCH_MS);
+			beating.unref?.();
+		};
 		/** This session's waiting auto-reads; without a usable XDG_RUNTIME_DIR it only waits for this session's readings. */
 		const queue = createAutoQueue<Waiting>({
-			busy: playing,
+			busy: lineBusy,
 			start: (item, still, waited) =>
 				readAloud(item.ctx, item.name, item.label, item.markdown, item.language, {
 					mark: item.mark,
@@ -219,7 +333,40 @@ export function createReplyReader(
 					return "done" as const;
 				}),
 			retryMs: WATCH_MS,
+			// The footer follows at each place that changes the line, as before, and other sessions' lines on its checks.
+			onChange: () => {
+				publish();
+				heartbeat();
+			},
 		});
+
+		/** This session as /read-queue names it: its name (Pi's /name), else its working folder. */
+		const sessionLabel = (): string => {
+			const ctx = latest;
+			if (!ctx) return "a Pi session";
+			const named = (ctx.sessionManager as Partial<ExtensionContext["sessionManager"]>).getSessionName?.();
+			return named || basename(ctx.cwd) || ctx.cwd;
+		};
+		/**
+		 * What tells this session apart from another with the same label in /read-queue (S16): the last four characters of
+		 * Pi's session id (its random part), else of this line's token.
+		 */
+		const sessionTag = (): string | undefined => {
+			const id = (latest?.sessionManager as Partial<ExtensionContext["sessionManager"]> | undefined)?.getSessionId?.();
+			return typeof id === "string" && id ? id.replace(/-/g, "").slice(-4) : undefined;
+		};
+		/** Publishes this session's line next to the reading lock, so every session sees the machine's (S16). */
+		const publish = (): void => {
+			// The one being started stays listed until it claims the machine, so no other session takes its turn meanwhile.
+			const line = queue.starting && !current ? [queue.starting, ...queue.items] : queue.items;
+			const items: WaitingItem[] = line.map((item) => ({ name: item.name, at: item.at, mark: item.mark }));
+			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), items, sessionTag(), humanWait > 0);
+		};
+		/** How many readings wait: on the machine, or in this session's line without a usable XDG_RUNTIME_DIR (S16). */
+		const waitingCount = (): number => {
+			const lock = openReadingLock(env);
+			return lock ? lock.waitingList().length : queue.size;
+		};
 
 		/** Runs one of the reader's own prompts; a ui_prompt_start meanwhile is the reader's and is not read (S18). */
 		const own = async <T>(prompt: () => Promise<T>): Promise<T> => {
@@ -242,29 +389,59 @@ export function createReplyReader(
 			});
 
 		/**
-		 * Shows this session's reading in the footer, with how many readings wait in this session's line (S14):
-		 * `Reading P12.R2 on local · 2 waiting · Esc stops`. Shown again only when it changed.
+		 * Shows this session's reading in the footer, with how many readings wait on the machine (S14, S16):
+		 * `Reading P12.R2 on local · 2 waiting · Alt+M pauses`, or paused (S15) `Paused P12.R2 · Alt+M resumes · /read-stop ends`.
+		 * Shown again only when it changed.
 		 */
 		const footer = (): void => {
 			if (!current) return;
-			const waiting = queue.size;
-			const text = `Reading ${current.name} on ${current.output} · ${waiting > 0 ? `${waiting} waiting · ` : ""}Esc stops`;
+			const waiting = waitingCount();
+			const count = waiting > 0 ? `${waiting} waiting · ` : "";
+			const text = current.reading
+				? `Reading ${current.name} on ${current.output} · ${count}${pauseName} pauses`
+				: `Paused ${current.name} · ${count}${pauseName} resumes · /read-stop ends`;
 			if (text === current.shown) return;
 			current.shown = text;
 			current.ctx.ui.setStatus(STATUS, text);
 		};
 
-		/** Ends this session's reading and clears its footer; another session's reading is left alone. */
+		/** Ends this session's reading, playing or paused, and clears its footer; another session's reading is left alone. */
 		const stop = (): void => {
 			if (!current) return;
 			const { reading, ctx, claim, watch } = current;
 			current = undefined;
 			clearInterval(watch);
-			reading.stop();
+			reading?.stop();
 			claim?.release();
 			ctx.ui.setStatus(STATUS, undefined);
 			// A reply waiting for this reading may start now.
 			queue.kick();
+		};
+
+		/**
+		 * Pauses this session's reading (S15): its player ends, and it keeps its turn on the machine with no player, so
+		 * nothing waiting starts and the S13 watchdog has nothing to watch. It resumes from the start of the fragment
+		 * being heard. A prompt's reading (S18) is ended instead: the prompt is still on screen, and what waits goes on.
+		 */
+		const pause = (): void => {
+			const state = current;
+			if (!state?.reading) return;
+			if (state.prompt) return stop();
+			const { reading } = state;
+			state.from += reading.position();
+			state.reading = undefined;
+			state.claim?.setPaused(true);
+			reading.stop();
+			footer();
+		};
+
+		/** Resumes this session's paused reading from the fragment it was in (S15). */
+		const resume = (): void => {
+			const state = current;
+			if (!state || state.reading) return;
+			state.claim?.setPaused(false);
+			state.play(state.from);
+			footer();
 		};
 
 		/** All outputs, telling the user about any entry of outputs.json that was skipped. */
@@ -303,7 +480,7 @@ export function createReplyReader(
 
 		/**
 		 * Reads Markdown aloud: the voice (download confirm), the output (asked on first use), the speed and voice of this
-		 * session, the footer, Esc, /read-stop and one reading per machine. Used by /read, read requests and auto-read.
+		 * session, the footer, the pause key, /read-stop and one reading per machine. Used by /read, read requests and auto-read.
 		 * `name` is what the footer names, `label` what the "nothing to read" message names.
 		 * Explicit (no `auto`): stops the reading playing and drops every waiting auto-read on the machine. Auto: starts
 		 * only when nothing plays and its reply was not dropped (`still`, the waiting mark), else answers "busy" or "done".
@@ -329,7 +506,7 @@ export function createReplyReader(
 				try {
 					voice = await downloadVoice({
 						env,
-						confirm: async (message) => ctx.hasUI && own(() => ctx.ui.confirm("Reply reader voice", message)),
+						confirm: async (message) => ctx.hasUI && human(() => own(() => ctx.ui.confirm("Reply reader voice", message))),
 					});
 				} catch (error) {
 					ctx.ui.notify((error as Error).message, "error");
@@ -341,7 +518,7 @@ export function createReplyReader(
 				}
 			}
 
-			const output = await outputForReading(ctx);
+			const output = await human(() => outputForReading(ctx));
 			if (!output) {
 				ctx.ui.notify("Reading cancelled: no output chosen.", "info");
 				return "done";
@@ -354,56 +531,79 @@ export function createReplyReader(
 				// Dropped while asking (an explicit action, /read-auto off, the session's end): nothing plays.
 				if (!auto.still()) return "done";
 				if (current) return "busy";
-				const taken = lock?.claimIfFree(auto.mark);
+				const taken = lock?.claimIfFree(auto.mark, { pausable: true, prompt: auto.prompt !== undefined });
 				if (taken === "dropped") return "done";
 				if (taken === "busy") return "busy";
 				claim = taken;
 			} else {
 				queue.clear();
 				stop();
-				claim = lock?.claim({ dropWaiting: true });
+				claim = lock?.claim({ dropWaiting: true, pausable: true });
 			}
 			const speed = speedForReading(ctx);
 			// An invalid REPLY_READER_PLAYER_TIMEOUT is reported once per process and the default used (S13 f).
 			const timeoutMs = playerTimeoutMs(env, (message) => ctx.ui.notify(message, "warning"));
+			// Resuming (S15) uses the voice, speed and output the reading started with.
+			const voiceOf = SPEAKERS[speaker];
+			const fragments: readonly Fragment[] =
+				auto?.announce && auto.announce !== "prompt"
+					? [...announcement(auto.announce, name, narration.language), ...narration.fragments]
+					: narration.fragments;
+			const state: Current = { ctx, claim, name, output: output.name, prompt: auto?.prompt, from: 0, play: () => {} };
 			/** Stopped by another session: no message, just the footer. */
 			const stoppedElsewhere = (): void => {
-				if (current?.reading === reading) stop();
+				if (current === state) stop();
 			};
-			const reading = startReading({
-				voice,
-				speaker: SPEAKERS[speaker],
-				fragments:
-					auto?.announce && auto.announce !== "prompt"
-						? [...announcement(auto.announce, name, narration.language), ...narration.fragments]
-						: narration.fragments,
-				leadSilence: auto?.announce ? GAP_SECONDS : undefined,
-				output,
-				env,
-				loadSherpa: deps.loadSherpa,
-				speed,
-				timeoutMs,
-				onPlayer: (pid) => {
-					if (claim && !claim.setPlayer(pid)) stoppedElsewhere();
-				},
-			});
-			const watch = claim
+			/** Plays from fragment `from`; the gap before a reading that waited only comes before its very start (S14). */
+			const play = (from: number, leadSilence?: number): void => {
+				const reading = startReading({
+					voice,
+					speaker: voiceOf,
+					fragments: fragments.slice(from),
+					leadSilence,
+					output,
+					env,
+					loadSherpa: deps.loadSherpa,
+					speed,
+					timeoutMs,
+					onPlayer: (pid) => {
+						// A player of a reading paused meanwhile is already being ended; it must not stand for this one.
+						if (state.reading !== reading) return;
+						if (claim && !claim.setPlayer(pid)) stoppedElsewhere();
+					},
+				});
+				state.reading = reading;
+				state.from = from;
+				reading.done
+					.catch((error: Error) => {
+						// A player killed by a newer reading or /read-stop elsewhere fails; that is not an error here.
+						if (current === state && state.reading === reading && !claim?.lost()) ctx.ui.notify(error.message, "error");
+					})
+					.finally(() => {
+						// Paused (S15): this reading ended on purpose and the state waits to resume.
+						if (current !== state || state.reading !== reading) return;
+						stop();
+					});
+			};
+			state.play = (from) => play(from);
+			play(0, auto?.announce ? GAP_SECONDS : undefined);
+			// Another session's /read-stop, newer reading, /read-next or /read-pause (S1, S15, S16) reach this reading through
+			// its entry; the footer also follows what waits on the machine.
+			state.watch = claim
 				? setInterval(() => {
-						if (claim.lost()) stoppedElsewhere();
+						if (current !== state) return;
+						if (claim.lost()) return stoppedElsewhere();
+						const wanted = claim.paused();
+						if (wanted === true && state.reading) pause();
+						else if (wanted === false && !state.reading) resume();
+						footer();
 					}, WATCH_MS)
 				: undefined;
-			watch?.unref();
-			current = { reading, ctx, claim, watch, name, output: output.name, prompt: auto?.prompt };
+			state.watch?.unref();
+			current = state;
+			// Started: it no longer waits in the machine's list (S16).
+			publish();
 			footer();
-			reading.done
-				.catch((error: Error) => {
-					// A player killed by a newer reading or /read-stop elsewhere fails; that is not an error here.
-					if (current?.reading === reading && !claim?.lost()) ctx.ui.notify(error.message, "error");
-				})
-				.finally(() => {
-					if (current?.reading !== reading) return;
-					stop();
-				});
 			return "done";
 		};
 
@@ -412,7 +612,6 @@ export function createReplyReader(
 		 * (Alt+R); elsewhere (RPC, a host without overlays) through ctx.ui.select. Undefined when dismissed.
 		 */
 		const askCut = async (ctx: ExtensionContext): Promise<"now" | "after" | undefined> => {
-			asking++;
 			ownPrompts++;
 			try {
 				const choice =
@@ -424,7 +623,6 @@ export function createReplyReader(
 						: await ctx.ui.select(ASK_CUT, CUT_CHOICES);
 				return choice === CUT_NOW ? "now" : choice === CUT_AFTER ? "after" : undefined;
 			} finally {
-				asking--;
 				ownPrompts--;
 			}
 		};
@@ -448,7 +646,7 @@ export function createReplyReader(
 				// The session ended or restarted while the question was open: nothing plays in it, no message.
 				if (!answer || generation !== asked) return;
 				if (answer === "after") {
-					queue.push({ ctx, name, label, markdown, language, mark: openReadingLock(env)?.waitingMark(), manual: true, file });
+					queue.push({ ctx, name, label, markdown, language, mark: openReadingLock(env)?.waitingMark(), manual: true, file, at: joined() });
 					footer();
 					return;
 				}
@@ -518,14 +716,91 @@ export function createReplyReader(
 		});
 
 		command("read-stop", {
-			description: "Stop the reading playing, in this or another Pi session (Esc or a new /read stop it too)",
+			description: "End the reading, playing or paused, in this or another Pi session, and drop the ones waiting (a new /read ends it too)",
 			handler: async (_args, ctx) => {
 				const here = current !== undefined;
 				queue.clear();
 				stop();
 				// Also drops every auto-read waiting on the machine (S8).
 				const elsewhere = openReadingLock(env)?.stopOthers() ?? false;
-				ctx.ui.notify(here || elsewhere ? "Reading stopped." : "Nothing is being read.", "info");
+				ctx.ui.notify(here || elsewhere ? "Reading stopped." : NOTHING_READ, "info");
+			},
+		});
+
+		/** /read-pause and the pause key (S15, L147): pauses or resumes this session's reading, else another session's. */
+		const togglePause = (ctx: ExtensionContext): void => {
+			if (current) {
+				if (current.prompt) {
+					stop();
+					ctx.ui.notify(PROMPT_STOPPED, "info");
+				} else if (current.reading) {
+					pause();
+					ctx.ui.notify(PAUSED, "info");
+				} else {
+					resume();
+					ctx.ui.notify(RESUMED, "info");
+				}
+				return;
+			}
+			// Another session's reading (S1): its own session pauses or resumes it on its next check.
+			const result = openReadingLock(env)?.togglePause();
+			const messages = { paused: PAUSED, resumed: RESUMED, stopped: PROMPT_STOPPED, unsupported: CANNOT_PAUSE };
+			ctx.ui.notify(result ? messages[result] : NOTHING_READ, "info");
+		};
+
+		command("read-pause", {
+			description: `Pause the reading playing, in this or another Pi session, or resume it from the sentence it was in (${pauseName} too)`,
+			handler: async (_args, ctx) => togglePause(ctx),
+		});
+
+		// Esc is Pi's (it interrupts the agent, closes dialogs): the reader never takes it (L145, L147).
+		pi.registerShortcut(pauseKey.key as KeyId, {
+			description: "Pause the reading playing, in this or another Pi session, or resume it (as /read-pause)",
+			handler: async (ctx) => {
+				latest = ctx;
+				togglePause(ctx);
+			},
+		});
+
+		command("read-queue", {
+			description: "List the readings waiting on this machine, in order, with their sessions",
+			handler: async (_args, ctx) => {
+				const lock = openReadingLock(env);
+				if (!lock) {
+					// No XDG_RUNTIME_DIR: no session can see another's line, so this one lists its own and says so.
+					const items = queue.items;
+					ctx.ui.notify(
+						items.length === 0
+							? NOTHING_WAITS
+							: ["Waiting in this session (other sessions are not visible without XDG_RUNTIME_DIR):", ...items.map((item, at) => `${at + 1}. ${item.name}`)].join("\n"),
+						"info",
+					);
+					return;
+				}
+				const list = lock.waitingList();
+				ctx.ui.notify(
+					list.length === 0
+						? NOTHING_WAITS
+						: [
+								"Waiting on this machine:",
+								...list.map((item, at) => `${at + 1}. ${item.name} · ${item.session}${item.token === lineToken ? " (this session)" : ""}`),
+							].join("\n"),
+					"info",
+				);
+			},
+		});
+
+		command("read-next", {
+			description: "End the reading, playing or paused, in this or another Pi session, and go on with the next one waiting",
+			handler: async (_args, ctx) => {
+				const waiting = waitingCount() > 0;
+				// Unlike /read-stop, what waits is kept: the next one starts once the machine is free, announced (S14).
+				if (current) stop();
+				else if (!(openReadingLock(env)?.skipOthers() ?? false)) {
+					ctx.ui.notify(NOTHING_READ, "info");
+					return;
+				}
+				ctx.ui.notify(waiting ? SKIPPED : NOTHING_NEXT, "info");
 			},
 		});
 
@@ -645,7 +920,7 @@ export function createReplyReader(
 				if (markdown === undefined) continue;
 				// Queued, never awaited: it waits for any reading playing here or on the machine (S8 Queue), and a download
 				// confirm or the output question must not hold the agent.
-				queue.push({ ctx, name: reply.id, label: reply.id, markdown, language: detectLanguage(reply.text), mark });
+				queue.push({ ctx, name: reply.id, label: reply.id, markdown, language: detectLanguage(reply.text), mark, at: joined() });
 				footer();
 			}
 		};
@@ -676,7 +951,7 @@ export function createReplyReader(
 		const queuePrompt = (ctx: ExtensionContext, key: string, name: string, markdown: string, language: Language): void => {
 			if (!speechNarration(markdown, language).text) return;
 			prompts.add(key);
-			queue.push({ ctx, name, label: name, markdown, language, mark: openReadingLock(env)?.waitingMark(), prompt: key });
+			queue.push({ ctx, name, label: name, markdown, language, mark: openReadingLock(env)?.waitingMark(), prompt: key, at: joined() });
 			footer();
 		};
 
@@ -787,19 +1062,10 @@ export function createReplyReader(
 			warned = false;
 			sessionSpeed = undefined;
 			speedWarned = false;
-			unsubscribe?.();
-			unsubscribe = ctx.hasUI
-				? ctx.ui.onTerminalInput((data) => {
-						// While the "Something is being read." question is open, Esc dismisses it and stops nothing (T33).
-						if (asking > 0 || !current || !matchesKey(data, Key.escape)) return undefined;
-						// Esc stops this session's reading and drops every auto-read waiting on the machine (S8): dropped first,
-						// so no waiter can take the machine between the reading ending and the drop.
-						queue.clear();
-						openReadingLock(env)?.dropWaiting();
-						stop();
-						return { consume: true };
-					})
-				: undefined;
+			if (pauseKey.problem && ctx.hasUI && !pauseKeyWarned) {
+				pauseKeyWarned = true;
+				ctx.ui.notify(pauseKey.problem, "warning");
+			}
 			listen();
 		});
 
@@ -808,8 +1074,7 @@ export function createReplyReader(
 			// The session's end drops its waiting replies (S8), before its reading ends and would start one.
 			queue.clear();
 			stop();
-			unsubscribe?.();
-			unsubscribe = undefined;
+			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), []);
 			unsubscribeEvents?.();
 			unsubscribeEvents = undefined;
 			latest = undefined;

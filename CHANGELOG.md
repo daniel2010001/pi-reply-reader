@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- Esc is Pi's again: the reader never takes it. Esc interrupts the agent and closes dialogs and screens
+  (pi-reply-thread's Alt+R view, `ask_user_question`) even while a reading plays or is paused. Before, a reading
+  took every Esc and paused or resumed instead, so a view could not be closed and the agent could not be
+  interrupted. Readings stop with Esc no longer: Alt+M pauses and resumes them. Set `"pauseKey"` in
+  `settings.json` (as `"alt+o"`) to use another key. A key that is not valid or that Pi, gentle-pi,
+  pi-reply-thread or the terminal already uses gets one warning, and Alt+M is used instead.
+- Pause and resume: `/read-pause` pauses the reading playing, in this or any other Pi session on the machine
+  (`Reading paused.`), and run again resumes it (`Reading resumed.`); with nothing playing it says `Nothing is
+  being read.`. The pause key, Alt+M, does the same with the same messages (`pauseKey` in settings.json picks
+  another one). Pausing drops nothing that waits. A paused reading's player is ended (so the player timeout never fires on it) but it keeps
+  its turn on the machine: nothing waiting starts. Resuming starts again from the sentence, item or row that was
+  being heard, with the same voice and speed. The footer reads `Reading P12.R1 on local · Alt+M pauses`, and
+  while paused `Paused P12.R1 · Alt+M resumes · /read-stop ends`. `/read-stop` ends a reading, playing or paused,
+  and drops what waits, as before. A prompt's reading is ended instead of paused (`Reading stopped: a prompt is
+  not paused.`); a `reply-reader` command reading cannot be paused from Pi.
+- See and skip the line: `/read-queue` lists the readings waiting on the machine, in order, with their session
+  (`Waiting on this machine:` / `1. P12.R2 · api (this session)`), or says `Nothing waits to be read.`;
+  `/read-next` ends the reading, playing or paused, here or in another session, and the next one waiting starts
+  with its announcement (`Skipped to the next reading.`; `Reading stopped; nothing else waits.` when nothing
+  does). Each session publishes its line under `$XDG_RUNTIME_DIR/pi-reply-reader/`, and the footer's
+  `· N waiting ·` now counts every session's; without a usable `XDG_RUNTIME_DIR` both stay per session.
+  Readings play in the listed order: a session with readings waiting refreshes its line every 250 ms, and a
+  session whose next reading has an earlier one of another session before it yields to it while that
+  session's line is under 2 s old (10 s at most per reading, counting only time the machine is free, never
+  time another reading plays), so a frozen session holds the others about 2 s. A session waiting for you (the
+  output question, the voice download confirm) says so in its line and is not waited for, and a session that
+  ends or drops its line stops beating at once, even mid-start. Two sessions with the
+  same label are listed with a tag from their session ID (`api #3f9c`).
 - Auto-read also reads the prompts that wait for you, through the same line: an `ask_user_question` /
   `ask_user_choice` call reads each question with its option labels only ("Pregunta 1 de 2: ¿Cómo suena?
   Opciones: uno, Bien; dos, Mal."), a command confirmation reads only the program ("Confirmación de comando:
@@ -13,7 +41,7 @@
 - Between queued readings (auto-reads and **Read after it**): about 1.5 s of silence, then the next reading
   says which it is, in its language (`Respuesta P12.R2.` / `Reply P12.R2.`, `Archivo notas.md.` / `File
   notes.md.`). A reading with nothing before it starts as before. While readings wait, the footer counts them:
-  `Reading P12.R2 on local · 2 waiting · Esc stops`.
+  `Reading P12.R2 on local · 2 waiting · Alt+M pauses`.
 - A player that hangs no longer piles up: when `paplay` takes no audio for 15 s (say, a Pulse server behind an
   SSH tunnel whose far side does not answer), or does not finish within the audio's length plus 15 s, the
   reading fails with `Playback on "<output>" failed: timed out`. `REPLY_READER_PLAYER_TIMEOUT` sets the 15 s
@@ -46,17 +74,17 @@
 - `npm run build` removes `dist/` before compiling, so a packed tarball never carries stale files.
 - Auto-read no longer interrupts: a reply due while a reading plays, in this or any other session on the
   machine, waits and is read once nothing plays, one session's replies in order. A manual `/read` (or a read
-  request from another extension), `/read-stop` and Esc stop the reading playing and drop every auto-read
+  request from another extension) and `/read-stop` stop the reading playing and drop every auto-read
   waiting on the machine; `/read-auto off` and the session's end drop that session's. Sessions coordinate
   through `$XDG_RUNTIME_DIR/pi-reply-reader/` as before (`waiting.json` and a short `reading.lock` mutex);
   without it a reply only waits for its own session.
 - A manual `/read` or a read request (pi-reply-thread's Alt+R `s`) while something is being read anywhere on
   the machine asks first: `Something is being read.` with **Stop it and read now** (as before: stop, drop the
   waiting auto-reads, read) and **Read after it** (it waits like an auto-read, after the session's waiting
-  replies; `/read-stop`, Esc and another manual reading drop it, `/read-auto off` keeps it). Dismissing the
+  replies; `/read-stop` and another manual reading drop it, `/read-auto off` keeps it). Dismissing the
   question changes nothing. In Pi's TUI the question is a small overlay of its own, so it shows above the Alt+R
   view; elsewhere it uses the host's selector. With nothing playing, or without a UI, it reads at once as
-  before. `/read-stop` and Esc never ask.
+  before. `/read-stop` and the pause key never ask.
 - The `reply-reader` command now drops the auto-reads waiting in Pi sessions when it starts reading, as a
   manual `/read` does; it never asks.
 
