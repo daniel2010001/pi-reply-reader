@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The SSH audio tunnel example now ends in a private Unix socket (`unix:/run/user/<uid>/reply-reader-pulse.sock`,
+  mode 0600) instead of the loopback port `127.0.0.1:4714`, which every local process and host-network container
+  could reach, with the desktop's microphone behind it. New `examples/reply-reader-vps-audio.service` for a cloud
+  VPS that cannot reach the desktop: the desktop opens a reverse tunnel. Existing `tcp:` outputs keep working.
 - Music steps aside while the reader speaks: by default, music played by gentle-stream goes down to volume 20
   (of gentle-stream's 0-100) and its volume comes back after. `/read-music off|pause|duck [level]` chooses (saved in `settings.json` as
   `"music": { "mode": "duck", "level": 20 }`; no argument shows it). Pause mode plays the music again only if it

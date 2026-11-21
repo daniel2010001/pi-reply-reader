@@ -1,34 +1,43 @@
 # Carries pi-reply-reader's audio from the agent host (the machine that runs Pi; in this example a
 # home server) to the PipeWire of the listener (the machine you sit at; here called "desktop"), over
-# SSH. It also serves as the "fallback" of a listener output that synthesizes on the listener
-# (README, "Synthesize on the listener").
+# SSH. Use it when the agent host can reach the listener (same LAN, Tailscale); for a cloud VPS that
+# cannot reach it, use reply-reader-vps-audio.service on the listener instead. It also serves as the
+# "fallback" of a listener output that synthesizes on the listener (README, "Synthesize on the listener").
 #
 # Why a tunnel and not a TCP PulseAudio port on the desktop: pipewire-pulse has no IP allow-list,
 # so a LAN port would let anyone on the network play sound on the desktop or record its microphone
-# unless a firewall closes it. The tunnel opens nothing on the desktop: it forwards a loopback port
-# on this machine to the desktop's own Pulse socket, with SSH doing authentication and encryption.
+# unless a firewall closes it. The tunnel opens nothing on the desktop: it forwards a socket on this
+# machine to the desktop's own Pulse socket, with SSH doing authentication and encryption.
+#
+# Why a Unix socket and not a loopback port such as 127.0.0.1:4714: the forwarded Pulse socket gives
+# the desktop's whole audio, microphone included. A loopback port is open to every process here,
+# other users and containers with host networking. The socket is created mode 0600
+# (StreamLocalBindMask=0177) inside your 0700 runtime dir (%t), so only your user can open it.
 #
 # Install (on the machine that runs Pi):
 #     cp examples/reply-reader-desktop-audio.service ~/.config/systemd/user/
 #     systemctl --user daemon-reload && systemctl --user enable --now reply-reader-desktop-audio.service
-# Then name the output in ~/.config/pi-reply-reader/outputs.json:
-#     { "desktop": "tcp:127.0.0.1:4714" }
+# Then name the output in ~/.config/pi-reply-reader/outputs.json (your user ID on this machine,
+# `id -u`, in place of 1000):
+#     { "desktop": "unix:/run/user/1000/reply-reader-pulse.sock" }
 # Verify (prints the desktop's host name; plays nothing):
-#     PULSE_SERVER=tcp:127.0.0.1:4714 pactl info | grep 'Host Name'
+#     PULSE_SERVER=unix:$XDG_RUNTIME_DIR/reply-reader-pulse.sock pactl info | grep 'Host Name'
 #
 # It is down while the desktop is off; the restart policy retries, and a reading on "desktop"
 # fails with "Playback on "desktop" failed: ..." in the meantime.
 
 [Unit]
-Description=SSH tunnel for pi-reply-reader audio to the desktop's PipeWire (loopback port 4714)
+Description=SSH tunnel for pi-reply-reader audio to the desktop's PipeWire (socket in the runtime dir)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# The desktop's address and its user's runtime dir, in one place.
+# The desktop's address and its user's ID there, in one place.
 Environment=AUDIO_HOST=192.168.1.50
 Environment=AUDIO_UID=1000
+# StreamLocalBindUnlink replaces a socket left by a dropped connection; without it the next start
+# fails with "Could not request local forwarding".
 ExecStart=/usr/bin/ssh -N \
   -o BatchMode=yes \
   -o ExitOnForwardFailure=yes \
@@ -37,7 +46,9 @@ ExecStart=/usr/bin/ssh -N \
   -o ServerAliveCountMax=3 \
   -o ControlMaster=no \
   -o ControlPath=none \
-  -L 127.0.0.1:4714:/run/user/${AUDIO_UID}/pulse/native \
+  -o StreamLocalBindMask=0177 \
+  -o StreamLocalBindUnlink=yes \
+  -L %t/reply-reader-pulse.sock:/run/user/${AUDIO_UID}/pulse/native \
   you@${AUDIO_HOST}
 Restart=always
 RestartSec=15

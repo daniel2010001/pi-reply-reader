@@ -60,6 +60,7 @@ describe("package metadata", () => {
 		const paths: string[] = packed.files.map((file: { path: string }) => file.path);
 		expect(paths).toEqual(expect.arrayContaining(["package.json", "README.md", "CHANGELOG.md", "LICENSE", "extensions/reply-reader.ts", "src/cli.ts"]));
 		expect(paths).toContain("examples/reply-reader-desktop-audio.service");
+		expect(paths).toContain("examples/reply-reader-vps-audio.service");
 		const unwanted = paths.filter((path) => /^(odd|tests|bin|node_modules|\.atl)\/|^\.|\.tgz$|^pnpm-|^tsconfig/.test(path));
 		expect(unwanted).toEqual([]);
 	});

@@ -544,9 +544,19 @@ synthesized on the server, so its audio has to reach the desktop's speakers.
 let anyone on the network play sound on the desktop or record its microphone, unless a firewall closes it.
 
 **Use an SSH tunnel instead.** It opens nothing on the desktop: a systemd user unit on the server forwards a
-loopback port (`127.0.0.1:4714`) to the desktop's own Pulse socket, with SSH doing authentication and
-encryption. The unit is in [`examples/reply-reader-desktop-audio.service`](examples/reply-reader-desktop-audio.service)
-(it ships with the package, under `node_modules/pi-reply-reader/examples/` once installed).
+socket on the server to the desktop's own Pulse socket, with SSH doing authentication and encryption. The
+unit is in [`examples/reply-reader-desktop-audio.service`](examples/reply-reader-desktop-audio.service)
+(it ships with the package, under `node_modules/pi-reply-reader/examples/` once installed). Only audio
+travels: the text is synthesized on the server and never leaves it.
+
+**Why a Unix socket and not a loopback port such as `127.0.0.1:4714`?** The forwarded Pulse socket gives the
+desktop's whole audio, microphone included. A loopback port is open to every process on the server, other
+users and containers with host networking. The unit creates `reply-reader-pulse.sock` with mode 0600 inside
+your 0700 runtime dir (`/run/user/<uid>`), so only your user can open it. Whoever can act as your user on the
+server (root included) can still use the desktop's audio while the tunnel is up.
+
+This unit needs the server to reach the desktop (same LAN, Tailscale). For a cloud VPS that cannot reach
+the desktop, see [From a cloud VPS](#from-a-cloud-vps).
 
 1. On the server, edit the copy for your desktop: `AUDIO_HOST` (the desktop's address), `AUDIO_UID` (your
    user ID on the desktop, `id -u`) and the user in `you@${AUDIO_HOST}`. The server must reach the
@@ -558,16 +568,17 @@ encryption. The unit is in [`examples/reply-reader-desktop-audio.service`](examp
    systemctl --user daemon-reload && systemctl --user enable --now reply-reader-desktop-audio.service
    ```
 
-3. Name the output in `~/.config/pi-reply-reader/outputs.json`:
+3. Name the output in `~/.config/pi-reply-reader/outputs.json`, with your user ID on the server (`id -u`)
+   in place of `1000`:
 
    ```json
-   { "desktop": "tcp:127.0.0.1:4714" }
+   { "desktop": "unix:/run/user/1000/reply-reader-pulse.sock" }
    ```
 
 4. Verify (prints the desktop's host name; plays nothing):
 
    ```sh
-   PULSE_SERVER=tcp:127.0.0.1:4714 pactl info | grep 'Host Name'
+   PULSE_SERVER=unix:$XDG_RUNTIME_DIR/reply-reader-pulse.sock pactl info | grep 'Host Name'
    ```
 
 5. In Pi, `/read-output desktop`, then `/read`.
@@ -580,6 +591,36 @@ server, enable lingering for your user there (`loginctl enable-linger`).
 
 The desktop needs only PipeWire (with pipewire-pulse) or PulseAudio and an SSH server. It needs no TTS, no
 Pi and no change to its configuration. A new client is one more unit and one more entry in `outputs.json`.
+
+An older setup with `tcp:127.0.0.1:4714` keeps working; moving to the socket is the unit above plus the new
+`outputs.json` value. Readings sound the same either way (ten `pactl info` calls took 79 ms over the port
+and 76 ms over the socket).
+
+### From a cloud VPS
+
+A VPS usually cannot reach a desktop behind NAT, so the desktop connects out and asks the VPS to forward a
+socket back (`ssh -R`). The unit is
+[`examples/reply-reader-vps-audio.service`](examples/reply-reader-vps-audio.service), installed **on the
+desktop**:
+
+1. On the VPS, once: `loginctl enable-linger`, so `/run/user/<uid>` exists without a login session.
+2. On the desktop, edit the copy: `VPS_HOST`, `VPS_UID` (your user ID on the VPS) and the user in
+   `you@${VPS_HOST}`. The desktop must reach the VPS with `ssh` and a key, without a password prompt.
+3. Install it on the desktop:
+
+   ```sh
+   cp examples/reply-reader-vps-audio.service ~/.config/systemd/user/
+   systemctl --user daemon-reload && systemctl --user enable --now reply-reader-vps-audio.service
+   ```
+
+4. On the VPS, name the output (`VPS_UID` in place of `1000`) and verify as in steps 3 and 4 above:
+   `{ "desktop": "unix:/run/user/1000/reply-reader-pulse.sock" }`.
+
+The VPS's sshd creates the socket with mode 0600. It keeps it after a dropped connection and then refuses the
+next forward (`remote port forwarding failed for listen path …`), so the unit removes it before connecting;
+`StreamLocalBindUnlink yes` in the VPS's `sshd_config` makes that step unnecessary. Root on the VPS, and so
+your cloud provider, can use the desktop's audio while the tunnel is up: keep the unit stopped when you do
+not need readings there.
 
 ## Synthesize on the listener
 
@@ -608,7 +649,7 @@ On the agent host:
 4. Name the output in `~/.config/pi-reply-reader/outputs.json`, with a fallback (optional, recommended):
 
    ```json
-   { "desktop": { "ssh": "you@listener", "fallback": "tcp:127.0.0.1:4714" } }
+   { "desktop": { "ssh": "you@listener", "fallback": "unix:/run/user/1000/reply-reader-pulse.sock" } }
    ```
 
    `ssh` is what you would type after `ssh` (a host, `user@host`, or a `Host` alias of your SSH client
