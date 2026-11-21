@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Output } from "../src/outputs.ts";
 import { type SherpaRequest, type SherpaTts, startReading } from "../src/playback.ts";
 import { speechText, spokenFragments } from "../src/speech-text.ts";
-import { checkDeathSignal, playerTimeout, reapOrphans } from "../src/player.ts";
+import { checkDeathSignal, playerTimeout, reapOrphans, withDeathSignal } from "../src/player.ts";
 import { PLAYER_MARK } from "../src/reading-lock.ts";
 import { SPEAKERS, type Voice } from "../src/voice.ts";
 import { endProcessesOf } from "./processes.ts";
@@ -855,6 +855,37 @@ describe("(S13) review additions (T37)", { timeout: 20000 }, () => {
 		// A setpriv that fails its check is never used.
 		const broken = script("setpriv-broken", "exit 1");
 		expect(await checkDeathSignal(broken)).toBe(false);
+	});
+
+	it("(h) a check that never ends is killed at 2 s and cached as unsupported: players start without setpriv", { timeout: 10000 }, async () => {
+		// exec: the check's pid is the sleep itself, so the SIGKILL leaves nothing of it behind.
+		const setpriv = script("setpriv", `echo "$*" >> "${log("setpriv.log")}"; echo $$ > "${log("setpriv.pid")}"; exec sleep 30`);
+		const started = Date.now();
+		expect(await checkDeathSignal(setpriv)).toBe(false);
+		const took = Date.now() - started;
+		expect(took).toBeGreaterThanOrEqual(1900);
+		expect(took).toBeLessThan(3000);
+		const check = Number(read("setpriv.pid"));
+		await waitFor(() => !alive(check), 1000);
+		// Cached: asked again, it answers at once without running setpriv again.
+		const again = Date.now();
+		expect(await checkDeathSignal(setpriv)).toBe(false);
+		expect(Date.now() - again).toBeLessThan(100);
+		expect(withDeathSignal(setpriv, "/bin/paplay", ["-v"])).toEqual(["/bin/paplay", ["-v"]]);
+		expect(read("setpriv.log")).toBe(`--pdeathsig KILL ${setpriv} --version\n`);
+	});
+
+	it("(h) a missing or non-executable setpriv is cached as unsupported, even once it becomes a working one", async () => {
+		const missing = join(root, "bin", "setpriv-missing");
+		const plain = join(root, "bin", "setpriv-plain");
+		writeFileSync(plain, "#!/bin/sh\nexit 0\n");
+		for (const path of [missing, plain]) {
+			expect(await checkDeathSignal(path)).toBe(false);
+			writeFileSync(path, "#!/bin/sh\nexit 0\n");
+			chmodSync(path, 0o755);
+			expect(await checkDeathSignal(path)).toBe(false);
+			expect(withDeathSignal(path, "/bin/paplay", ["-v"])).toEqual(["/bin/paplay", ["-v"]]);
+		}
 	});
 
 	it("(h) with setpriv on PATH, a player dies with its reader even when the reader is killed outright", async () => {

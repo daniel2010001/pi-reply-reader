@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A paused reading shows in every Pi session's footer, not only the pausing one: elsewhere
+  `Paused 12 min in homelab · 3 waiting · Alt+M resumes` (the pausing session's label as in `/read-queue`, its tag
+  when two share it; the time left out under a minute), in the pausing session
+  `Paused P12.R1 · 12 min · Alt+M resumes · /read-stop ends`. A pause still never ends by itself. The pausing
+  session writes its label, tag and pause time into `reading.json`.
+- `reply-reader` and `reply-reader --serve` wait for the one-time `setpriv` check (at most 2 s) before their first
+  player, so a one-shot reading's player gets the death signal again, as in 0.2.0; Pi still never waits. The
+  check itself is killed if the process exits while it runs.
 - The one-time `setpriv --pdeathsig` check no longer blocks Pi for up to 2 s and no longer assumes `/bin/sh`: it
   runs in the background (`setpriv --pdeathsig KILL setpriv --version`) from a Pi session's start, and players
   started before it passed run without `setpriv`.

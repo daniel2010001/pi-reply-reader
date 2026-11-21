@@ -656,6 +656,19 @@ describe("reply-reader --serve (the listener's side, S20)", () => {
 		expect(agentTexts()).toEqual([]);
 	});
 
+	it("(S13 h) waits for the setpriv check before its first player: a working setpriv starts it with the death signal", async () => {
+		installVoice(join(dev, "data"));
+		const setpriv = join(dev, "bin", "setpriv");
+		script(setpriv, `echo "$*" >> "${dev}/setpriv.log"; case "$1" in --pdeathsig) shift 2; exec "$@";; --version) exit 0;; esac; exit 1`);
+		const run = serve(PROTOCOL_LINES([hello, fragments([{ text: "Hola.", after: "sentence" }]), { type: "end" }]));
+		expect(await run.code).toBe(0);
+		expect(run.lines.at(-1)).toEqual({ type: "done" });
+		const log = readFileSync(join(dev, "setpriv.log"), "utf8").trim().split("\n");
+		expect(log.slice(0, 2)).toEqual([`--pdeathsig KILL ${setpriv} --version`, "--version"]);
+		expect(log[2]).toMatch(new RegExp(`^--pdeathsig KILL ${join(dev, "bin", "paplay")} .*${PLAYER_MARK}`));
+		expect(log).toHaveLength(3);
+	});
+
 	it("standard input closing before the fragments ends it with nothing played", async () => {
 		installVoice(join(dev, "data"));
 		const run = serve(PROTOCOL_LINES([hello]), true);

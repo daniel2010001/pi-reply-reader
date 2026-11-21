@@ -66,13 +66,17 @@ sentence is synthesized, about 1-2 s.
 | `/read-music [off\|pause\|duck] [level]` | What music does while the reader speaks: off, pause, or duck [level] (lower gentle-stream to level %, default duck 20); no argument shows it; saved for later sessions | See [Music while reading](#music-while-reading). |
 
 While a reading plays, the footer shows `Reading P12.R1 on local · Alt+M pauses` (or the file name, as in
-`Reading notes.md on local · Alt+M pauses`); while it is paused, `Paused P12.R1 · Alt+M resumes · /read-stop ends`.
+`Reading notes.md on local · Alt+M pauses`); while it is paused, `Paused P12.R1 · Alt+M resumes · /read-stop ends`,
+and once a minute has passed, how long: `Paused P12.R1 · 12 min · Alt+M resumes · /read-stop ends`. Every other
+Pi session on the machine shows the pause too, with the label of the session that paused it (as `/read-queue`
+names it): `Paused 12 min in homelab · 3 waiting · Alt+M resumes` (`Paused in homelab · …` under a minute).
 The footer names the pause key in use (see [Pause and resume](#pause-and-resume)).
 While readings wait on the machine (auto-reads, **Read after it** and prompts, in any session, see
 [Auto-read](#auto-read)), it adds how many: `Reading P12.R2 on local · 2 waiting · Alt+M pauses`.
 While auto-read is on, the footer always says so, also with nothing playing: `Auto-read on · desktop` or
 `Auto-read questions · desktop` (the output chosen, or just `Auto-read on` before one is), and before a
-reading's status: `Auto-read on · Reading P12.R1 on desktop · Alt+M pauses`. With auto-read off it shows only
+reading's status: `Auto-read on · Reading P12.R1 on desktop · Alt+M pauses` (or a pause elsewhere:
+`Auto-read on · Paused 12 min in homelab · 3 waiting · Alt+M resumes`). With auto-read off it shows only
 the reading, as above.
 
 - **Alt+M** pauses the reading, and resumes it when paused, like `/read-pause` (see
@@ -105,7 +109,8 @@ the reading, as above.
   reading and a timeout send `paplay` SIGTERM, then SIGKILL 2 s later if it is still there; `reply-reader`
   waits for that before it exits. A player is also killed when Pi or `reply-reader` exits (even when killed
   outright, where `setpriv` is installed: it is checked once, in the background, from a Pi session's start, and
-  a player started before that check ended runs without it), and one left behind by a Pi that died is ended when a Pi session
+  a Pi player started before that check ended runs without it; `reply-reader` and `reply-reader --serve` wait
+  for the check, at most 2 s, before their first player), and one left behind by a Pi that died is ended when a Pi session
   starts or the next reading starts. Only players started by this package (marked with
   `--client-name=pi-reply-reader` and the `PI_REPLY_READER_OWNER` variable naming a process that is gone, in
   the same PID namespace) are touched.
@@ -128,7 +133,12 @@ and Alt+M is used. Alt+M is the default because it is free in all of them, and t
 Esc is never the pause key: it is Pi's.
 
 Pausing ends the player (`paplay` cannot be paused cleanly), so the timeout above never fires on a paused
-reading. The reading keeps its turn on the machine: nothing waiting starts while it is paused. Resuming
+reading. The reading keeps its turn on the machine: nothing waiting starts while it is paused. A pause never
+ends by itself, however long it lasts; so that a pause left behind (a session you walked away from) is never a
+mystery, every Pi session's footer shows it, where and for how long, with how many readings wait behind it:
+`Paused 12 min in homelab · 3 waiting · Alt+M resumes` (two sessions with the same label are told apart as in
+`/read-queue`, `homelab #a1b2`). The pause key or `/read-pause` in any session resumes it, and `/read-stop` in
+any session ends it. The minutes follow within a second in other sessions. Resuming
 synthesizes again from the start of the sentence, list item or table row that was being heard, with the same
 voice, speed and output, so it repeats a few words rather than skipping any (the position is estimated from
 the time each part was handed to the player, half a second early). `/read-stop` ends a paused reading as it

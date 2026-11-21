@@ -16,7 +16,8 @@ export { PLAYER_MARK } from "./player.ts";
  *
  * Pause (S15): `paused` asks the reading's own session to pause it (its player ends, the entry keeps the machine with
  * no player) or, once cleared, to resume it. Only entries marked `pausable` (a Pi session that knows how) take it; a
- * `prompt` reading (S18) is ended instead.
+ * `prompt` reading (S18) is ended instead. Once paused, its session adds when (`pausedAt`) and who it is (`session`,
+ * `tag`, `line`: its label, tag and line token as /read-queue knows them), so every session's footer can say it (S25).
  */
 interface Entry {
 	token: string;
@@ -27,9 +28,27 @@ interface Entry {
 	started: number;
 	stopped?: true;
 	paused?: true;
+	pausedAt?: number;
+	session?: string;
+	tag?: string;
+	line?: string;
 	pausable?: true;
 	prompt?: true;
 }
+
+/** Who paused a reading, as its session tells the others (S25). */
+export interface PausedBy {
+	/** Its label (/name, else its folder) and tag, as in /read-queue. */
+	session: string;
+	tag: string;
+	/** Its line token (S16), so a list of what waits can tell it apart. */
+	line: string;
+	/** When it paused, in ms. */
+	at: number;
+}
+
+/** A reading paused on the machine, as every session's footer shows it (S25). */
+export type PausedReading = PausedBy;
 
 /** What a reading's entry says about it when it is claimed (S15). */
 export interface ClaimKind {
@@ -68,8 +87,11 @@ export interface Claim {
 	release(): void;
 	/** Whether the entry asks for this reading to be paused (S15); undefined when it is no longer this reading's. */
 	paused(): boolean | undefined;
-	/** Marks this reading paused (its player cleared, as none runs) or playing again (S15). */
-	setPaused(paused: boolean): void;
+	/**
+	 * Marks this reading paused (its player cleared, as none runs), with who paused it and when (S25), or playing again
+	 * (S15).
+	 */
+	setPaused(paused: boolean, by?: PausedBy): void;
 }
 
 export interface ReadingLock {
@@ -274,12 +296,14 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 			write({ ...entry, player: pid, playerStart: startTime(pid) });
 			return true;
 		};
-		const setPaused = (paused: boolean): void => {
+		const setPaused = (paused: boolean, by?: PausedBy): void => {
 			const entry = own();
 			if (!entry) return;
-			const { paused: _was, player: _player, playerStart: _start, ...rest } = entry;
+			const rest = unpaused(entry);
+			const { player: _player, playerStart: _start, ...idle } = rest;
 			// Paused, no player runs: the entry keeps the machine through the reader's own process (S15).
-			write(paused ? { ...rest, paused: true } : entry.player === undefined ? rest : { ...rest, player: entry.player, playerStart: entry.playerStart });
+			const who = by ? { pausedAt: by.at, session: by.session, tag: by.tag, line: by.line } : {};
+			write(paused ? { ...idle, paused: true, ...who } : rest);
 		};
 		const release = (): void => {
 			if (read()?.token !== mine.token) return;
@@ -296,7 +320,7 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 				if (entry === undefined || entry.token !== mine.token) return undefined;
 				return entry.paused === true;
 			},
-			setPaused: (paused) => exclusive(() => setPaused(paused), () => setPaused(paused)),
+			setPaused: (paused, by) => exclusive(() => setPaused(paused, by), () => setPaused(paused, by)),
 		};
 	};
 
@@ -365,8 +389,7 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 				if (entry.prompt) return skip() ? "stopped" : undefined;
 				if (!entry.pausable) return "unsupported";
 				if (entry.paused) {
-					const { paused: _paused, ...rest } = entry;
-					write(rest);
+					write(unpaused(entry));
 					return "resumed";
 				}
 				write({ ...entry, paused: true });
@@ -448,6 +471,30 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 			return all.sort((a, b) => a.at - b.at);
 		},
 	};
+}
+
+/** `entry` without its pause and what its session said about it (S15, S25). */
+function unpaused(entry: Entry): Entry {
+	const { paused: _paused, pausedAt: _at, session: _session, tag: _tag, line: _line, ...rest } = entry;
+	return rest;
+}
+
+/**
+ * The reading paused on the machine (S25), once its session said who paused it and when; undefined when none is (or
+ * without a usable XDG_RUNTIME_DIR). Only reads: it creates nothing, so a session may check it often.
+ */
+export function pausedReading(env: NodeJS.ProcessEnv): PausedReading | undefined {
+	const runtime = env.XDG_RUNTIME_DIR;
+	if (!runtime || !isAbsolute(runtime)) return undefined;
+	let entry: Entry;
+	try {
+		entry = JSON.parse(readFileSync(join(runtime, "pi-reply-reader", "reading.json"), "utf8")) as Entry;
+	} catch {
+		return undefined;
+	}
+	if (entry?.paused !== true || typeof entry.pausedAt !== "number" || typeof entry.session !== "string") return undefined;
+	if (typeof entry.token !== "string" || !Number.isInteger(entry.pid) || !playing(entry)) return undefined;
+	return { session: entry.session, tag: typeof entry.tag === "string" ? entry.tag : "", line: typeof entry.line === "string" ? entry.line : "", at: entry.pausedAt };
 }
 
 /**

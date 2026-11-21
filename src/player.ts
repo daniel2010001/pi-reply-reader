@@ -213,8 +213,10 @@ const deathSignalChecks = new Map<string, Promise<boolean>>();
 /**
  * Whether `setpriv` (a path) runs and supports `--pdeathsig KILL` (S13 h): checked once per path, in the background,
  * by running `setpriv --pdeathsig KILL <setpriv> --version` (setpriv itself as the program: no shell assumed). The
- * check never blocks the JS thread; one that has not ended within 2 s is ended and counts as not supported. Started by
- * withDeathSignal at its first use, or earlier (a Pi session's start), so the first reading may already use it.
+ * check never blocks the JS thread; one that has not ended within 2 s is ended and counts as not supported, as does a
+ * setpriv that cannot be run (missing, not executable). Started by withDeathSignal at its first use, or earlier (a Pi
+ * session's start), so the first reading may already use it; the CLI and `--serve` await it before their first player
+ * (Pi never does). Like a player, the check is SIGKILLed if this process exits while it runs.
  */
 export function checkDeathSignal(setpriv: string | undefined): Promise<boolean> {
 	if (!setpriv) return Promise.resolve(false);
@@ -228,8 +230,8 @@ export function checkDeathSignal(setpriv: string | undefined): Promise<boolean> 
 			done(false);
 			return;
 		}
-		// Only the check we started is ever signalled; it keeps this process alive at most that long (the CLI exits
-		// with process.exit, so it never waits for it).
+		// Only the check we started is ever signalled; it keeps this process alive at most that long, and dies with it.
+		track(child);
 		const timer = setTimeout(() => {
 			try {
 				child.kill("SIGKILL");
