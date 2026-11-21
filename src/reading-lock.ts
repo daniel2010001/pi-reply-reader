@@ -1,16 +1,22 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { isPlayer, sameProcess, startTime, terminatePid } from "./player.ts";
 
-/** Every player we start carries this argument, so a pid can be told apart from an unrelated process. */
-export const PLAYER_MARK = "--client-name=pi-reply-reader";
+export { PLAYER_MARK } from "./player.ts";
 
 /**
  * The reading playing on this machine, shared by every Pi session and process of this user (S1, T21):
  * `$XDG_RUNTIME_DIR/pi-reply-reader/reading.json`. `token` names one reading; `stopped` marks an entry left by
  * `/read-stop`, which tells the reading it named that it was stopped. Start times come from /proc, so a pid that was
  * reused by a newer process does not count as the one recorded. Next to it, `waiting.json` holds the waiting mark of
- * the auto-read queue (S8, T32) and `reading.lock` is a short mutex around each check-and-write.
+ * the auto-read queue (S8, T32) and `reading.lock` is a short mutex around each check-and-write. Each Pi session
+ * publishes what waits in its line as `line-<token>.json` (S16), so `/read-queue` and the footer see the machine's.
+ * `project.json` remembers the project of the last reading that started (S19).
+ *
+ * Pause (S15): `paused` asks the reading's own session to pause it (its player ends, the entry keeps the machine with
+ * no player) or, once cleared, to resume it. Only entries marked `pausable` (a Pi session that knows how) take it; a
+ * `prompt` reading (S18) is ended instead.
  */
 interface Entry {
 	token: string;
@@ -20,6 +26,36 @@ interface Entry {
 	playerStart?: string;
 	started: number;
 	stopped?: true;
+	paused?: true;
+	pausable?: true;
+	prompt?: true;
+}
+
+/** What a reading's entry says about it when it is claimed (S15). */
+export interface ClaimKind {
+	/** Its session pauses and resumes it when the entry asks (a Pi session; not the CLI). */
+	pausable?: boolean;
+	/** A blocking prompt's reading (S18): a pause ends it. */
+	prompt?: boolean;
+}
+
+/** One reading waiting in a session's line, as /read-queue lists it (S16). */
+export interface WaitingItem {
+	name: string;
+	/** When it joined the line, in ms; the machine's list is in this order. */
+	at: number;
+	/** The waiting mark it was queued under; once an explicit action changed it, it no longer waits. */
+	mark: string | undefined;
+}
+
+/** A waiting reading as seen machine-wide: with its session's label and token. */
+export interface MachineWaiting extends WaitingItem {
+	session: string;
+	token: string;
+	/** When its session last published its line (its heartbeat, S16); undefined from a version that does not beat. */
+	beat?: number;
+	/** Its session waits on a human (the output question, a voice download confirm): nobody yields to it (S16, L138). */
+	asking?: true;
 }
 
 /** One reading's hold on the machine. Nothing here throws. */
@@ -30,6 +66,10 @@ export interface Claim {
 	lost(): boolean;
 	/** Drops the entry if it is still this reading's. */
 	release(): void;
+	/** Whether the entry asks for this reading to be paused (S15); undefined when it is no longer this reading's. */
+	paused(): boolean | undefined;
+	/** Marks this reading paused (its player cleared, as none runs) or playing again (S15). */
+	setPaused(paused: boolean): void;
 }
 
 export interface ReadingLock {
@@ -37,12 +77,12 @@ export interface ReadingLock {
 	 * Makes a new reading the one playing on the machine, stopping the one playing in any other session. With
 	 * `dropWaiting` (an explicit /read, S8) it also drops every auto-read waiting on the machine at that moment.
 	 */
-	claim(options?: { dropWaiting?: boolean }): Claim;
+	claim(options?: { dropWaiting?: boolean } & ClaimKind): Claim;
 	/**
 	 * For auto-read (S8 Queue, T32): claims the machine only when no reading plays, and only when no explicit action
 	 * dropped the waiting replies since `mark` was taken. Never stops a reading.
 	 */
-	claimIfFree(mark: string | undefined): Claim | "busy" | "dropped";
+	claimIfFree(mark: string | undefined, kind?: ClaimKind): Claim | "busy" | "dropped";
 	/** Whether a reading plays (or is starting) in any session; stale entries do not count. */
 	busy(): boolean;
 	/** The current waiting mark; a reply queued now remembers it, and drops itself once it changes. */
@@ -51,6 +91,30 @@ export interface ReadingLock {
 	dropWaiting(): void;
 	/** Stops the reading playing in another session, if any, and drops every waiting auto-read; true when one was playing. */
 	stopOthers(): boolean;
+	/** Ends the reading playing or paused in another session, keeping what waits (/read-next, S16); true when there was one. */
+	skipOthers(): boolean;
+	/**
+	 * Asks another session to pause its reading, or to resume it when paused (S15). "stopped" when it was a prompt's
+	 * reading (ended instead), "unsupported" when its reader cannot pause (the CLI, an older version), undefined when
+	 * nothing is being read.
+	 */
+	togglePause(): "paused" | "resumed" | "stopped" | "unsupported" | undefined;
+	/**
+	 * Publishes the line of the session `token` (S16), stamped with the time as its heartbeat; an empty line removes it.
+	 * `tag` (a few characters of Pi's session id) tells it apart from another session with the same label; the token's
+	 * last four characters otherwise. `asking`: the session waits on a human before its next reading can start.
+	 */
+	publishLine(token: string, session: string, items: readonly WaitingItem[], tag?: string, asking?: boolean): void;
+	/**
+	 * Every reading waiting on the machine, in the order each joined its line; dropped ones and dead sessions' are left
+	 * out. Two sessions with the same label are told apart as `<label> #<tag>` (S16, L135).
+	 */
+	waitingList(): MachineWaiting[];
+	/**
+	 * Makes `project` the one of the last reading that started on the machine (S19) and returns the one remembered
+	 * before it, undefined when none was.
+	 */
+	swapProject(project: string): string | undefined;
 }
 
 /** How long an explicit action waits for the mutex before acting anyway; an auto-read just tries later. */
@@ -77,6 +141,8 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 	const marks = join(dir, "waiting.json");
 	/** Held for the few microseconds of a check-and-write, so two sessions never both take a free machine (T32). */
 	const mutex = join(dir, "reading.lock");
+	/** `{ project }`: the project of the last reading that started, by any session or the command (S19). */
+	const projects = join(dir, "project.json");
 
 	const read = (): Entry | undefined => {
 		try {
@@ -102,6 +168,7 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 		}
 	};
 	const write = (entry: Entry): void => put(file, entry.token, entry);
+	const lineFile = (token: string): string => join(dir, `line-${token}.json`);
 
 	const waitingMark = (): string | undefined => {
 		try {
@@ -176,11 +243,8 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 		const live = previous !== undefined && playing(previous);
 		if (always || live) write(entry);
 		if (!live) return false;
-		if (previous.player !== undefined) {
-			try {
-				process.kill(previous.player, "SIGTERM");
-			} catch {}
-		}
+		// SIGTERM, then SIGKILL if that player ignores it (S13): its own session may be hung or gone.
+		if (previous.player !== undefined) terminatePid(previous.player, previous.playerStart);
 		return true;
 	};
 
@@ -188,14 +252,34 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 
 	/** The hold of the reading whose entry `mine` was just written. */
 	const held = (mine: Entry): Claim => {
+		/**
+		 * Whether the entry was written. Once it was, a missing entry means another reading took over and already ended
+		 * (a paused reading has no player to kill, so this is how it learns, S15/S16); if it never was (writes fail), the
+		 * reading keeps to itself as without a lock.
+		 */
+		const written = read()?.token === mine.token;
 		const lost = (): boolean => {
 			const entry = read();
-			return entry !== undefined && entry.token !== mine.token;
+			return entry === undefined ? written : entry.token !== mine.token;
+		};
+		/** The entry as it is now (a pause request may have changed it), when still this reading's. */
+		const own = (): Entry | undefined => {
+			const entry = read();
+			if (entry === undefined) return written ? undefined : mine;
+			return entry.token === mine.token ? entry : undefined;
 		};
 		const setPlayer = (pid: number): boolean => {
-			if (lost()) return false;
-			write({ ...mine, player: pid, playerStart: startTime(pid) });
+			const entry = own();
+			if (!entry) return false;
+			write({ ...entry, player: pid, playerStart: startTime(pid) });
 			return true;
+		};
+		const setPaused = (paused: boolean): void => {
+			const entry = own();
+			if (!entry) return;
+			const { paused: _was, player: _player, playerStart: _start, ...rest } = entry;
+			// Paused, no player runs: the entry keeps the machine through the reader's own process (S15).
+			write(paused ? { ...rest, paused: true } : entry.player === undefined ? rest : { ...rest, player: entry.player, playerStart: entry.playerStart });
 		};
 		const release = (): void => {
 			if (read()?.token !== mine.token) return;
@@ -207,6 +291,12 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 			setPlayer: (pid) => exclusive(() => setPlayer(pid), () => setPlayer(pid)),
 			lost,
 			release: () => exclusive(release, release),
+			paused: () => {
+				const entry = read();
+				if (entry === undefined || entry.token !== mine.token) return undefined;
+				return entry.paused === true;
+			},
+			setPaused: (paused) => exclusive(() => setPaused(paused), () => setPaused(paused)),
 		};
 	};
 
@@ -215,9 +305,17 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 		return entry !== undefined && playing(entry);
 	};
 
+	const kindOf = (kind: ClaimKind = {}): Pick<Entry, "pausable" | "prompt"> => ({
+		...(kind.pausable ? { pausable: true as const } : {}),
+		...(kind.prompt ? { prompt: true as const } : {}),
+	});
+
+	/** Ends the reading in another session without touching what waits; true when one was playing or paused. */
+	const skip = (): boolean => takeOver({ token: randomUUID(), ...self(), stopped: true }, false);
+
 	return {
 		claim(options = {}): Claim {
-			const mine: Entry = { token: randomUUID(), ...self() };
+			const mine: Entry = { token: randomUUID(), ...self(), ...kindOf(options) };
 			const take = (): void => {
 				if (options.dropWaiting) dropWaiting();
 				takeOver(mine, true);
@@ -225,17 +323,29 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 			exclusive(take, take);
 			return held(mine);
 		},
-		claimIfFree(mark) {
+		claimIfFree(mark, kind) {
 			return exclusive<Claim | "busy" | "dropped">(
 				() => {
 					if (waitingMark() !== mark) return "dropped";
 					if (busy()) return "busy";
-					const mine: Entry = { token: randomUUID(), ...self() };
+					const mine: Entry = { token: randomUUID(), ...self(), ...kindOf(kind) };
 					write(mine);
 					return held(mine);
 				},
 				() => "busy",
 			);
+		},
+		swapProject(project) {
+			const swap = (): string | undefined => {
+				let previous: string | undefined;
+				try {
+					const saved = (JSON.parse(readFileSync(projects, "utf8")) as { project?: unknown })?.project;
+					if (typeof saved === "string") previous = saved;
+				} catch {}
+				if (previous !== project) put(projects, randomUUID(), { project });
+				return previous;
+			};
+			return exclusive(swap, swap);
 		},
 		busy,
 		waitingMark,
@@ -246,6 +356,96 @@ export function openReadingLock(env: NodeJS.ProcessEnv): ReadingLock | undefined
 				return takeOver({ token: randomUUID(), ...self(), stopped: true }, false);
 			};
 			return exclusive(stop, stop);
+		},
+		skipOthers: () => exclusive(skip, skip),
+		togglePause: () => {
+			const toggle = (): "paused" | "resumed" | "stopped" | "unsupported" | undefined => {
+				const entry = read();
+				if (entry === undefined || !playing(entry)) return undefined;
+				if (entry.prompt) return skip() ? "stopped" : undefined;
+				if (!entry.pausable) return "unsupported";
+				if (entry.paused) {
+					const { paused: _paused, ...rest } = entry;
+					write(rest);
+					return "resumed";
+				}
+				write({ ...entry, paused: true });
+				return "paused";
+			};
+			return exclusive(toggle, toggle);
+		},
+		publishLine(token, session, items, tag, asking) {
+			if (items.length === 0) {
+				try {
+					unlinkSync(lineFile(token));
+				} catch {}
+				return;
+			}
+			put(lineFile(token), token, {
+				token,
+				session,
+				tag: tag || token.slice(-4),
+				beat: Date.now(),
+				...(asking ? { asking: true } : {}),
+				pid: process.pid,
+				pidStart: startTime(process.pid),
+				items,
+			});
+		},
+		waitingList() {
+			let names: string[];
+			try {
+				names = readdirSync(dir).filter((name) => /^line-[\w-]+\.json$/.test(name));
+			} catch {
+				return [];
+			}
+			const mark = waitingMark();
+			const all: MachineWaiting[] = [];
+			/** Each listed session's tag, by token, and the tokens under each label. */
+			const tags = new Map<string, string>();
+			const labels = new Map<string, Set<string>>();
+			for (const name of names) {
+				try {
+					const line = JSON.parse(readFileSync(join(dir, name), "utf8")) as {
+						token?: unknown;
+						session?: unknown;
+						tag?: unknown;
+						beat?: unknown;
+						asking?: unknown;
+						pid?: unknown;
+						pidStart?: unknown;
+						items?: unknown;
+					};
+					if (typeof line.token !== "string" || typeof line.session !== "string" || !Number.isInteger(line.pid) || !Array.isArray(line.items)) continue;
+					// A session whose process is gone left its line behind: it waits for nothing.
+					if (!sameProcess(line.pid as number, typeof line.pidStart === "string" ? line.pidStart : undefined)) {
+						try {
+							unlinkSync(join(dir, name));
+						} catch {}
+						continue;
+					}
+					for (const item of line.items as Partial<WaitingItem>[]) {
+						if (typeof item?.name !== "string" || typeof item.at !== "number") continue;
+						const itemMark = typeof item.mark === "string" ? item.mark : undefined;
+						// Dropped by an explicit action since it was queued (S8): it will never play.
+						if (itemMark !== mark) continue;
+						const beat = typeof line.beat === "number" ? line.beat : undefined;
+						all.push({
+							name: item.name,
+							at: item.at,
+							mark: itemMark,
+							session: line.session,
+							token: line.token,
+							beat,
+							...(line.asking === true ? { asking: true as const } : {}),
+						});
+						tags.set(line.token, typeof line.tag === "string" && line.tag ? line.tag : line.token.slice(-4));
+						labels.set(line.session, (labels.get(line.session) ?? new Set<string>()).add(line.token));
+					}
+				} catch {}
+			}
+			for (const item of all) if ((labels.get(item.session)?.size ?? 0) > 1) item.session = `${item.session} #${tags.get(item.token)}`;
+			return all.sort((a, b) => a.at - b.at);
 		},
 	};
 }
@@ -259,38 +459,7 @@ function playing(entry: Entry): boolean {
 	return entry.player === undefined || isPlayer(entry.player, entry.playerStart);
 }
 
-/** A live process of this user with that pid, started when recorded (when recorded). */
-function sameProcess(pid: number, start: string | undefined): boolean {
-	try {
-		process.kill(pid, 0);
-	} catch {
-		return false;
-	}
-	return start === undefined || startTime(pid) === start;
-}
-
-/** Guards against pid reuse: only a live player we started, of this user, may be signalled. */
-function isPlayer(pid: number, start: string | undefined): boolean {
-	if (!sameProcess(pid, start)) return false;
-	try {
-		if (process.getuid && statSync(`/proc/${pid}`).uid !== process.getuid()) return false;
-		return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").includes(PLAYER_MARK);
-	} catch {
-		return false;
-	}
-}
-
 /** Blocks this thread for `ms`; only ever a few milliseconds, while another process holds the mutex. */
 function pause(ms: number): void {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-/** Field 22 of /proc/<pid>/stat, the process start time; undefined where /proc is missing. */
-function startTime(pid: number): string | undefined {
-	try {
-		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-		return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
-	} catch {
-		return undefined;
-	}
 }

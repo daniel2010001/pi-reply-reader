@@ -1,7 +1,8 @@
-# Carries pi-reply-reader's audio from the machine that runs Pi (here the HS) to the PipeWire of
-# the machine you sit at (here called "desktop"), over SSH. Use it when this machine can reach the
-# desktop (same LAN, Tailscale). For a cloud VPS that cannot reach the desktop, use
-# reply-reader-vps-audio.service on the desktop instead.
+# Carries pi-reply-reader's audio from the agent host (the machine that runs Pi; in this example a
+# home server) to the PipeWire of the listener (the machine you sit at; here called "desktop"), over
+# SSH. Use it when the agent host can reach the listener (same LAN, Tailscale); for a cloud VPS that
+# cannot reach it, use reply-reader-vps-audio.service on the listener instead. It also serves as the
+# "fallback" of a listener output that synthesizes on the listener (README, "Synthesize on the listener").
 #
 # Why a tunnel and not a TCP PulseAudio port on the desktop: pipewire-pulse has no IP allow-list,
 # so a LAN port would let anyone on the network play sound on the desktop or record its microphone

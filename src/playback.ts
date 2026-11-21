@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import type { Output } from "./outputs.ts";
-import { PLAYER_MARK } from "./reading-lock.ts";
+import { OWNER_VAR, ownerTag, PLAYER_MARK, playerTimeout, reapOrphans, terminate, track, withDeathSignal } from "./player.ts";
 import { DEFAULT_SPEED } from "./settings.ts";
 import type { Boundary, Fragment } from "./speech-text.ts";
 import { onPath, type Speaker, type Voice } from "./voice.ts";
@@ -26,6 +27,11 @@ export interface Reading {
 	/** Settles when the audio ends or the reading is stopped; rejects with a message for the user. */
 	readonly done: Promise<void>;
 	stop(): void;
+	/**
+	 * The index, in the fragments given, of the fragment being heard now (S15: a paused reading resumes from its start),
+	 * or of the next one during a pause after its fragment. 0 before any audio.
+	 */
+	position(): number;
 }
 
 const PAPLAY_MISSING =
@@ -35,6 +41,12 @@ const PAPLAY_MISSING =
 const SEED = 42;
 
 /**
+ * How far behind the time since a fragment was handed over the player is taken to be (S15): its connection, Pulse's
+ * buffer and pipe make what is heard lag what was written, so a pause rather resumes a little early than skip words.
+ */
+const HEARD_LAG_MS = 500;
+
+/**
  * Speaks `fragments` (from `speechNarration`, or `spokenFragments` for plain text) with `speaker` at `speed` (Supertonic's voice speed, 1.1 by default; our pauses do not
  * change with it) on `output`. Supertonic synthesizes one sentence at a time, so the first
  * audio comes after one sentence instead of the whole reply, and the next sentence is synthesized while the
@@ -42,6 +54,14 @@ const SEED = 42;
  * trailing silence and is followed right away by our pause for its boundary, then goes to `paplay` as raw 16-bit
  * mono PCM, on this machine's default sink or, for a named output, on its PULSE_SERVER. Nothing here
  * throws: every failure ends in `done`, and `stop()` ends the player and settles `done` quietly.
+ *
+ * A player that hangs (S13), such as paplay waiting forever on a Pulse server behind a broken SSH tunnel, is ended:
+ * when it takes no audio for the player timeout (REPLY_READER_PLAYER_TIMEOUT seconds in `env`, 15 by default) while
+ * audio waits for it, or does not end within the audio's length plus that timeout once it has all of it, it is killed
+ * and `done` rejects with `Playback on "<output>" failed: timed out` (a player that had already exited by then is
+ * not). Every kill is SIGTERM, then SIGKILL two seconds later; a player left by a reader that died is ended when the
+ * next reading starts, and this process's player dies with it (through `setpriv --pdeathsig KILL` when available, so
+ * even a reader killed outright takes it along).
  */
 export function startReading(options: {
 	voice: Voice;
@@ -54,10 +74,37 @@ export function startReading(options: {
 	speed?: number;
 	/** Told the player's pid once it starts, so another session can stop this reading (T21). */
 	onPlayer?: (pid: number) => void;
+	/**
+	 * The player timeout of S13 in milliseconds; REPLY_READER_PLAYER_TIMEOUT in `env` (or 15 s) when not given. Callers
+	 * pass playerTimeoutMs(env, warn), which also warns about an invalid value.
+	 */
+	timeoutMs?: number;
+	/**
+	 * Seconds of silence the player gets before the first fragment (S14: the gap before a reading that waited in the
+	 * line). Written at once, so the first synthesis overlaps it.
+	 */
+	leadSilence?: number;
 }): Reading {
 	const { voice, speaker, fragments: list, output, env, loadSherpa = loadSherpaTts, speed = DEFAULT_SPEED, onPlayer } = options;
 	let player: ChildProcess | undefined;
 	let stopped = false;
+	/** Set by the watchdog (S13): the player took no audio, or did not end, in time. */
+	let timedOut = false;
+	/** Set when the deadline passed after the player exited (S13 g): it settles on its exit, not on its pipes. */
+	let overdue = false;
+	/** Settles `done` from the player's exit status once it exited; set by `finished`. */
+	let settleExited: (() => void) | undefined;
+	/**
+	 * When each fragment handed to the player starts being heard (S15), modelled as real-time playback that waits for
+	 * audio when it runs out: a fragment starts when it is handed over or when the one before it ends, whichever is later.
+	 */
+	const heard: { index: number; at: number }[] = [];
+	let heardUntil = 0;
+	const handed = (index: number, samples: number, sampleRate: number): void => {
+		const at = Math.max(Date.now(), heardUntil);
+		heard.push({ index, at });
+		heardUntil = at + (samples / sampleRate) * 1000;
+	};
 
 	const run = async (): Promise<void> => {
 		const paplay = onPath("paplay", env);
@@ -71,10 +118,15 @@ export function startReading(options: {
 		}
 		if (stopped) return;
 
-		const playerEnv = output.pulseServer ? { ...env, PULSE_SERVER: output.pulseServer } : env;
+		const playerEnv = { ...env, ...(output.pulseServer ? { PULSE_SERVER: output.pulseServer } : {}), [OWNER_VAR]: ownerTag() };
 		const args = ["--raw", "--format=s16le", `--rate=${tts.sampleRate}`, "--channels=1", PLAYER_MARK, "--stream-name=reply"];
-		const child = spawn(paplay, args, { env: playerEnv, stdio: ["pipe", "ignore", "pipe"] });
+		// Players left playing or hung by a reader that died (S13) go before this one starts.
+		reapOrphans();
+		// Through setpriv, the player gets SIGKILL when this process dies however it dies (S13 h).
+		const [command, commandArgs] = withDeathSignal(onPath("setpriv", env), paplay, args);
+		const child = spawn(command, commandArgs, { env: playerEnv, stdio: ["pipe", "ignore", "pipe"] });
 		player = child;
+		track(child);
 		// A player that quits early closes its stdin; writing to it must not crash Pi.
 		child.stdin?.on("error", () => {});
 		const playback = finished(child, `Playback on "${output.name}" failed`);
@@ -88,19 +140,83 @@ export function startReading(options: {
 		// A player that exited takes nothing more, even before its pipes close.
 		child.once("exit", () => (playerGone = true));
 
-		// Fragments handed to stdin that the pipe has not taken yet; each write's callback fires once it has.
+		// The watchdog (S13): armed while a chunk waits for the player, and once all audio is handed over.
+		const timeout = options.timeoutMs ?? playerTimeout(env).ms;
+		let watchdog: NodeJS.Timeout | undefined;
+		const arm = (ms: number): void => {
+			clearTimeout(watchdog);
+			// setTimeout takes at most 2^31-1 ms (about 24.8 days); a longer wait would fire at once.
+			watchdog = setTimeout(() => {
+				if (stopped) return;
+				// A player that already exited is not hung (S13 g): settle on how it exited, without waiting for pipes a
+				// process it left behind may still hold.
+				if (exited(child)) {
+					overdue = true;
+					settleExited?.();
+					return;
+				}
+				timedOut = true;
+				playerGone = true;
+				terminate(child);
+				taken?.();
+			}, Math.min(ms, MAX_TIMER_MS));
+		};
+		gone.then(() => clearTimeout(watchdog));
+
+		// Fragments handed over that the pipe has not taken whole yet. Each fragment goes in CHUNK-byte writes, one at a
+		// time, so the watchdog sees a player that keeps taking a long fragment as alive.
 		let queued = 0;
 		let taken: (() => void) | undefined;
-		const send = (audio: Float32Array): void => {
-			queued++;
-			child.stdin?.write(pcm16(audio, speaker.gain), (error) => {
+		const backlog: { chunk: Buffer; last: boolean }[] = [];
+		let writing = false;
+		let ending = false;
+		let samplesSent = 0;
+		const pump = (): void => {
+			if (writing) return;
+			if (playerGone) backlog.length = 0;
+			const next = backlog.shift();
+			if (!next) {
+				if (ending) {
+					ending = false;
+					child.stdin?.end();
+					// The player has all the audio: it must end within the audio's length plus the timeout.
+					if (!playerGone) arm(Math.round((samplesSent / tts.sampleRate) * 1000) + timeout);
+				}
+				return;
+			}
+			writing = true;
+			arm(timeout);
+			child.stdin?.write(next.chunk, (error) => {
+				writing = false;
+				clearTimeout(watchdog);
 				// A write that fails means the player closed its input: it will take nothing more.
 				if (error) playerGone = true;
-				queued--;
-				taken?.();
+				if (next.last) {
+					queued--;
+					taken?.();
+				}
+				pump();
 			});
 		};
+		const send = (audio: Float32Array): void => {
+			queued++;
+			samplesSent += audio.length;
+			const bytes = pcm16(audio, speaker.gain);
+			for (let at = 0; at < bytes.length; at += CHUNK) {
+				backlog.push({ chunk: bytes.subarray(at, at + CHUNK), last: at + CHUNK >= bytes.length });
+			}
+			pump();
+		};
+		const close = (): void => {
+			ending = true;
+			pump();
+		};
 
+		const lead = Math.round((options.leadSilence ?? 0) * tts.sampleRate);
+		if (lead > 0) {
+			handed(0, lead, tts.sampleRate);
+			send(new Float32Array(lead));
+		}
 		// Samples of pause already written after the last audible fragment; undefined before the first one.
 		let paused: number | undefined;
 		for (const [index, fragment] of list.entries()) {
@@ -127,23 +243,26 @@ export function startReading(options: {
 			// A silent fragment is dropped, but a stronger boundary it ends still counts: top up the pause written.
 			if (!speech) {
 				if (paused !== undefined && after > paused) {
+					handed(index + 1, after - paused, tts.sampleRate);
 					send(new Float32Array(after - paused));
 					paused = after;
 				}
 				continue;
 			}
 			// Each pause goes right after its own fragment, so the next synthesis overlaps it too.
+			handed(index, speech.length, tts.sampleRate);
+			if (after) handed(index + 1, after, tts.sampleRate);
 			send(after ? concat(speech, new Float32Array(after)) : speech);
 			paused = after;
 		}
-		child.stdin?.end();
+		close();
 		await playback;
 	};
 
 	const done = run().then(
 		() => undefined,
 		(error: Error) => {
-			player?.kill();
+			if (player) terminate(player);
 			if (!stopped) throw error;
 		},
 	);
@@ -151,7 +270,16 @@ export function startReading(options: {
 		done,
 		stop() {
 			stopped = true;
-			player?.kill();
+			if (player) terminate(player);
+		},
+		position() {
+			const now = Date.now() - HEARD_LAG_MS;
+			let index = 0;
+			for (const segment of heard) {
+				if (segment.at > now) break;
+				index = segment.index;
+			}
+			return Math.min(index, Math.max(0, list.length - 1));
 		},
 	};
 
@@ -160,17 +288,45 @@ export function startReading(options: {
 		let stderr = "";
 		child.stderr?.on("data", (chunk: Buffer) => (stderr = (stderr + chunk.toString()).slice(-4096)));
 		return new Promise((resolve, reject) => {
-			child.on("error", (error) => reject(new Error(`${prefix}: ${error.message}`)));
-			// After stop, do not wait for pipes a grandchild may still hold open.
-			child.on("exit", () => stopped && resolve());
-			child.on("close", (code, signal) => {
-				if (code === 0 || stopped) return resolve();
+			const settle = (code: number | null, signal: NodeJS.Signals | null): void => {
+				if (stopped) return resolve();
+				if (timedOut) return reject(new Error(`${prefix}: timed out`));
+				if (code === 0) return resolve();
 				const last = stderr.trim().split("\n").at(-1)?.trim();
 				reject(new Error(`${prefix}: ${last || (signal ? `killed by ${signal}` : `exit code ${code}`)}`));
+			};
+			settleExited = () => {
+				if (child.exitCode !== null || child.signalCode !== null) settle(child.exitCode, child.signalCode);
+			};
+			child.on("error", (error) => reject(new Error(`${prefix}: ${error.message}`)));
+			// After stop, a timeout or a passed deadline, do not wait for pipes a grandchild may still hold open.
+			child.on("exit", (code, signal) => {
+				if (stopped || timedOut || overdue) settle(code, signal);
 			});
+			child.on("close", settle);
 		});
 	}
 }
+
+/** The longest delay setTimeout takes; a longer one fires at once with a TimeoutOverflowWarning. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * Whether `child` already exited: its exit was seen, or it is a zombie whose exit event has not come yet (the deadline
+ * and the exit can land in the same turn of the event loop).
+ */
+function exited(child: ChildProcess): boolean {
+	if (child.exitCode !== null || child.signalCode !== null) return true;
+	try {
+		const stat = readFileSync(`/proc/${child.pid}/stat`, "utf8");
+		return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) === "Z";
+	} catch {
+		return false;
+	}
+}
+
+/** Bytes per write to the player: about 0.37 s of audio at 44.1 kHz, well under a Linux pipe's 64 KiB. */
+const CHUNK = 32 * 1024;
 
 /**
  * Synthesized fragments that may wait for the player at once (T26): the one playing and the next one, ready.
