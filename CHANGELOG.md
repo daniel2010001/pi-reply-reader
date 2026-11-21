@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Auto-read shows it is on: while `/read-auto` is on, the footer says `Auto-read on · desktop` or
+  `Auto-read questions · desktop` (just `Auto-read on` before an output is chosen), also with nothing playing,
+  and `Auto-read on · Reading P12.R1 on desktop · Alt+M pauses` while the session reads. With it off the footer
+  is unchanged.
+- Auto-read and the output are remembered: the last `/read-auto` choice (on, questions, off; the toggle
+  included) and the last output (`/read-output`, or the pick at the first reading's question) are saved in
+  `settings.json` (`autoRead`, `output`, keeping the other keys) and every new Pi session starts with them.
+  Nothing saved starts as before (off, the output asked). A saved output gone from `outputs.json` warns
+  `Saved output "desktop" is not in …/outputs.json; choose one.` and the first reading asks. A saved "on"
+  never reads the replies already in the session.
+
 - Synthesis on the listener: an output in `outputs.json` can be `{ "ssh": "you@host", "fallback": "<PULSE_SERVER>" }`.
   The agent host sends each reading's fragments over SSH to `reply-reader --serve` on the listener, which
   synthesizes and plays them, so a slow agent host no longer delays readings. Pause/resume, `/read-stop`, the

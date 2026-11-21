@@ -610,7 +610,13 @@ const ctx = {
 		select: async (title) => { state.asked.push(title); save(); return undefined; },
 		confirm: async () => false,
 		custom: async () => { state.asked.push("custom"); save(); return undefined; },
-		setStatus: (_key, text) => { state.statuses.push(text ?? null); save(); },
+		// The reading's part of each footer change: the auto-read indicator (S23) taken off, null when only it is left.
+		setStatus: (_key, text) => {
+			const indicator = /^Auto-read (?:on|questions)(?: · (.*))?$/.exec(text ?? "");
+			const part = !indicator ? (text ?? null) : indicator[1] && /^(?:Reading|Paused) /.test(indicator[1]) ? indicator[1] : null;
+			if (part !== (state.statuses.length > 0 ? state.statuses.at(-1) : null)) state.statuses.push(part);
+			save();
+		},
 		onTerminalInput: () => () => {},
 	},
 };

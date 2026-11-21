@@ -5,7 +5,7 @@ import { basename, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Component, type KeyId, SelectList } from "@earendil-works/pi-tui";
 import { createAutoQueue, type StartResult } from "../src/auto-queue.ts";
-import { loadOutputs, type Output } from "../src/outputs.ts";
+import { configFile, loadOutputs, type Output } from "../src/outputs.ts";
 import { keyName, loadPauseKey } from "../src/pause-key.ts";
 import { startOutputReading } from "../src/listener.ts";
 import type { Reading, SherpaTts } from "../src/playback.ts";
@@ -17,7 +17,7 @@ import { isPing, parseReadRequest, READER_EVENTS, READER_EVENTS_VERSION } from "
 import { type Claim, openReadingLock, type WaitingItem } from "../src/reading-lock.ts";
 import { findReply, latestReply, listReplies } from "../src/replies.ts";
 import { sectionFrom } from "../src/sections.ts";
-import { formatSpeed, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSpeed } from "../src/settings.ts";
+import { formatSpeed, loadSaved, loadSpeed, parseSpeed, SPEED_CHOICES, SPEED_HINT, saveSettings, saveSpeed } from "../src/settings.ts";
 import {
 	announcement,
 	detectLanguage,
@@ -145,7 +145,8 @@ function readProblem(error: NodeJS.ErrnoException): string {
  * One reading per machine (S1, T21): through `$XDG_RUNTIME_DIR/pi-reply-reader/`, a new reading in any session
  * stops the one playing in another, `/read-stop` stops it too, and the session stopped that way just clears its footer.
  * `/read <target>#<section>` reads only the section under a matching heading, or on to the end with `rest` (S9). `/read-auto` (S8) reads each new reply, or only its
- * "Needs your decision" section, as soon as it is stored, each once and in order (T42); it is off at every session start. Auto-read never
+ * "Needs your decision" section, as soon as it is stored, each once and in order (T42); its last choice, and the output's, are saved in settings.json
+ * for new sessions (S24; none saved: off, the output asked), and the footer shows it while on (S23). Auto-read never
  * interrupts (S8 Queue, T32): a reply due while a reading plays here or in another session waits, in order, and is read
  * once the machine is free; an explicit /read (or read request) or /read-stop drops every reply waiting on the
  * machine (the pause key pauses instead, S15), and /read-auto off or the session's end drops this session's. A reading that waited in this line starts after
@@ -192,8 +193,6 @@ export function createReplyReader(
 			/** What the footer names, and where it sounds. */
 			name: string;
 			output: string;
-			/** The footer last shown for it. */
-			shown?: string;
 			/** A blocking prompt's reading (S18): its answer stops it, and a pause ends it instead (S15). */
 			prompt?: string;
 			/** The fragment `reading` started from; paused, the one it resumes from (S15). */
@@ -202,7 +201,7 @@ export function createReplyReader(
 			play: (from: number) => void;
 		}
 		let current: Current | undefined;
-		/** The output chosen in this session, by name; asked on the first reading. */
+		/** The output chosen in this session, by name: the saved one (S24), else asked on the first reading. */
 		let chosen: string | undefined;
 		/** The voice for the next reading in this session (S3: male unless changed). */
 		let speaker: SpeakerName = "male";
@@ -219,8 +218,10 @@ export function createReplyReader(
 		const pauseName = keyName(pauseKey.key);
 		/** Whether the problem with `pauseKey` was told (once, at the first session start with a UI). */
 		let pauseKeyWarned = false;
-		/** This session's auto-read mode (S8: off at session start). */
+		/** This session's auto-read mode (S8: off at session start unless settings.json saved one, S24). */
 		let auto: AutoMode = "off";
+		/** The footer last shown (S14, S23): shown again only when it changed. */
+		let shownFooter: string | undefined;
 		/**
 		 * The entry IDs of the replies auto-read already queued or must never read (S8 Timing, T42): those on the branch
 		 * when auto-read was turned on or the branch changed under it. Every other final reply is queued once.
@@ -412,18 +413,34 @@ export function createReplyReader(
 		/**
 		 * Shows this session's reading in the footer, with how many readings wait on the machine (S14, S16):
 		 * `Reading P12.R2 on local · 2 waiting · Alt+M pauses`, or paused (S15) `Paused P12.R2 · Alt+M resumes · /read-stop ends`.
-		 * Shown again only when it changed.
+		 * While auto-read is on (S23) it always shows it, with the chosen output while nothing is read here
+		 * (`Auto-read on · desktop`, `Auto-read questions`) and before the reading's status while one is
+		 * (`Auto-read on · Reading P12.R2 on desktop · Alt+M pauses`). Shown again only when it changed.
 		 */
-		const footer = (): void => {
-			if (!current) return;
-			const waiting = waitingCount();
-			const count = waiting > 0 ? `${waiting} waiting · ` : "";
-			const text = current.reading
-				? `Reading ${current.name} on ${current.output} · ${count}${pauseName} pauses`
-				: `Paused ${current.name} · ${count}${pauseName} resumes · /read-stop ends`;
-			if (text === current.shown) return;
-			current.shown = text;
-			current.ctx.ui.setStatus(STATUS, text);
+		const footer = (ctx: ExtensionContext | undefined = current?.ctx ?? latest): void => {
+			let reading: string | undefined;
+			if (current) {
+				const waiting = waitingCount();
+				const count = waiting > 0 ? `${waiting} waiting · ` : "";
+				reading = current.reading
+					? `Reading ${current.name} on ${current.output} · ${count}${pauseName} pauses`
+					: `Paused ${current.name} · ${count}${pauseName} resumes · /read-stop ends`;
+			}
+			const mode = auto === "off" ? undefined : `Auto-read ${auto === "full" ? "on" : "questions"}`;
+			const text = mode ? [mode, reading ?? chosen].filter(Boolean).join(" · ") : reading;
+			if (text === shownFooter || !ctx) return;
+			shownFooter = text;
+			ctx.ui.setStatus(STATUS, text);
+		};
+
+		/** Saves `values` in settings.json for new sessions (S24); the reason it could not, else undefined. */
+		const save = (values: Record<string, unknown>): string | undefined => {
+			try {
+				saveSettings(env, values);
+				return undefined;
+			} catch (error) {
+				return (error as Error).message;
+			}
 		};
 
 		/** Ends this session's reading, playing or paused, and clears its footer; another session's reading is left alone. */
@@ -434,7 +451,7 @@ export function createReplyReader(
 			clearInterval(watch);
 			reading?.stop();
 			claim?.release();
-			ctx.ui.setStatus(STATUS, undefined);
+			footer(ctx);
 			// A reply waiting for this reading may start now.
 			queue.kick();
 		};
@@ -476,7 +493,12 @@ export function createReplyReader(
 			if (!ctx.hasUI) return undefined;
 			const label = await own(() => ctx.ui.select(ASK_OUTPUT, list.map((output) => output.label)));
 			const output = list.find((candidate) => candidate.label === label);
-			if (output) chosen = output.name;
+			if (!output) return undefined;
+			chosen = output.name;
+			footer(ctx);
+			// The pick is remembered for new sessions (S24).
+			const unsaved = save({ output: output.name });
+			if (unsaved) ctx.ui.notify(`Readings will sound on ${output.label} in this session, but ${unsaved}.`, "warning");
 			return output;
 		};
 
@@ -838,7 +860,7 @@ export function createReplyReader(
 		});
 
 		command("read-output", {
-			description: "Choose where readings sound: local or an output from outputs.json",
+			description: "Choose where readings sound: local or an output from outputs.json; saved for later sessions",
 			getArgumentCompletions: (prefix) =>
 				loadOutputs(env, hostname)
 					.outputs.filter((output) => output.name.startsWith(prefix.trim()))
@@ -858,6 +880,12 @@ export function createReplyReader(
 						return;
 					}
 					chosen = output.name;
+					footer(ctx);
+					const unsaved = save({ output: output.name });
+					if (unsaved) {
+						ctx.ui.notify(`Readings will sound on ${output.label} in this session, but ${unsaved}.`, "warning");
+						return;
+					}
 				} else {
 					output = await askOutput(ctx, list);
 					if (!output) return;
@@ -921,7 +949,7 @@ export function createReplyReader(
 
 		command("read-auto", {
 			description:
-				'Read each new reply aloud as soon as it is written, and each prompt that waits for you, in this session: on (in full), questions (only "Needs your decision"), off; no argument toggles',
+				'Read each new reply aloud as soon as it is written, and each prompt that waits for you: on (in full), questions (only "Needs your decision"), off; no argument toggles; saved for later sessions',
 			getArgumentCompletions: (prefix) =>
 				AUTO_CHOICES.filter((choice) => choice.value.startsWith(prefix.trim())).map((choice) => ({ ...choice, label: choice.value })),
 			handler: async (args, ctx) => {
@@ -936,11 +964,12 @@ export function createReplyReader(
 				auto = modes[wanted];
 				// Off drops this session's waiting replies (S8); other sessions' are theirs. A request the user chose to read
 				// after the current one is not an auto-read and stays (T33).
-				if (auto === "off") {
-					queue.clear((item) => item.manual === true);
-					footer();
-				}
-				ctx.ui.notify(AUTO_MESSAGES[auto], "info");
+				if (auto === "off") queue.clear((item) => item.manual === true);
+				footer(ctx);
+				// The choice is remembered for new sessions (S24).
+				const unsaved = save({ autoRead: auto === "full" ? "on" : auto });
+				if (unsaved) ctx.ui.notify(`${AUTO_MESSAGES[auto].slice(0, -1)} in this session, but ${unsaved}.`, "warning");
+				else ctx.ui.notify(AUTO_MESSAGES[auto], "info");
 			},
 		});
 
@@ -1098,14 +1127,22 @@ export function createReplyReader(
 			latest = ctx;
 			// Players left by a Pi that died (S13 h): a hung paplay spins at about a core until it is ended.
 			reapOrphans();
-			auto = "off";
+			// The last choices of /read-auto and /read-output, as saved (S24); none saved: off, the output asked.
+			const saved = loadSaved(env);
+			auto = saved.autoRead === "on" ? "full" : saved.autoRead === "questions" ? "questions" : "off";
 			queue.clear();
-			seen = new Set();
+			// Saved on: what is already on the branch is never read (S8: no reply of earlier turns).
+			seen = auto === "off" ? new Set() : replyIds(ctx);
 			pending.clear();
 			writtenBefore = new Map();
 			prompts.clear();
 			spanPrompts = [];
 			chosen = undefined;
+			if (saved.output) {
+				// A saved output gone from outputs.json is not used: the first reading asks, as with none saved (S24).
+				if (loadOutputs(env, hostname).outputs.some((output) => output.name === saved.output)) chosen = saved.output;
+				else ctx.ui.notify(`Saved output "${saved.output}" is not in ${configFile(env, "outputs.json") ?? "outputs.json"}; choose one.`, "warning");
+			}
 			speaker = "male";
 			warned = false;
 			sessionSpeed = undefined;
@@ -1115,14 +1152,18 @@ export function createReplyReader(
 				pauseKeyWarned = true;
 				ctx.ui.notify(pauseKey.problem, "warning");
 			}
+			// The saved auto-read shows from the session's start (S23).
+			footer(ctx);
 			listen();
 		});
 
 		pi.on("session_shutdown", () => {
 			generation++;
-			// The session's end drops its waiting replies (S8), before its reading ends and would start one.
+			// The session's end drops its waiting replies (S8), before its reading ends and would start one; its footer goes.
+			auto = "off";
 			queue.clear();
 			stop();
+			footer();
 			openReadingLock(env)?.publishLine(lineToken, sessionLabel(), []);
 			unsubscribeEvents?.();
 			unsubscribeEvents = undefined;

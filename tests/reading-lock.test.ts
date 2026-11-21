@@ -67,7 +67,15 @@ const ctx = {
 			return undefined;
 		},
 		confirm: async () => false,
-		setStatus: (_key, text) => { state.statuses.push(text ?? null); save(); },
+		// The reading's part of each footer change: the auto-read indicator (S23) taken off, null when only it is left,
+		// repeats skipped; footers keeps every footer as shown.
+		setStatus: (_key, text) => {
+			(state.footers ??= []).push(text ?? null);
+			const indicator = /^Auto-read (?:on|questions)(?: · (.*))?$/.exec(text ?? "");
+			const part = !indicator ? (text ?? null) : indicator[1] && /^(?:Reading|Paused) /.test(indicator[1]) ? indicator[1] : null;
+			if (part !== (state.statuses.length > 0 ? state.statuses.at(-1) : null)) state.statuses.push(part);
+			save();
+		},
 		onTerminalInput: (handler) => ((input = handler), () => (input = undefined)),
 		custom: (factory) => new Promise((resolve) => {
 			const component = factory({ requestRender() {} }, { fg: (_color, text) => text, bold: (text) => text }, undefined, resolve);
