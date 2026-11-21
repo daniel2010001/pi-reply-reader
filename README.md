@@ -80,6 +80,19 @@ While a reading plays, the footer shows `Reading P12.R1 on local · Esc stops` (
   reading of the session you press it in.
 - The output and the voice last for the session. A new session starts with the male voice and asks for the
   output again on its first reading (only when there is more than `local` to choose from).
+- **A player that hangs is ended.** When `paplay` takes no audio for 15 s while audio waits for it (say, its
+  Pulse server sits behind an SSH tunnel whose far side does not answer), or does not finish within the
+  audio's length plus 15 s once it has all of it, the reading stops with
+  `Playback on "<output>" failed: timed out`. Set `REPLY_READER_PLAYER_TIMEOUT` (seconds, whole or
+  fractional, from 5 to 86400, in the environment Pi or `reply-reader` runs in) to change the 15 s; any other
+  value warns `REPLY_READER_PLAYER_TIMEOUT must be a number of seconds from 5 to 86400; using 15.` once and
+  uses 15. A player that keeps taking audio, however slowly, is never cut. Every stop, a new reading, a failed
+  reading and a timeout send `paplay` SIGTERM, then SIGKILL 2 s later if it is still there; `reply-reader`
+  waits for that before it exits. A player is also killed when Pi or `reply-reader` exits (even when killed
+  outright, where `setpriv` is installed), and one left behind by a Pi that died is ended when a Pi session
+  starts or the next reading starts. Only players started by this package (marked with
+  `--client-name=pi-reply-reader` and the `PI_REPLY_READER_OWNER` variable naming a process that is gone, in
+  the same PID namespace) are touched.
 
 ### Reply IDs
 
@@ -365,7 +378,9 @@ encryption. The unit is in [`examples/reply-reader-desktop-audio.service`](examp
 5. In Pi, `/read-output desktop`, then `/read`.
 
 The tunnel is down while the desktop is off; the unit retries every 15 s, and a reading on `desktop` fails
-with `Playback on "desktop" failed: …` in the meantime. To keep the tunnel running after you log out of the
+with `Playback on "desktop" failed: …` in the meantime. When the tunnel is up but the desktop does not
+answer, `paplay` would wait forever; the reading fails with `Playback on "desktop" failed: timed out`
+after 15 s instead (`REPLY_READER_PLAYER_TIMEOUT`, 5 to 86400 seconds, changes it). To keep the tunnel running after you log out of the
 server, enable lingering for your user there (`loginctl enable-linger`).
 
 The desktop needs only PipeWire (with pipewire-pulse) or PulseAudio and an SSH server. It needs no TTS, no

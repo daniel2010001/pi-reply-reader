@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A player that hangs no longer piles up: when `paplay` takes no audio for 15 s (say, a Pulse server behind an
+  SSH tunnel whose far side does not answer), or does not finish within the audio's length plus 15 s, the
+  reading fails with `Playback on "<output>" failed: timed out`. `REPLY_READER_PLAYER_TIMEOUT` sets the 15 s
+  (5 to 86400 seconds; any other value warns once and uses 15). Every stop sends SIGTERM, then SIGKILL 2 s
+  later if the player is still there, also from `reply-reader` before it exits. Players left by a Pi that
+  died are ended when a Pi session or a reading starts, and with `setpriv` installed a player dies with its
+  reader even when that is killed outright. Only this package's own players, in the same PID namespace, are
+  touched.
 - Numbers are spoken as words in the text's language (Supertonic mispronounced digits): "51" "cincuenta y
   uno", with Spanish "un"/"una" agreement by the next word, decimals, versions and IP addresses group by group,
   and numbers over 9 digits or starting with 0 digit by digit.

@@ -6,6 +6,7 @@ import { type Component, Key, matchesKey, SelectList } from "@earendil-works/pi-
 import { createAutoQueue, type StartResult } from "../src/auto-queue.ts";
 import { loadOutputs, type Output } from "../src/outputs.ts";
 import { type Reading, type SherpaTts, startReading } from "../src/playback.ts";
+import { playerTimeoutMs, reapOrphans } from "../src/player.ts";
 import { questionsSection } from "../src/questions.ts";
 import { isPing, parseReadRequest, READER_EVENTS, READER_EVENTS_VERSION } from "../src/reader-events.ts";
 import { type Claim, openReadingLock } from "../src/reading-lock.ts";
@@ -296,6 +297,8 @@ export function createReplyReader(
 				claim = lock?.claim({ dropWaiting: true });
 			}
 			const speed = speedForReading(ctx);
+			// An invalid REPLY_READER_PLAYER_TIMEOUT is reported once per process and the default used (S13 f).
+			const timeoutMs = playerTimeoutMs(env, (message) => ctx.ui.notify(message, "warning"));
 			/** Stopped by another session: no message, just the footer. */
 			const stoppedElsewhere = (): void => {
 				if (current?.reading === reading) stop();
@@ -308,6 +311,7 @@ export function createReplyReader(
 				env,
 				loadSherpa: deps.loadSherpa,
 				speed,
+				timeoutMs,
 				onPlayer: (pid) => {
 					if (claim && !claim.setPlayer(pid)) stoppedElsewhere();
 				},
@@ -596,6 +600,8 @@ export function createReplyReader(
 		pi.on("session_start", (_event, ctx) => {
 			generation++;
 			latest = ctx;
+			// Players left by a Pi that died (S13 h): a hung paplay spins at about a core until it is ended.
+			reapOrphans();
 			auto = "off";
 			queue.clear();
 			running = false;
